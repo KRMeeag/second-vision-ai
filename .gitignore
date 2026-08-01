@@ -1,0 +1,85 @@
+# ==========================
+# Python
+# ==========================
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+
+.venv/
+venv/
+env/
+
+# ==========================
+# IDE
+# ==========================
+.vscode/
+.idea/
+
+# macOS
+.DS_Store
+
+# Windows
+Thumbs.db
+
+# ==========================
+# Jupyter
+# ==========================
+.ipynb_checkpoints/
+
+# ==========================
+# Dataset
+# ==========================
+
+dataset/sources/
+dataset/processed/
+dataset/merged/
+dataset/final/
+
+# Keep folder structure
+!dataset/sources/.gitkeep
+!dataset/processed/.gitkeep
+!dataset/merged/.gitkeep
+!dataset/final/.gitkeep
+
+# Reports generated automatically
+dataset/reports/*.csv
+dataset/reports/*.json
+dataset/reports/*.txt
+
+# ==========================
+# Training outputs
+# ==========================
+
+runs/
+wandb/
+tensorboard/
+
+# ==========================
+# Models
+# ==========================
+
+models/weights/
+models/onnx/
+models/hef/
+models/archived/
+
+!models/current/
+!models/current/README.md
+
+# ==========================
+# Temporary
+# ==========================
+
+*.log
+*.tmp
+*.cache
+
+.cache/
+
+# ==========================
+# Google Colab
+# ==========================
+
+content/
