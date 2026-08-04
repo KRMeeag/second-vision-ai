@@ -2,53 +2,267 @@
 # Second Vision AI — Canonical Class Configuration
 # ============================================================
 #
-# This is the AUTHORITATIVE class list for the project.
-# All dataset converters, training configs, and evaluation
-# scripts must reference this file.
+# This is the AUTHORITATIVE class list and source mapping for
+# the project. All dataset converters, acquisition scripts,
+# training configs, and evaluation scripts must reference this
+# file.
 #
-# DO NOT modify without updating DECISIONS.md (DEC-002).
+# DO NOT modify without updating DECISIONS.md.
+# Supersedes DEC-002 via DEC-015, DEC-021.
 #
 # Note: Hailo runtime injects a Background class at index 0,
 # shifting all IDs by +1 at deployment time.
+#
+# Schema: HANDOFF v3 Section 6 (frozen 2026-08-04)
 # ============================================================
 
-# Number of classes
+# --- Annotation Policy ---
+annotation_policy:
+  canonical_bbox_mode: visible
+  description: >
+    Boxes must tightly enclose the visible extent of each object.
+    Hidden object extent must not be estimated. See DEC-012.
+
+# --- Number of classes ---
 nc: 15
 
-# Class names (0-indexed for YOLO training)
+# --- Class names (0-indexed for YOLO training) ---
 names:
   0: Person
   1: Vehicle
   2: Two Wheeler
-  3: Cart
+  3: Pole
   4: Animals
   5: Stairs
   6: Escalator
   7: Doors
   8: Chairs
   9: Tables
-  10: Wet Floor Sign
+  10: Tricycle
   11: Potholes
   12: Trash Bins
   13: Elevator
   14: Pedestrian Lane
 
-# Hailo runtime mapping (after background class injection)
-# This is for reference only — used when generating custom label JSON
+# --- Hailo runtime mapping (after background class injection) ---
+# Reference only — used when generating custom label JSON
 hailo_runtime_names:
   0: Background
   1: Person
   2: Vehicle
   3: Two Wheeler
-  4: Cart
+  4: Pole
   5: Animals
   6: Stairs
   7: Escalator
   8: Doors
   9: Chairs
   10: Tables
-  11: Wet Floor Sign
+  11: Tricycle
   12: Potholes
   13: Trash Bins
   14: Elevator
   15: Pedestrian Lane
+
+# --- Per-Class Source Configuration ---
+# Defines primary, secondary, and low-light augmentation providers
+# for each class, along with caps and fill-order semantics.
+#
+# Fields:
+#   primary / primary_providers:    main data source(s)
+#   secondary / secondary_providers: supplemental source(s)
+#   lowlight_augment:               ExDark cross-cutting layer (6 eligible classes)
+#   cap:                            max images per class (null = uncapped)
+#   role:                           diversity | volume_topup
+#   native_class_filter:            source-side class name(s) to extract
+#   audit_note:                     blockers that must be resolved via Stage 5.0
+#   status:                         confirmed | possible
+#   guaranteed_floor:               if true, ExDark images reserved before primary fill
+
+classes:
+  person:
+    id: 0
+    primary:
+      source: objects365
+      native_class: "Person"
+    secondary:
+      source: crowdhuman
+      box_type: vbox
+      role: volume_topup
+    lowlight_augment:
+      source: exdark
+      native_class: "People"
+      guaranteed_floor: true
+    cap: 5000
+
+  vehicle:
+    id: 1
+    primary:
+      source: objects365
+      native_class: ["Car", "Bus", "Truck"]
+    secondary_providers:
+      - source: roboflow
+        project: "machine-exercise-5/me5-u6rvg"
+      - source: roboflow
+        project: "lozanomartirezquimno-thesis/jeep-hozhs"
+      - source: roboflow
+        project: "yoloffico/traffico-y1"
+        native_class_filter: "TBD-post-audit"
+        audit_note: >
+          Confirm class list before use; possible overlap with
+          tricycle/two_wheeler. Resolve during Stage 5.0 fork.
+    secondary_role: diversity
+    lowlight_augment:
+      source: exdark
+      native_class: "Car"
+      guaranteed_floor: true
+    cap: 5000
+
+  two_wheeler:
+    id: 2
+    primary:
+      source: objects365
+      native_class: "Motorcycle"
+    secondary:
+      source: open_images
+      native_class: ["Motorcycle", "Bicycle"]
+      role: volume_topup
+    lowlight_augment:
+      source: exdark
+      native_class: ["Motorbike", "Bicycle"]
+      guaranteed_floor: true
+    cap: 5000
+
+  pole:
+    id: 3
+    primary_providers:
+      - source: roboflow
+        project: "test-j2maq/pole-detection-z76mb"
+        native_class_filter: "pole"
+        note: >
+          Native class in original project is
+          "Utility pole detection - v1 2023-05-17 3:44pm" —
+          rename to "pole" in forked copy per D-018.
+    cap: null
+
+  animals:
+    id: 4
+    primary:
+      source: objects365
+      native_class: ["Dog", "Cat", "Horse"]
+    lowlight_augment:
+      source: exdark
+      native_class: ["Dog", "Cat"]
+      guaranteed_floor: true
+    cap: 5000
+
+  stairs:
+    id: 5
+    primary_providers:
+      - source: roboflow
+        project: "stairs-n9kkx/stairs-lusiz"
+      - source: roboflow
+        project: "abeera-munir-v9edc/stairs-hsatv"
+      - source: roboflow
+        project: "tom-lai-8bp7n/stairs-i2yia"
+      - source: roboflow
+        project: "escalatorstairsdetection/escalator-stairs"
+        native_class_filter: "stairs"
+    cap: null
+
+  escalator:
+    id: 6
+    primary_providers:
+      - source: roboflow
+        project: "escalatorstairsdetection/escalator-stairs"
+        native_class_filter: "escalator"
+    cap: null
+
+  doors:
+    id: 7
+    primary_providers:
+      - source: roboflow
+        project: "testspace-xwkgk/cv-project-hovyc"
+    cap: null
+
+  chairs:
+    id: 8
+    primary:
+      source: objects365
+      native_class: "Chair"
+    lowlight_augment:
+      source: exdark
+      native_class: "Chair"
+      guaranteed_floor: true
+    cap: 5000
+
+  tables:
+    id: 9
+    primary:
+      source: objects365
+      native_class: "Table"
+    lowlight_augment:
+      source: exdark
+      native_class: "Table"
+      guaranteed_floor: true
+    cap: 5000
+
+  tricycle:
+    id: 10
+    status: possible
+    primary_providers:
+      - source: roboflow
+        project: "traffico-augmented/augmented-tricycle"
+      - source: roboflow
+        project: "yoloffico/traffico-y1"
+        native_class_filter: "Tricycle"
+        role: volume_topup
+    cap: null
+
+  potholes:
+    id: 11
+    primary:
+      source: dataset_ninja
+      dataset_name: "pothole-detection"
+      format: pascal_voc
+    secondary:
+      source: dataset_ninja
+      dataset_name: "road-damage-detector"
+      native_class_filter: "pothole"
+      role: volume_topup
+    cap: 5000
+
+  trash_bins:
+    id: 12
+    primary:
+      source: objects365
+      native_class: "Trash bin Can"
+    secondary_providers:
+      - source: roboflow
+        project: "TBD"
+        audit_note: "Secondary Roboflow project not yet identified."
+    secondary_role: diversity
+    cap: 5000
+
+  elevator:
+    id: 13
+    primary_providers:
+      - source: roboflow
+        project: "detection-3h20r/elevator-awvus"
+      - source: roboflow
+        project: "rightly-ai-huxry/elevator-status-s4lrk"
+        audit_note: >
+          Verify detection vs classification taxonomy before
+          including. Resolve during Stage 5.0 fork.
+    cap: null
+
+  pedestrian_lane:
+    id: 14
+    primary_providers:
+      - source: roboflow
+        project: "anomaly-road-crossing-detection/pedestrian-and-animal-crossing"
+        native_class_filter: "pedestrian_crossing"
+        audit_note: >
+          Multi-class source, also contains animal-crossing.
+          Confirm exact class label once forked.
+    cap: null

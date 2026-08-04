@@ -168,7 +168,7 @@ Use the **validation split** as the Hailo calibration dataset, following the off
 ## DEC-005: Multi-Source Dataset Strategy
 
 - **Date:** 2026-07-31
-- **Status:** Accepted
+- **Status:** Superseded (by DEC-012 through DEC-023, 2026-08-04)
 
 ### Context
 
@@ -177,6 +177,8 @@ No single public dataset contains all 15 target classes with sufficient quantity
 ### Decision
 
 Combine **multiple public sources** (COCO, Open Images, Mapillary, Roboflow) with custom-collected images, unified under a single class mapping.
+
+> **Superseded:** The finalized source list (HANDOFF v3, 2026-08-04) replaced COCO and Mapillary with Objects365, CrowdHuman, ExDark, and Dataset Ninja. Custom image collection was dropped. Open Images was retained in a reduced role (Two Wheeler secondary only). See DEC-013, DEC-014, DEC-016, DEC-017, DEC-018 for the full revised source strategy.
 
 ### Rationale
 
@@ -198,6 +200,364 @@ Combine **multiple public sources** (COCO, Open Images, Mapillary, Roboflow) wit
 - Careful deduplication is needed when sources share underlying images
 - Class distributions will be imbalanced across sources — requires monitoring and potential resampling
 - Annotation quality may vary across sources — validation scripts must catch inconsistencies
+
+---
+
+## DEC-012: Canonical Bounding-Box Semantics
+
+- **Date:** 2026-08-04
+- **Status:** Accepted
+
+### Context
+
+Different source datasets use different bounding-box conventions. CrowdHuman provides three box types (fbox/hbox/vbox), Objects365 uses native boxes of uncertain modality, and ExDark uses `l,t,w,h` absolute coordinates. A project-wide policy was needed before any conversion work began.
+
+### Decision
+
+All exported YOLO labels represent the **visible extent** of objects, not estimated/hidden (amodal) extent.
+
+- **CrowdHuman**: use `vbox` field only. Discard `fbox`/`hbox` from training export; retain as metadata for future ablation. Entries tagged `mask` or with `extra.ignore == 1`: exclude entirely.
+- **Objects365**: native boxes retained after manual visual audit (~100-200 samples/class). Labeled `bbox_mode: native_unspecified` pending audit.
+- **Roboflow/Dataset Ninja projects**: each audited independently (~50-100 samples), labeled `bbox_mode: project_dependent`.
+- **ExDark**: native `l,t,w,h` boxes, treated as `native_unspecified` pending same visual audit as Objects365.
+
+### Rationale
+
+Visible-extent boxes are the appropriate semantic for obstacle detection in assistive navigation — the user needs to know where the object *is*, not where it might extend behind another object.
+
+### Consequences
+
+- `box_audit.py` must sample and verify box modality for every `native_unspecified` and `project_dependent` source before data enters the training pipeline.
+
+---
+
+## DEC-013: Mapillary Vistas Shelved
+
+- **Date:** 2026-08-04
+- **Status:** Deferred
+
+### Context
+
+Mapillary Vistas was originally planned as a primary data source. Investigation revealed that the Dataset Ninja "mapillary-vistas-dataset" link is a re-hosted mirror of Mapillary Vistas itself, not a separate dataset.
+
+### Decision
+
+Mapillary Vistas is **not part of the current pipeline**. Shelved for potential future use.
+
+### Rationale
+
+- The Dataset Ninja mirror does not add distinct data
+- Mapillary Vistas licensing adds complexity
+- The Potholes use case (original reason for considering Mapillary) is now covered by dedicated Dataset Ninja pothole datasets (DEC-016)
+
+### Consequences
+
+- All references to Mapillary as a data source must be removed from documentation
+- If revisited later, it should be logged as a new decision
+
+---
+
+## DEC-014: ExDark as Cross-Cutting Low-Light Augmentation Layer
+
+- **Date:** 2026-08-04
+- **Status:** Accepted
+
+### Context
+
+The ExDark (Exclusively Dark Image Dataset) contains ~7,363 low-light images across 12 object classes. Rather than treating it as a primary or secondary source for individual classes, a strategy for leveraging its unique condition-diversity value was needed.
+
+### Decision
+
+ExDark is a **cross-cutting low-light augmentation layer** that injects low-light image variants into **six classes**: Person, Vehicle, Two Wheeler, Chairs, Tables, Animals — the classes present in both ExDark's 12-class taxonomy and our canonical list.
+
+ExDark images are subject to a **guaranteed floor** rule in `cap_per_class.py`: available ExDark images are reserved FIRST before Primary/Secondary volume fills the cap, preventing them from being crowded out.
+
+Use `wraphex/ExDark2Yolo` parser as the basis for `convert/exdark_to_intermediate.py`.
+
+### Rationale
+
+- ExDark's value is **condition diversity** (low-light), not volume (~600-900 images per eligible class)
+- Without a guaranteed floor, Primary source volume (Objects365) would easily fill the 5000 cap before ExDark images are considered
+- Low-light conditions are directly relevant to the assistive-navigation deployment scenario
+
+### Consequences
+
+- `cap_per_class.py` implements 3-tier fill logic with ExDark floor reservation
+- ExDark class mappings (People→Person, Car→Vehicle, Motorbike/Bicycle→Two Wheeler, Dog/Cat→Animals) are documented in `config/datasets.yaml`
+
+---
+
+## DEC-015: Wet Floor Sign Dropped, Tricycle Added
+
+- **Date:** 2026-08-04
+- **Status:** Accepted
+
+### Context
+
+No viable public dataset source was found for the Wet Floor Sign class. The Philippine deployment context motivated adding Tricycle as a detection class.
+
+### Decision
+
+- **Wet Floor Sign** (formerly ID 10) is **dropped** from the canonical schema.
+- **Tricycle** is **added at ID 10** with `status: possible` — included in the pipeline but may be removed if source quality is insufficient.
+
+### Rationale
+
+- Wet Floor Sign: exhaustive search of Roboflow Universe, Dataset Ninja, and public benchmarks found no usable annotated dataset
+- Tricycle: common motorized three-wheeler in Philippine streets; multiple Roboflow datasets available (augmented-tricycle, traffico-y1)
+- ID 10 slot reuse avoids schema reordering that would ripple through all other class references
+
+### Consequences
+
+- `nc` remains 15 (14 confirmed + 1 possible)
+- Tricycle sources require Stage 5.0 fork review (traffico-y1 in particular — see DEC-017)
+- If Tricycle is ultimately dropped, ID 10 becomes unused and `nc` reduces to 14
+
+---
+
+## DEC-016: Potholes Source Finalized as Dataset Ninja
+
+- **Date:** 2026-08-04
+- **Status:** Accepted
+
+### Context
+
+The original plan designated Mapillary Vistas and Roboflow as Potholes sources. After Mapillary was shelved (DEC-013), dedicated pothole datasets were identified on Dataset Ninja.
+
+### Decision
+
+Potholes (ID 11) sourced from two Dataset Ninja datasets:
+- **Primary**: `pothole-detection` — 665 images, single-class (pothole), PASCAL VOC format
+- **Secondary**: `road-damage-detector` (RDD2022) — 47,420 images, 7 classes total. Class-filtered at conversion time to extract only `pothole`-tagged instances. Role: `volume_topup`.
+
+Cap of **5000** applies.
+
+### Rationale
+
+- `pothole-detection` is low friction — single class, clean annotations, standard VOC format
+- `road-damage-detector` provides volume but requires filtering (same pattern as Objects365 multi-class extraction)
+- In practice, the filtered pothole count from RDD2022 will likely be the binding constraint, not the 5000 cap
+
+### Consequences
+
+- `voc_to_intermediate.py` converter needed for the primary source
+- `coco_style_to_intermediate.py` handles RDD2022 with `native_class_filter: pothole`
+- Dedup check needed between the two Dataset Ninja sets (possible shared source imagery)
+
+---
+
+## DEC-017: Multi-Provider / Multi-Class Roboflow Sources
+
+- **Date:** 2026-08-04
+- **Status:** Accepted
+
+### Context
+
+Several canonical classes draw from multiple Roboflow projects, and some Roboflow projects span multiple canonical classes. The config schema needed to support this many-to-many relationship.
+
+### Decision
+
+`config/classes.yaml` supports a **list of providers per class**, each with an optional `native_class_filter` field. Affected classes:
+- **Stairs**: 3 dedicated projects + filtered slice of escalator-stairs
+- **Escalator**: filtered slice of escalator-stairs
+- **Elevator**: 2 projects (one flagged for audit)
+- **Pedestrian Lane**: pedestrian-and-animal-crossing (filtered)
+- **Tricycle**: augmented-tricycle + traffico-y1 (filtered)
+- **Vehicle secondary**: Jeepney projects + traffico-y1
+
+**Mandatory audits before pipeline commitment:**
+- `elevator-status-s4lrk` — possible classification-vs-detection mismatch
+- `traffico-y1` — possible cross-class overlap across Vehicle/Two-Wheeler/Tricycle
+
+### Rationale
+
+- Several niche classes have no single dominant dataset — aggregation is necessary
+- The `native_class_filter` pattern mirrors Objects365 multi-class handling
+- Audit gates prevent bad data from entering the pipeline silently
+
+### Consequences
+
+- `acquire_roboflow.py` must iterate over a list of `(project_id, native_class_filter)` pairs per canonical class
+- Dedup checks across providers within the same canonical class are essential (e.g., Stairs' 4 sources)
+
+---
+
+## DEC-018: Fork-and-Fix Workflow for Roboflow-Native Sources
+
+- **Date:** 2026-08-04
+- **Status:** Accepted
+
+### Context
+
+Roboflow Universe projects are community-contributed and may contain annotation errors, missing labels, or inconsistent class naming. A workflow was needed to ensure annotation quality before data enters the pipeline.
+
+### Decision
+
+For every Roboflow Universe project used as a source, **fork the project into our own workspace before acquisition**. Correction/annotation-gap-filling happens directly in the forked copy using Roboflow's native UI (health check, class balance tools, manual re-annotation), prior to `acquire_roboflow.py` ever running against it.
+
+`config/datasets.yaml` stores the **forked project ID**, not the original public URL, as the acquisition target. Original source URL, fork date, and correction notes are retained for provenance.
+
+### Rationale
+
+- Roboflow's built-in tools (health check, class balance, annotation UI) are purpose-built for this kind of correction
+- Forking preserves the original project untouched while allowing corrections
+- Fixing before acquisition means downstream scripts never encounter known-bad annotations
+- Audit gates (DEC-017) are resolved during this stage
+
+### Consequences
+
+- `config/datasets.yaml` has a `forked_project_id` field per Roboflow project — initially `TBD-post-fork`
+- `acquire_roboflow.py` must read from `datasets.yaml` to get the forked project ID
+- Stage 5.0 (Fork & Fix) is a manual/semi-manual stage that precedes all scripted acquisition
+
+---
+
+## DEC-019: Model-Assisted Curation for Large-Scale Sources
+
+- **Date:** 2026-08-04
+- **Status:** Accepted
+
+### Context
+
+Large-scale sources (Objects365, CrowdHuman, ExDark, Open Images, RDD2022) contain too many images for manual review. A scalable approach to annotation quality was needed.
+
+### Decision
+
+After per-class capping (Stage 5.4), use FiftyOne's `compute_mistakenness()` to rank samples by predicted-vs-ground-truth disagreement, surfacing both wrong labels and missing annotations. Only the **flagged subset** is sent to CVAT/Label Studio (via FiftyOne's annotation integrations) for manual correction, then re-imported to overwrite into `dataset/curated/`.
+
+### Rationale
+
+- The capped per-class pool (≤5000 images) is the first point where review is tractable
+- `compute_mistakenness()` uses a pretrained model's predictions as a signal — high disagreement between prediction and ground truth flags likely annotation errors
+- Sending only flagged samples to CVAT/Label Studio keeps manual effort focused
+- Separating pre-correction (`dataset/processed/`) and post-correction (`dataset/curated/`) states maintains auditability
+
+### Consequences
+
+- FiftyOne is a hard dependency (`requirements.txt`)
+- `scripts/curate/run_mistakenness.py` runs a pretrained YOLOv8 model for predictions
+- `scripts/curate/reimport_corrections.py` pulls fixes back from CVAT/Label Studio
+- Curation logs written to `dataset/reports/curation_log_<source>.json`
+
+---
+
+## DEC-020: Final Pre-Split Curation Gate
+
+- **Date:** 2026-08-04
+- **Status:** Accepted
+
+### Context
+
+Per-source curation (DEC-019) happens on individual per-class pools. Cross-source issues (e.g., inconsistent class conventions between near-duplicate images from different sources) are invisible at the per-source stage.
+
+### Decision
+
+After merge + cross-source dedup (Stage 5.6), run one final FiftyOne mistakenness pass on the **fully merged pool** before `split.py` executes. Corrections at this stage are fixed in place — they do not re-enter capping/merging. This is the last correction checkpoint.
+
+### Rationale
+
+- Merging creates new adjacencies between images from different sources that may reveal inconsistencies
+- A final gate ensures the training data has been reviewed at every aggregation level: per-source, per-class-capped, and merged
+- The "fix in place, no re-entry" rule prevents infinite correction loops
+
+### Consequences
+
+- `scripts/curate/final_merge_curation.py` implements this gate
+- Split proceeds immediately after — no further corrections allowed
+- Any issues found after splitting should be logged for the next training iteration, not patched retroactively
+
+---
+
+## DEC-021: Cart Dropped, Pole Added
+
+- **Date:** 2026-08-04
+- **Status:** Accepted
+
+### Context
+
+Cart (ID 3) was included in the original 15-class schema (DEC-002) but no viable public dataset source was identified during the dataset acquisition planning phase. Poles (utility poles, street poles) are common obstacles in Philippine street environments and a Roboflow dataset was identified.
+
+### Decision
+
+- **Cart** (formerly ID 3) is **dropped** from the canonical schema.
+- **Pole** is **added at ID 3**.
+- Source: Roboflow project `test-j2maq/pole-detection-z76mb` (~3,100 images, single class).
+
+### Rationale
+
+- Cart: no annotated dataset found across Roboflow Universe, Dataset Ninja, Objects365, or other public sources
+- Pole: utility poles and street poles are common physical obstacles in Philippine urban/suburban environments; visually distinct enough for reliable detection
+- ID 3 slot reuse avoids schema reordering
+- Per D-018, the Roboflow source will be forked and the native class label (currently a dataset-title string) renamed to "pole"
+
+### Consequences
+
+- `nc` remains 15
+- Pole is treated as an uncapped, Roboflow-only class (similar tier to Stairs, Doors, Escalator)
+- No ExDark cross-cutting applies (ExDark does not contain pole annotations)
+- `config/datasets.yaml` includes the `pole-detection-z76mb` project entry
+
+---
+
+## DEC-022: YOLOv8n → YOLOv8s Upgrade
+
+- **Date:** 2026-08-04
+- **Status:** Accepted (supersedes DEC-003 variant selection)
+
+### Context
+
+DEC-003 established YOLOv8n (nano) as the baseline architecture, noting that upgrading to YOLOv8s was straightforward if needed. During dataset planning, the larger and more diverse dataset (Objects365 + multi-source aggregation) motivated reconsidering the model capacity.
+
+### Decision
+
+Upgrade the training target from **YOLOv8n** (nano) to **YOLOv8s** (small).
+
+### Rationale
+
+- The finalized dataset is substantially larger and more diverse than originally planned — YOLOv8s has more capacity to leverage this
+- YOLOv8s remains well within Hailo-8's computational budget (26 TOPS)
+- YOLOv8s is supported in the Hailo Model Zoo with documented compilation paths
+- The accuracy improvement from n→s is meaningful for an assistive safety application
+
+### Consequences
+
+- `config/training.yaml` baseline changes from `yolov8n.pt` to `yolov8s.pt`
+- ONNX export and Hailo DFC compilation paths remain identical
+- Inference latency increases slightly but remains within real-time requirements
+- DEC-003's core rationale (YOLOv8 family, Hailo compatibility) is unchanged
+
+---
+
+## DEC-023: Pole Source Designated
+
+- **Date:** 2026-08-04
+- **Status:** Accepted
+
+### Context
+
+After adding Pole to the canonical schema at ID 3 (DEC-021), a source dataset needed to be designated.
+
+### Decision
+
+Use Roboflow project **`test-j2maq/pole-detection-z76mb`** as the primary (and only) source for the Pole class.
+
+- ~3,100 images, single class
+- Native class label in original project: `"Utility pole detection - v1 2023-05-17 3:44pm"` — rename to `"pole"` in forked copy per D-018
+- No cap (naturally volume-limited)
+- No ExDark cross-cutting
+- Standard D-018 fork-and-fix workflow applies
+
+### Rationale
+
+- Single-class dataset reduces class-filtering complexity
+- Volume (~3,100) is adequate for an obstacle class
+- Per DEC-018, annotation quality will be reviewed in the forked copy before acquisition
+
+### Consequences
+
+- `pole-detection-z76mb` added to `config/datasets.yaml` under `roboflow_projects`
+- `classes.yaml` pole entry references this project
+- Fork workflow (Stage 5.0) must rename the class label before acquisition
 
 ---
 
@@ -224,3 +584,4 @@ Combine **multiple public sources** (COCO, Open Images, Mapillary, Roboflow) wit
 ### Consequences
 [Expected impact, tradeoffs, and follow-up actions]
 ```
+

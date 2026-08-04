@@ -54,7 +54,7 @@ This repository focuses on the **AI model pipeline** — producing the YOLOv8 ob
 | Layer | Technology |
 |-------|-----------|
 | Inference Runtime | HailoRT + GStreamer pipeline |
-| Detection Model | YOLOv8n → HEF (this repo produces this) |
+| Detection Model | YOLOv8s → HEF (this repo produces this) |
 | Depth Model | SC-DepthV3 → HEF (separate) |
 | Application | `second_vision` Python package |
 | TTS Engine | pyttsx3 / espeak-ng |
@@ -81,21 +81,21 @@ The detection model provides **semantic object identification** that complements
 
 ## Target Classes
 
-15 classes selected from user research (survey data, Figures B.6–B.11):
+15 classes (14 confirmed + 1 possible) selected from user research (survey data, Figures B.6–B.11):
 
 | ID | Class | Category | Why It Matters |
 |----|-------|----------|---------------|
 | 0 | Person | Dynamic hazard | 80% struggle with unpredictable crowds |
 | 1 | Vehicle | Life safety | High-mass kinetic threat during outdoor transit |
 | 2 | Two Wheeler | Life safety | Fast-moving, common in Philippine streets |
-| 3 | Cart | Dynamic hazard | Erratic movement, hard edges |
+| 3 | Pole | Static obstacle | Utility poles as common street-level collision hazard |
 | 4 | Animals | Dynamic hazard | Unpredictable, low-level living obstacles |
 | 5 | Stairs | Elevation | 84% struggle with elevation changes |
 | 6 | Escalator | Elevation | Moving tread requires distinct interaction |
 | 7 | Doors | Navigation | 84% struggle to locate exact doors |
 | 8 | Chairs | Waypoint | 84% struggle finding empty seating |
 | 9 | Tables | Obstacle + Navigation | 100% cite tables as path blockers |
-| 10 | Wet Floor Sign | Safety (invisible to depth) | 100% cite unexpected obstacles |
+| 10 | Tricycle | Life safety (possible) | Common Philippine motorized three-wheeler |
 | 11 | Potholes | Safety (invisible to depth) | Shallow ground anomalies |
 | 12 | Trash Bins | Obstacle | Frequently relocated barriers |
 | 13 | Elevator | Navigation + Elevation | Multi-floor transit, specific interaction |
@@ -146,13 +146,16 @@ Training (this repo)          Runtime (after Hailo)
 
 | Source | Type | Expected Contribution |
 |--------|------|----------------------|
-| MS COCO 2017 | Public benchmark | Person, Vehicle, Chair, etc. |
-| Google Open Images V7 | Large-scale annotated | Diverse objects and scenes |
-| Mapillary Vistas | Street-level imagery | Vehicles, pedestrians, infrastructure |
-| Roboflow datasets | Community curated | Niche classes (escalators, potholes) |
-| Custom-collected | Project-specific | Deployment-representative images |
+| Objects365 | Large-scale detection | Primary for Person, Vehicle, Two Wheeler, Animals, Chairs, Tables, Trash Bins |
+| CrowdHuman | Person-focused detection | Secondary (volume_topup) for Person |
+| ExDark | Low-light imagery | Cross-cutting augmentation for 6 classes (DEC-014) |
+| Google Open Images V7 | Large-scale annotated | Secondary (volume_topup) for Two Wheeler |
+| Roboflow Universe (14 projects) | Community curated + forked | Stairs, Escalator, Doors, Elevator, Pedestrian Lane, Tricycle, Pole, Vehicle secondary |
+| Dataset Ninja (2 datasets) | Pothole-specific | Primary + secondary for Potholes |
 
-All sources are mapped into the single canonical 15-class schema.
+All sources are mapped into the single canonical 15-class schema. Roboflow sources are forked into our workspace before acquisition (DEC-018).
+
+> **Dropped sources:** MS COCO 2017 (replaced by Objects365), Mapillary Vistas (shelved — DEC-013), Custom-collected (not planned).
 
 ---
 

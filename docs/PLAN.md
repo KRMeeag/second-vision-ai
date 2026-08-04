@@ -1,8 +1,10 @@
 # PLAN.md — Second Vision AI Implementation Roadmap
 
-> **Last updated:** 2026-07-31
+> **Last updated:** 2026-08-04
+>
+> Pipeline architecture: HANDOFF v3 (frozen 2026-08-04)
 
-This document outlines the phased implementation plan for the Second Vision AI model pipeline. Each phase builds on the previous one, progressing from dataset foundation through to deployment-ready model production.
+This document outlines the phased implementation plan for the Second Vision AI model pipeline. The dataset pipeline follows a 10-stage architecture (Stages 5.0–5.9) defined in HANDOFF v3, progressing from Roboflow fork-and-fix through final YAML generation.
 
 ---
 
@@ -20,97 +22,143 @@ This document outlines the phased implementation plan for the Second Vision AI m
 | Write DECISIONS.md | ✅ Done |
 | Write TASKS.md | ✅ Done |
 | Create `.gitignore` | ✅ Done |
-| Create `config/classes.yaml` | ✅ Done |
-| Create `.gitkeep` files for empty directories | ⬜ Todo |
+| Create `config/classes.yaml` (v2 — full provider schema) | ✅ Done |
+| Create `config/datasets.yaml` (per-source config) | ✅ Done |
+| Create `.gitkeep` files for empty directories | ✅ Done |
+| Scaffold directory structure per HANDOFF v3 | ✅ Done |
+| Align docs with HANDOFF v3 + DEC-012–023 | ✅ Done |
 | Create `requirements.txt` | ⬜ Todo |
 
 ---
 
 ## Phase 1: Configuration & Tooling
 
-**Goal:** Set up the canonical class list, dataset configuration, and shared utility scripts.
+**Goal:** Set up tooling dependencies, shared utilities, and validate configuration files.
 
 | Task | Status |
 |------|--------|
-| Finalize `config/classes.yaml` with 15-class schema | ⬜ Todo |
-| Create `config/datasets.yaml` with source configurations | ⬜ Todo |
-| Create `config/training.yaml` with baseline hyperparameters | ⬜ Todo |
-| Build `scripts/utils/file_utils.py` | ⬜ Todo |
-| Build `scripts/utils/bbox_utils.py` | ⬜ Todo |
-| Build `scripts/utils/image_utils.py` | ⬜ Todo |
-| Set up `requirements.txt` with pinned dependencies | ⬜ Todo |
+| Create `requirements.txt` with pinned dependencies | ⬜ Todo |
+| Install and verify FiftyOne | ⬜ Todo |
+| Install and verify Roboflow SDK | ⬜ Todo |
+| Verify CVAT/Label Studio integration via FiftyOne | ⬜ Todo |
+| Build `scripts/utils/file_utils.py` — path helpers, safe copy/move | ⬜ Todo |
+| Build `scripts/utils/bbox_utils.py` — bbox validation, conversion, clipping | ⬜ Todo |
+| Build `scripts/utils/image_utils.py` — image reading, validation, hashing | ⬜ Todo |
+| Build `scripts/utils/config_loader.py` — YAML config reader | ⬜ Todo |
+| Create `config/training.yaml` with YOLOv8s baseline hyperparameters | ⬜ Todo |
+
+### Key Dependencies
+
+| Tool | Purpose |
+|------|---------|
+| FiftyOne | Dataset curation, mistakenness detection, dedup, CVAT/LS integration |
+| Roboflow SDK | Roboflow project forking and dataset download |
+| Ultralytics | YOLOv8s training target + pretrained model for mistakenness |
+| supervision | Dataset Ninja format handling |
 
 ---
 
-## Phase 2: Dataset Acquisition & Conversion
+## Phase 2: Dataset Pipeline (Stages 5.0–5.9)
 
-**Goal:** Download source datasets and convert each to YOLO format with canonical class mapping.
+**Goal:** Execute the full dataset acquisition, conversion, curation, merging, and splitting pipeline.
 
-| Task | Status |
-|------|--------|
-| Document download instructions for each source | ⬜ Todo |
-| Build `scripts/convert/coco_to_yolo.py` | ⬜ Todo |
-| Build `scripts/convert/openimages_to_yolo.py` | ⬜ Todo |
-| Build `scripts/convert/mapillary_to_yolo.py` | ⬜ Todo |
-| Build `scripts/convert/roboflow_to_yolo.py` | ⬜ Todo |
-| Verify each converter outputs valid YOLO labels | ⬜ Todo |
-| Generate per-source statistics reports | ⬜ Todo |
+This phase follows the frozen 10-stage pipeline from HANDOFF v3. Each stage produces outputs consumed by the next stage, with audit gates enforced at key checkpoints.
 
-### Class Mapping Strategy
-
-Each converter must map source-specific class names to the canonical 15-class IDs:
-
-```
-Source Class Name → Canonical ID
-─────────────────────────────────
-"person", "pedestrian", "man", "woman" → 0 (Person)
-"car", "truck", "bus", "van"          → 1 (Vehicle)
-"bicycle", "motorcycle"               → 2 (Two Wheeler)
-...
-```
-
-Unmapped classes are **discarded**, not force-mapped.
-
----
-
-## Phase 3: Dataset Preprocessing & Validation
-
-**Goal:** Clean, deduplicate, and validate the converted datasets before merging.
+### Stage 5.0: Fork & Fix (Roboflow-native sources) — DEC-018
 
 | Task | Status |
 |------|--------|
-| Build `scripts/preprocess/filter_classes.py` | ⬜ Todo |
-| Build `scripts/preprocess/rename_files.py` | ⬜ Todo |
-| Build `scripts/preprocess/remove_duplicates.py` | ⬜ Todo |
-| Build `scripts/preprocess/validate_labels.py` | ⬜ Todo |
-| Build `scripts/preprocess/dataset_statistics.py` | ⬜ Todo |
-| Run validation on all processed sources | ⬜ Todo |
-| Review and resolve flagged issues | ⬜ Todo |
+| Fork all Roboflow projects into workspace | ⬜ Todo |
+| Run health check + class balance review on each fork | ⬜ Todo |
+| Resolve audit: `elevator-status-s4lrk` (detection vs classification) | ⬜ Todo |
+| Resolve audit: `traffico-y1` (full class list, cross-class overlap) | ⬜ Todo |
+| Resolve audit: `pedestrian-and-animal-crossing` (confirm class names) | ⬜ Todo |
+| Rename class label in `pole-detection-z76mb` fork (`→ "pole"`) | ⬜ Todo |
+| Correct/fill annotations in forked copies | ⬜ Todo |
+| Record forked project IDs in `config/datasets.yaml` | ⬜ Todo |
 
-### Validation Checks
-
-- [ ] No missing label files for images
-- [ ] No corrupt or unreadable images
-- [ ] All bounding boxes within `[0, 1]` normalized range
-- [ ] All class IDs in `[0, 14]` range
-- [ ] No duplicate images within each source
-- [ ] No empty label files (images with no annotations flagged for review)
-
----
-
-## Phase 4: Dataset Merging & Splitting
-
-**Goal:** Combine all sources into a single unified dataset and create train/val/test splits.
+### Stage 5.1: Acquisition
 
 | Task | Status |
 |------|--------|
-| Build `scripts/build/merge_datasets.py` | ⬜ Todo |
-| Build `scripts/build/split_dataset.py` | ⬜ Todo |
-| Build `scripts/build/create_data_yaml.py` | ⬜ Todo |
-| Build `scripts/build/build_dataset.py` (orchestrator) | ⬜ Todo |
-| Generate merged dataset statistics | ⬜ Todo |
+| Build `scripts/acquire/acquire_objects365.py` | ⬜ Todo |
+| Verify Objects365 native class name strings (Blocker #5) | ⬜ Todo |
+| Build `scripts/acquire/acquire_crowdhuman.py` | ⬜ Todo |
+| Build `scripts/acquire/acquire_exdark.py` | ⬜ Todo |
+| Build `scripts/acquire/acquire_openimages.py` (FiftyOne Zoo) | ⬜ Todo |
+| Build `scripts/acquire/acquire_datasetninja.py` | ⬜ Todo |
+| Build `scripts/acquire/acquire_roboflow.py` (from forked projects) | ⬜ Todo |
+
+### Stage 5.2: Conversion
+
+| Task | Status |
+|------|--------|
+| Build `scripts/convert/coco_style_to_intermediate.py` | ⬜ Todo |
+| Build `scripts/convert/crowdhuman_odgt_to_intermediate.py` | ⬜ Todo |
+| Build `scripts/convert/exdark_to_intermediate.py` | ⬜ Todo |
+| Build `scripts/convert/voc_to_intermediate.py` | ⬜ Todo |
+| Build `scripts/convert/yolo_to_intermediate.py` | ⬜ Todo |
+
+### Stage 5.3: Box Audit
+
+| Task | Status |
+|------|--------|
+| Build `scripts/preprocess/box_audit.py` | ⬜ Todo |
+| Run box audit on all `native_unspecified` sources | ⬜ Todo |
+| Run box audit on all `project_dependent` sources | ⬜ Todo |
+| Review and approve audit results | ⬜ Todo |
+
+### Stage 5.4: Per-Class Capping
+
+| Task | Status |
+|------|--------|
+| Build `scripts/preprocess/cap_per_class.py` (3-tier fill logic) | ⬜ Todo |
+| Run capping — verify ExDark guaranteed floor applied | ⬜ Todo |
+| Review `dataset/reports/cap_report.json` | ⬜ Todo |
+
+### Stage 5.5: Model-Assisted Curation — DEC-019
+
+| Task | Status |
+|------|--------|
+| Build `scripts/curate/run_mistakenness.py` (FiftyOne) | ⬜ Todo |
+| Build `scripts/curate/reimport_corrections.py` (CVAT/LS) | ⬜ Todo |
+| Run mistakenness on capped pools | ⬜ Todo |
+| Review and correct flagged samples in CVAT/Label Studio | ⬜ Todo |
+| Re-import corrections into `dataset/curated/` | ⬜ Todo |
+
+### Stage 5.6: Merge + Dedup
+
+| Task | Status |
+|------|--------|
+| Build `scripts/build/merge.py` | ⬜ Todo |
+| Build `scripts/preprocess/dedup.py` | ⬜ Todo |
+| Run merge with source-prefixed filenames | ⬜ Todo |
+| Run cross-source dedup (highest risk pairs flagged) | ⬜ Todo |
+
+### Stage 5.7: Final Pre-Split Curation Gate — DEC-020
+
+| Task | Status |
+|------|--------|
+| Build `scripts/curate/final_merge_curation.py` | ⬜ Todo |
+| Run final mistakenness pass on merged pool | ⬜ Todo |
+| Fix flagged samples in place | ⬜ Todo |
+
+### Stage 5.8: Split
+
+| Task | Status |
+|------|--------|
+| Build `scripts/build/split.py` (source-stratified) | ⬜ Todo |
 | Verify no cross-split data leakage | ⬜ Todo |
 | Verify class distribution across splits | ⬜ Todo |
+| Verify source representation across splits | ⬜ Todo |
+
+### Stage 5.9: YAML Generation
+
+| Task | Status |
+|------|--------|
+| Build `scripts/build/generate_yaml.py` | ⬜ Todo |
+| Generate final `data.yaml` for YOLOv8s | ⬜ Todo |
+| Verify generated YAML matches `config/classes.yaml` schema | ⬜ Todo |
 
 ### Split Strategy
 
@@ -120,18 +168,18 @@ Unmapped classes are **discarded**, not force-mapped.
 | Val | ~10-15% | Evaluation + Hailo calibration dataset |
 | Test | ~10-15% | Final holdout evaluation |
 
-> **Critical:** The validation split doubles as the Hailo calibration dataset. It must be representative of the deployment domain.
+> **Critical:** The validation split doubles as the Hailo calibration dataset. It must be representative of the deployment domain and retain proportional source representation per class.
 
 ---
 
-## Phase 5: Baseline Training
+## Phase 3: Baseline Training
 
-**Goal:** Train an initial YOLOv8 model and establish baseline metrics.
+**Goal:** Train an initial YOLOv8s model and establish baseline metrics.
 
 | Task | Status |
 |------|--------|
 | Create `notebooks/train_yolov8.ipynb` | ⬜ Todo |
-| Train YOLOv8n baseline with default augmentation | ⬜ Todo |
+| Train YOLOv8s baseline with default augmentation | ⬜ Todo |
 | Log baseline metrics (mAP, precision, recall per class) | ⬜ Todo |
 | Generate confusion matrix | ⬜ Todo |
 | Document experiment in `docs/experiments.md` | ⬜ Todo |
@@ -140,7 +188,7 @@ Unmapped classes are **discarded**, not force-mapped.
 ### Baseline Configuration
 
 ```yaml
-model: yolov8n.pt        # Nano — fastest, most deployment-friendly
+model: yolov8s.pt        # Small — upgraded from nano per DEC-022
 imgsz: 640               # Standard, Hailo-compatible
 epochs: 100              # With early stopping patience
 batch: 16                # Adjust based on GPU memory
@@ -148,7 +196,7 @@ batch: 16                # Adjust based on GPU memory
 
 ---
 
-## Phase 6: ONNX Export & Validation
+## Phase 4: ONNX Export & Validation
 
 **Goal:** Export the trained model to ONNX and verify export integrity.
 
@@ -161,7 +209,7 @@ batch: 16                # Adjust based on GPU memory
 
 ---
 
-## Phase 7: Hailo Compilation Preparation
+## Phase 5: Hailo Compilation Preparation
 
 **Goal:** Prepare the ONNX model for Hailo DFC compilation.
 
@@ -175,7 +223,7 @@ batch: 16                # Adjust based on GPU memory
 
 ---
 
-## Phase 8: Iteration & Optimization
+## Phase 6: Iteration & Optimization
 
 **Goal:** Improve model performance based on evaluation results.
 
@@ -190,7 +238,7 @@ batch: 16                # Adjust based on GPU memory
 
 ---
 
-## Phase 9: Final Model Production
+## Phase 7: Final Model Production
 
 **Goal:** Produce the final deployment-ready model.
 
@@ -211,12 +259,14 @@ Key decisions that will arise during execution:
 
 | Decision | Phase | Notes |
 |----------|-------|-------|
-| Which COCO classes to include | 2 | Not all 80 COCO classes are needed |
-| Duplicate detection threshold | 3 | Perceptual hash distance cutoff |
-| Train/val/test split ratios | 4 | Balance between training data and evaluation quality |
-| YOLOv8 variant (n/s/m) | 5 | Nano is baseline; larger variants may improve accuracy |
-| Image size (640 vs 320) | 5 | Tradeoff between accuracy and inference speed |
-| Augmentation strategy | 8 | Mosaic, mixup, color jitter configurations |
-| Class-specific thresholds | 8 | Safety-critical classes may need lower confidence thresholds |
+| Objects365 native class name strings | 2 (5.1) | Verify before writing acquire script — Blocker #5 |
+| traffico-y1 canonical class contributions | 2 (5.0) | Resolve during fork review — Blocker #2 |
+| elevator-status-s4lrk taxonomy | 2 (5.0) | Verify during fork review — Blocker #3 |
+| Stairs source narrowing (4 → fewer?) | 2 (5.0/5.3) | After fork + box audit quality comparison |
+| Duplicate detection threshold | 2 (5.6) | Perceptual hash distance cutoff |
+| Train/val/test split ratios | 2 (5.8) | Balance between training data and evaluation quality |
+| Image size (640 vs 320) | 3 | Tradeoff between accuracy and inference speed |
+| Augmentation strategy | 6 | Mosaic, mixup, color jitter configurations |
+| Class-specific thresholds | 6 | Safety-critical classes may need lower confidence thresholds |
 
-These decisions will be documented in [DECISIONS.md](file:///Users/luna/Projects/Thesis/second-vision-ai/DECISIONS.md) as they are made.
+These decisions will be documented in [DECISIONS.md](file:///Users/luna/Projects/Thesis/second-vision-ai/docs/DECISIONS.md) as they are made.

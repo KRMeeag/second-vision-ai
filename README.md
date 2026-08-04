@@ -2,7 +2,7 @@
 
 **Dataset curation, model training, and export pipeline for the Second Vision assistive navigation system.**
 
-Second Vision is an IoT-based smart glass for visually impaired users. This repository contains everything needed to produce a deployment-ready YOLOv8 object detection model — from raw dataset curation through ONNX export and Hailo compilation preparation.
+Second Vision is an IoT-based smart glass for visually impaired users. This repository contains everything needed to produce a deployment-ready YOLOv8s object detection model — from raw dataset curation through ONNX export and Hailo compilation preparation.
 
 > **Note:** This repository does **not** contain embedded production code. Raspberry Pi runtime, threading, UART communication, ESP32 integration, and application logic are maintained in the separate [second-vision](https://github.com/KRMeeag/second-vision) production repository.
 
@@ -10,7 +10,7 @@ Second Vision is an IoT-based smart glass for visually impaired users. This repo
 
 ## Objective
 
-Produce a YOLOv8 model that:
+Produce a YOLOv8s model that:
 
 1. Performs well on the target assistive navigation use case
 2. Exports successfully to ONNX
@@ -25,13 +25,15 @@ Every decision in this repository is evaluated against the **full deployment pip
 ## End-to-End Pipeline
 
 ```
-Dataset Collection
+Dataset Acquisition (Objects365, CrowdHuman, ExDark, Open Images, Roboflow, Dataset Ninja)
        ↓
-Dataset Curation (class mapping, annotation normalization)
+Roboflow Fork & Fix (DEC-018) → Conversion → Box Audit → Per-Class Capping
        ↓
-Dataset Validation (integrity checks, duplicate detection)
+Model-Assisted Curation (FiftyOne mistakenness — DEC-019)
        ↓
-YOLOv8 Training (Ultralytics)
+Merge + Dedup → Final Curation Gate (DEC-020) → Source-Stratified Split
+       ↓
+YOLOv8s Training (Ultralytics)
        ↓
 ONNX Export
        ↓
@@ -46,27 +48,27 @@ Deployment via hailo-apps on Raspberry Pi 5
 
 ## Target Classes
 
-The following **15 classes** define the canonical label schema for this project:
+The following **15 classes** (14 confirmed + 1 possible) define the canonical label schema:
 
 | ID | Class | Rationale |
-|----|-------|-----------|
+|----|-------|-----------| 
 | 0 | Person | Dynamic collision hazard — crowds and moving pedestrians |
 | 1 | Vehicle | High-mass kinetic threat during outdoor transit |
 | 2 | Two Wheeler | Fast-moving hazard common in Philippine streets |
-| 3 | Cart | Erratically moving obstacle in malls and streets |
+| 3 | Pole | Utility poles as common street-level collision obstacles |
 | 4 | Animals | Unpredictable low-level living obstacles (dogs, cats) |
 | 5 | Stairs | Elevation change requiring rhythmic stepping preparation |
 | 6 | Escalator | Moving tread requiring timing and handrail location |
 | 7 | Doors | Primary navigational anchor for room/building transitions |
 | 8 | Chairs | Targeted waypoint — finding empty seating |
 | 9 | Tables | Major routing obstacle and transaction counter locator |
-| 10 | Wet Floor Sign | Visual proxy for slip hazards invisible to depth sensors |
+| 10 | Tricycle | Common Philippine three-wheeler (status: possible) |
 | 11 | Potholes | Ground anomalies that depth sensors struggle with |
 | 12 | Trash Bins | Frequently relocated static barriers on memorized routes |
 | 13 | Elevator | Multi-floor transit point with specific interaction needs |
 | 14 | Pedestrian Lane | Painted crossings invisible to depth — guides safe crossing |
 
-These classes were selected based on user research and remain the authoritative class list unless explicitly changed.
+These classes were selected based on user research and are the authoritative class list unless explicitly changed. See DEC-002, DEC-015, DEC-021.
 
 ---
 
@@ -74,15 +76,17 @@ These classes were selected based on user research and remain the authoritative 
 
 The final training dataset combines multiple public sources:
 
-| Source | Directory |
-|--------|-----------|
-| MS COCO 2017 | `dataset/raw/coco/` |
-| Google Open Images V7 | `dataset/raw/openimages/` |
-| Mapillary Vistas | `dataset/raw/mapillary/` |
-| Roboflow datasets | `dataset/raw/roboflow/` |
-| Custom-collected images | `dataset/raw/custom/` |
+| Source | Directory | Role |
+|--------|-----------|------|
+| Objects365 | `dataset/raw/objects365/` | Primary for 7 classes |
+| CrowdHuman | `dataset/raw/crowdhuman/` | Secondary for Person |
+| ExDark | `dataset/raw/exdark/` | Low-light augmentation for 6 classes |
+| Google Open Images V7 | `dataset/raw/open_images/` | Secondary for Two Wheeler |
+| Roboflow Universe (14 projects) | `dataset/raw/roboflow_<project>/` | Niche classes + secondary |
+| Dataset Ninja (pothole-detection) | `dataset/raw/dataset_ninja_pothole_detection/` | Primary for Potholes |
+| Dataset Ninja (road-damage-detector) | `dataset/raw/dataset_ninja_road_damage_detector/` | Secondary for Potholes |
 
-All sources are mapped to the single canonical class list above.
+All sources are mapped to the single canonical class list above. Roboflow sources are forked into our workspace before acquisition (DEC-018).
 
 ---
 
@@ -93,31 +97,36 @@ second-vision-ai/
 │
 ├── README.md                  # This file
 ├── AGENTS.md                  # AI agent behavior rules
-├── PROJECT.md                 # Project context and architecture overview
-├── PLAN.md                    # Phased implementation roadmap
-├── DECISIONS.md               # Decision log with rationale
-├── TASKS.md                   # Current task tracking
 ├── requirements.txt           # Python dependencies
 ├── .gitignore                 # Git ignore rules
 │
 ├── config/
-│   ├── classes.yaml           # Canonical class list (15 classes)
-│   ├── datasets.yaml          # Dataset source configurations
-│   └── training.yaml          # YOLOv8 training hyperparameters
+│   ├── classes.yaml           # Canonical class list + per-class source config
+│   ├── datasets.yaml          # Per-source connection/license/fork info
+│   └── training.yaml          # YOLOv8s training hyperparameters
 │
 ├── dataset/
-│   ├── raw/                   # Original downloaded datasets (gitignored)
-│   ├── processed/             # Per-source converted to YOLO format
-│   ├── merged/                # Combined dataset before splitting
+│   ├── raw/                   # Per-source raw downloads (gitignored)
+│   │   ├── objects365/
+│   │   ├── crowdhuman/
+│   │   ├── exdark/
+│   │   ├── open_images/
+│   │   ├── dataset_ninja_*/
+│   │   └── roboflow_<project>/
+│   ├── processed/             # Intermediate COCO-style, per (source, class)
+│   ├── curated/               # Post-mistakenness correction pools (DEC-019)
+│   ├── merged/                # Post-cap, post-merge, pre-split
 │   ├── final/                 # Train/val/test splits ready for training
 │   │   ├── train/
 │   │   ├── val/
 │   │   └── test/
-│   └── reports/               # Auto-generated dataset statistics
+│   └── reports/               # Auto-generated logs and audit reports
 │
 ├── scripts/
-│   ├── convert/               # Format converters (COCO→YOLO, etc.)
-│   ├── preprocess/            # Filtering, dedup, validation
+│   ├── acquire/               # Dataset download scripts
+│   ├── convert/               # Format converters → intermediate schema
+│   ├── preprocess/            # Capping, dedup, box audit
+│   ├── curate/                # FiftyOne mistakenness + correction reimport
 │   ├── build/                 # Merge, split, YAML generation
 │   └── utils/                 # Shared utilities
 │
@@ -135,7 +144,9 @@ second-vision-ai/
 │   └── archived/              # Previous experiment weights
 │
 └── docs/
-    ├── dataset.md             # Dataset documentation
+    ├── PROJECT.md             # Project context and architecture overview
+    ├── PLAN.md                # Phased implementation roadmap
+    ├── DECISIONS.md           # Decision log with rationale
     ├── experiments.md         # Experiment log
     ├── preprocessing.md       # Preprocessing pipeline docs
     └── training.md            # Training configuration docs
@@ -177,7 +188,7 @@ pip install -r requirements.txt
 ## Development Philosophy
 
 | Priority | Principle |
-|----------|-----------|
+|----------|-----------| 
 | 1 | **Correctness** — Accurate annotations and reproducible results |
 | 2 | **Reproducibility** — Every experiment can be replicated |
 | 3 | **Deployment compatibility** — Models must survive the full Hailo pipeline |

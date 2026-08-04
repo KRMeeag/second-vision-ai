@@ -84,14 +84,14 @@ The authoritative 15-class schema (0-indexed for YOLO):
 0: Person
 1: Vehicle
 2: Two Wheeler
-3: Cart
+3: Pole
 4: Animals
 5: Stairs
 6: Escalator
 7: Doors
 8: Chairs
 9: Tables
-10: Wet Floor Sign
+10: Tricycle
 11: Potholes
 12: Trash Bins
 13: Elevator

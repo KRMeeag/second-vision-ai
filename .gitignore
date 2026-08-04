@@ -32,14 +32,16 @@ Thumbs.db
 # Dataset
 # ==========================
 
-dataset/sources/
+dataset/raw/
 dataset/processed/
+dataset/curated/
 dataset/merged/
 dataset/final/
 
 # Keep folder structure
-!dataset/sources/.gitkeep
+!dataset/raw/.gitkeep
 !dataset/processed/.gitkeep
+!dataset/curated/.gitkeep
 !dataset/merged/.gitkeep
 !dataset/final/.gitkeep
 
