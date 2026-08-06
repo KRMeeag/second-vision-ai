@@ -146,16 +146,15 @@ Training (this repo)          Runtime (after Hailo)
 
 | Source | Type | Expected Contribution |
 |--------|------|----------------------|
-| Objects365 | Large-scale detection | Primary for Person, Vehicle, Two Wheeler, Animals, Chairs, Tables, Trash Bins |
+| Open Images V7 | Large-scale annotated | Primary for Person, Vehicle, Two Wheeler, Animals, Chairs, Tables, Trash Bins |
 | CrowdHuman | Person-focused detection | Secondary (volume_topup) for Person |
 | ExDark | Low-light imagery | Cross-cutting augmentation for 6 classes (DEC-014) |
-| Google Open Images V7 | Large-scale annotated | Secondary (volume_topup) for Two Wheeler |
-| Roboflow Universe (14 projects) | Community curated + forked | Stairs, Escalator, Doors, Elevator, Pedestrian Lane, Tricycle, Pole, Vehicle secondary |
+| Roboflow Universe (14 projects) | Community curated | Stairs, Escalator, Doors, Elevator, Pedestrian Lane, Tricycle, Pole, Vehicle secondary |
 | Dataset Ninja (2 datasets) | Pothole-specific | Primary + secondary for Potholes |
 
-All sources are mapped into the single canonical 15-class schema. Roboflow sources are forked into our workspace before acquisition (DEC-018).
+All sources are mapped into the single canonical 15-class schema. Roboflow sources are pulled locally via pinned SDK versions (DEC-018r).
 
-> **Dropped sources:** MS COCO 2017 (replaced by Objects365), Mapillary Vistas (shelved — DEC-013), Custom-collected (not planned).
+> **Dropped sources:** MS COCO 2017, Mapillary Vistas (DEC-013), Objects365 (DEC-024), Custom-collected.
 
 ---
 

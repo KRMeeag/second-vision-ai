@@ -6,51 +6,59 @@
 # All acquisition scripts read from this file — no hardcoded
 # URLs or project IDs in script bodies.
 #
-# For Roboflow sources, per D-018 (Fork-and-Fix Workflow):
+# For Roboflow sources, per D-018r (Local Pull-and-Resolve):
 #   - original_url: the public Roboflow Universe URL
-#   - forked_project_id: the workspace-local forked copy ID
-#     (populated after Stage 5.0 fork; "TBD-post-fork" until then)
-#   - fork_date: when the fork was created
-#   - corrections: notes on what was fixed in the forked copy
+#   - pinned_version: the dataset version number to download
+#     (set after identifying the best version; null until then)
+#   - download_format: yolov8 | coco | voc (format for SDK download)
 #   - audit_status: pending | approved | rejected
 #
-# Schema: HANDOFF v3 Section 4 + D-018 (frozen 2026-08-04)
+# Roboflow pools are pulled locally via the Python SDK:
+#   project.version(N).download(format)
+# and then curated through the same FiftyOne/CVAT pipeline
+# as all other sources (Stages 5.3 + 5.5).
+#
+# Schema: HANDOFF v3 + D-018r, DEC-024 (updated 2026-08-06)
 # ============================================================
 
 # ========================
 # Large-Scale Sources
 # ========================
 
-objects365:
+open_images:
   description: >
-    Objects365 — large-scale object detection dataset with 365
-    categories. Used as primary source for Person, Vehicle,
-    Two Wheeler, Animals, Chairs, Tables, Trash Bins.
-  download_url: "https://www.objects365.org/download.html"
-  annotation_format: coco_json
+    Google Open Images V7 — large-scale annotated dataset with
+    600+ classes. Primary source for Person, Vehicle, Two Wheeler,
+    Animals, Chairs, Tables, Trash Bins. Also serves as the
+    unified high-volume backbone replacing Objects365 (DEC-024).
+  loader: fiftyone_zoo
+  fiftyone_dataset_name: "open-images-v7"
+  annotation_format: coco_style
   bbox_mode: native_unspecified
-  license: "CC BY 4.0 (non-commercial research)"
-  total_size_gb: ~712
+  license: "CC BY 4.0"
   download_strategy: >
-    Filter category-indexed annotation JSON FIRST, collect only
-    image IDs for needed classes, THEN download only those images.
-    NEVER bulk download.
+    Use FiftyOne Zoo dataset loader with classes=[...] filter.
+    NEVER download the full ~9M image dataset. Download only
+    the needed classes. FiftyOne handles the class-filtered
+    download natively — no manual annotation JSON parsing needed.
   native_classes_needed:
     - "Person"
     - "Car"
     - "Bus"
     - "Truck"
     - "Motorcycle"
+    - "Bicycle"
     - "Dog"
     - "Cat"
-    - "Horse"
     - "Chair"
     - "Table"
-    - "Trash bin Can"
+    - "Waste container"
   notes: >
-    Verify exact native class name strings against the Objects365
-    category list before writing acquire_objects365.py.
-    See HANDOFF v3 Section 7, Blocker #5.
+    Verify exact native class name strings against the Open Images
+    class hierarchy before writing acquire_openimages.py. In
+    particular, "Waste container" for Trash Bins and "Table" (vs
+    "Coffee table", "Kitchen & dining room table") need confirmation.
+    This replaces the old Objects365 Blocker #5.
 
 crowdhuman:
   description: >
@@ -92,23 +100,7 @@ exdark:
     Chair: chairs
     Table: tables
     # ExDark classes NOT in our schema (ignored):
-    # Boat, Bottle, Bus (already covered by Objects365 Vehicle)
-
-open_images:
-  description: >
-    Google Open Images V7. Used as secondary (volume_topup)
-    for Two Wheeler class.
-  loader: fiftyone_zoo
-  fiftyone_dataset_name: "open-images-v7"
-  annotation_format: coco_style
-  bbox_mode: native_unspecified
-  license: "CC BY 4.0"
-  download_strategy: >
-    Use FiftyOne Zoo dataset loader with classes=[...] filter.
-    NEVER download full ~9M image dataset.
-  native_classes_needed:
-    - "Motorcycle"
-    - "Bicycle"
+    # Boat, Bottle, Bus (covered by Open Images Vehicle)
 
 # ========================
 # Dataset Ninja Sources
@@ -146,8 +138,9 @@ dataset_ninja_road_damage_detector:
 # ========================
 # Roboflow Sources
 # ========================
-# Per D-018: fork into workspace before acquisition.
-# forked_project_id is populated after Stage 5.0.
+# Per D-018r: pull locally via pinned SDK version.
+# Roboflow pools flow through the same curation pipeline
+# as large-scale sources (Stages 5.3 + 5.5).
 
 roboflow_projects:
 
@@ -155,33 +148,29 @@ roboflow_projects:
   stairs_lusiz:
     canonical_class: stairs
     original_url: "https://universe.roboflow.com/stairs-n9kkx/stairs-lusiz"
-    forked_project_id: "TBD-post-fork"
-    fork_date: null
-    corrections: null
+    pinned_version: null
+    download_format: yolov8
     audit_status: pending
 
   stairs_hsatv:
     canonical_class: stairs
     original_url: "https://universe.roboflow.com/abeera-munir-v9edc/stairs-hsatv"
-    forked_project_id: "TBD-post-fork"
-    fork_date: null
-    corrections: null
+    pinned_version: null
+    download_format: yolov8
     audit_status: pending
 
   stairs_i2yia:
     canonical_class: stairs
     original_url: "https://universe.roboflow.com/tom-lai-8bp7n/stairs-i2yia"
-    forked_project_id: "TBD-post-fork"
-    fork_date: null
-    corrections: null
+    pinned_version: null
+    download_format: yolov8
     audit_status: pending
 
   escalator_stairs:
     canonical_classes: [stairs, escalator]
     original_url: "https://universe.roboflow.com/escalatorstairsdetection/escalator-stairs"
-    forked_project_id: "TBD-post-fork"
-    fork_date: null
-    corrections: null
+    pinned_version: null
+    download_format: yolov8
     audit_status: pending
     native_class_filter:
       stairs: "stairs"
@@ -191,60 +180,54 @@ roboflow_projects:
   cv_project_hovyc:
     canonical_class: doors
     original_url: "https://universe.roboflow.com/testspace-xwkgk/cv-project-hovyc"
-    forked_project_id: "TBD-post-fork"
-    fork_date: null
-    corrections: null
+    pinned_version: null
+    download_format: yolov8
     audit_status: pending
 
   # --- Elevator (2 sources, 1 flagged for audit) ---
   elevator_awvus:
     canonical_class: elevator
     original_url: "https://universe.roboflow.com/detection-3h20r/elevator-awvus"
-    forked_project_id: "TBD-post-fork"
-    fork_date: null
-    corrections: null
+    pinned_version: null
+    download_format: yolov8
     audit_status: pending
 
   elevator_status_s4lrk:
     canonical_class: elevator
     original_url: "https://universe.roboflow.com/rightly-ai-huxry/elevator-status-s4lrk"
-    forked_project_id: "TBD-post-fork"
-    fork_date: null
-    corrections: null
+    pinned_version: null
+    download_format: yolov8
     audit_status: pending
     audit_note: >
       PRIORITY AUDIT: Confirm this is a true object-detection set
       with usable bounding boxes for "elevator" as an object,
-      not a scene/state classifier. Resolve during Stage 5.0.
+      not a scene/state classifier. Resolve during Stage 5.3.
 
   # --- Pedestrian Lane ---
   pedestrian_and_animal_crossing:
     canonical_class: pedestrian_lane
     original_url: "https://universe.roboflow.com/anomaly-road-crossing-detection/pedestrian-and-animal-crossing"
-    forked_project_id: "TBD-post-fork"
-    fork_date: null
-    corrections: null
+    pinned_version: null
+    download_format: yolov8
     audit_status: pending
     native_class_filter: "pedestrian_crossing"
     audit_note: >
       Multi-class source containing both pedestrian and animal
-      crossings. Confirm exact class label once forked.
+      crossings. Confirm exact class label after download.
 
   # --- Tricycle (2 sources) ---
   augmented_tricycle:
     canonical_class: tricycle
     original_url: "https://universe.roboflow.com/traffico-augmented/augmented-tricycle"
-    forked_project_id: "TBD-post-fork"
-    fork_date: null
-    corrections: null
+    pinned_version: null
+    download_format: yolov8
     audit_status: pending
 
   traffico_y1:
     canonical_classes: [tricycle, vehicle, two_wheeler]
     original_url: "https://universe.roboflow.com/yoloffico/traffico-y1"
-    forked_project_id: "TBD-post-fork"
-    fork_date: null
-    corrections: null
+    pinned_version: null
+    download_format: yolov8
     audit_status: pending
     native_class_filter: "TBD-post-audit"
     audit_note: >
@@ -252,44 +235,40 @@ roboflow_projects:
       which canonical classes (Vehicle / Two Wheeler / Tricycle)
       it legitimately contributes to. Check overlap with
       Jeepney/tricycle-dedicated sources. Run dedup checks.
-      Resolve during Stage 5.0.
+      Resolve during Stage 5.3.
 
   # --- Vehicle secondary (Jeepney) ---
   me5_u6rvg:
     canonical_class: vehicle
     original_url: "https://universe.roboflow.com/machine-exercise-5/me5-u6rvg"
-    forked_project_id: "TBD-post-fork"
-    fork_date: null
-    corrections: null
+    pinned_version: null
+    download_format: yolov8
     audit_status: pending
 
   jeep_hozhs:
     canonical_class: vehicle
     original_url: "https://universe.roboflow.com/lozanomartirezquimno-thesis/jeep-hozhs"
-    forked_project_id: "TBD-post-fork"
-    fork_date: null
-    corrections: null
+    pinned_version: null
+    download_format: yolov8
     audit_status: pending
 
   # --- Pole ---
   pole_detection_z76mb:
     canonical_class: pole
     original_url: "https://universe.roboflow.com/test-j2maq/pole-detection-z76mb"
-    forked_project_id: "TBD-post-fork"
-    fork_date: null
-    corrections: null
+    pinned_version: 2
+    download_format: yolov8
     audit_status: pending
     native_class_note: >
       Original native class is "Utility pole detection - v1
-      2023-05-17 3:44pm" — rename to "pole" in forked copy.
+      2023-05-17 3:44pm" — remapped to "pole" during conversion.
     estimated_images: ~3100
 
   # --- Trash Bins secondary (TBD) ---
   trash_bins_secondary:
     canonical_class: trash_bins
     original_url: "TBD"
-    forked_project_id: null
-    fork_date: null
-    corrections: null
+    pinned_version: null
+    download_format: null
     audit_status: blocked
     audit_note: "Secondary Roboflow project for Trash Bins not yet identified."

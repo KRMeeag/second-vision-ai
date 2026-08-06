@@ -25,9 +25,9 @@ Every decision in this repository is evaluated against the **full deployment pip
 ## End-to-End Pipeline
 
 ```
-Dataset Acquisition (Objects365, CrowdHuman, ExDark, Open Images, Roboflow, Dataset Ninja)
+Dataset Acquisition (Open Images V7, CrowdHuman, ExDark, Roboflow, Dataset Ninja)
        ↓
-Roboflow Fork & Fix (DEC-018) → Conversion → Box Audit → Per-Class Capping
+Conversion → Box Audit (+ Roboflow near-exhaustive review) → Per-Class Capping
        ↓
 Model-Assisted Curation (FiftyOne mistakenness — DEC-019)
        ↓
@@ -78,15 +78,14 @@ The final training dataset combines multiple public sources:
 
 | Source | Directory | Role |
 |--------|-----------|------|
-| Objects365 | `dataset/raw/objects365/` | Primary for 7 classes |
+| Open Images V7 | `dataset/raw/open_images/` | Primary for 7 classes |
 | CrowdHuman | `dataset/raw/crowdhuman/` | Secondary for Person |
 | ExDark | `dataset/raw/exdark/` | Low-light augmentation for 6 classes |
-| Google Open Images V7 | `dataset/raw/open_images/` | Secondary for Two Wheeler |
 | Roboflow Universe (14 projects) | `dataset/raw/roboflow_<project>/` | Niche classes + secondary |
 | Dataset Ninja (pothole-detection) | `dataset/raw/dataset_ninja_pothole_detection/` | Primary for Potholes |
 | Dataset Ninja (road-damage-detector) | `dataset/raw/dataset_ninja_road_damage_detector/` | Secondary for Potholes |
 
-All sources are mapped to the single canonical class list above. Roboflow sources are forked into our workspace before acquisition (DEC-018).
+All sources are mapped to the single canonical class list above. Roboflow sources are pulled locally via pinned SDK versions (DEC-018r).
 
 ---
 
@@ -102,15 +101,14 @@ second-vision-ai/
 │
 ├── config/
 │   ├── classes.yaml           # Canonical class list + per-class source config
-│   ├── datasets.yaml          # Per-source connection/license/fork info
+│   ├── datasets.yaml          # Per-source connection/license/version info
 │   └── training.yaml          # YOLOv8s training hyperparameters
 │
 ├── dataset/
 │   ├── raw/                   # Per-source raw downloads (gitignored)
-│   │   ├── objects365/
+│   │   ├── open_images/
 │   │   ├── crowdhuman/
 │   │   ├── exdark/
-│   │   ├── open_images/
 │   │   ├── dataset_ninja_*/
 │   │   └── roboflow_<project>/
 │   ├── processed/             # Intermediate COCO-style, per (source, class)
@@ -138,10 +136,11 @@ second-vision-ai/
 │   └── inference_test.ipynb   # Inference verification
 │
 ├── models/
-│   ├── weights/               # Trained PyTorch weights
-│   ├── onnx/                  # Exported ONNX models
-│   ├── hef/                   # Compiled Hailo HEF models
-│   └── archived/              # Previous experiment weights
+│   ├── weights/               # Trained PyTorch weights (gitignored)
+│   ├── onnx/                  # Exported ONNX models (gitignored)
+│   ├── hef/                   # Compiled Hailo HEF models (gitignored)
+│   ├── archived/              # Previous experiment weights (gitignored)
+│   └── current/               # Pointer/README for the production-candidate model (tracked)
 │
 └── docs/
     ├── PROJECT.md             # Project context and architecture overview
@@ -172,7 +171,7 @@ These constraints affect every decision in this repository:
 
 ```bash
 # Clone the repository
-git clone https://github.com/your-org/second-vision-ai.git
+git clone https://github.com/KRMeeag/second-vision-ai.git
 cd second-vision-ai
 
 # Create virtual environment

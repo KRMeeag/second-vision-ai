@@ -56,7 +56,7 @@ Maintain **two separate repositories**:
 ## DEC-002: 15-Class Canonical Schema
 
 - **Date:** 2026-07-31
-- **Status:** Accepted
+- **Status:** Accepted (class list partially superseded — see below)
 
 ### Context
 
@@ -73,6 +73,8 @@ Adopt the following **15-class schema** as the authoritative class list:
 3: Cart            8: Chairs          13: Elevator
 4: Animals         9: Tables          14: Pedestrian Lane
 ```
+
+> **Superseded (partial):** ID 3 (`Cart`) was dropped and replaced with `Pole` per DEC-021. ID 10 (`Wet Floor Sign`) was dropped and replaced with `Tricycle` per DEC-015. The remaining 13 entries and the overall 15-class framing are still authoritative — see `config/classes.yaml` for the current canonical list.
 
 ### Rationale
 
@@ -178,7 +180,7 @@ No single public dataset contains all 15 target classes with sufficient quantity
 
 Combine **multiple public sources** (COCO, Open Images, Mapillary, Roboflow) with custom-collected images, unified under a single class mapping.
 
-> **Superseded:** The finalized source list (HANDOFF v3, 2026-08-04) replaced COCO and Mapillary with Objects365, CrowdHuman, ExDark, and Dataset Ninja. Custom image collection was dropped. Open Images was retained in a reduced role (Two Wheeler secondary only). See DEC-013, DEC-014, DEC-016, DEC-017, DEC-018 for the full revised source strategy.
+> **Superseded:** The finalized source list (HANDOFF v3 + DEC-024, 2026-08-06) replaced COCO and Mapillary with Open Images V7, CrowdHuman, ExDark, and Dataset Ninja. Objects365 was also dropped (DEC-024). Custom image collection was dropped. See DEC-013, DEC-014, DEC-016, DEC-017, DEC-018r, DEC-024 for the full revised source strategy.
 
 ### Rationale
 
@@ -277,7 +279,7 @@ Use `wraphex/ExDark2Yolo` parser as the basis for `convert/exdark_to_intermediat
 ### Rationale
 
 - ExDark's value is **condition diversity** (low-light), not volume (~600-900 images per eligible class)
-- Without a guaranteed floor, Primary source volume (Objects365) would easily fill the 5000 cap before ExDark images are considered
+- Without a guaranteed floor, Primary source volume (Open Images) would easily fill the 5000 cap before ExDark images are considered
 - Low-light conditions are directly relevant to the assistive-navigation deployment scenario
 
 ### Consequences
@@ -310,7 +312,7 @@ No viable public dataset source was found for the Wet Floor Sign class. The Phil
 ### Consequences
 
 - `nc` remains 15 (14 confirmed + 1 possible)
-- Tricycle sources require Stage 5.0 fork review (traffico-y1 in particular — see DEC-017)
+- Tricycle sources require Stage 5.3 box audit review (traffico-y1 in particular — see DEC-017)
 - If Tricycle is ultimately dropped, ID 10 becomes unused and `nc` reduces to 14
 
 ---
@@ -382,33 +384,41 @@ Several canonical classes draw from multiple Roboflow projects, and some Roboflo
 
 ---
 
-## DEC-018: Fork-and-Fix Workflow for Roboflow-Native Sources
+## DEC-018r: Local Pull-and-Resolve for Roboflow-Native Sources
 
-- **Date:** 2026-08-04
-- **Status:** Accepted
+- **Date:** 2026-08-06 (revised; original 2026-08-04)
+- **Status:** Accepted (supersedes prior fork-and-fix approach)
 
 ### Context
 
-Roboflow Universe projects are community-contributed and may contain annotation errors, missing labels, or inconsistent class naming. A workflow was needed to ensure annotation quality before data enters the pipeline.
+Roboflow Universe projects are community-contributed and may contain annotation errors, missing labels, or inconsistent class naming. The original D-018 proposed forking each project into our Roboflow workspace and correcting annotations using Roboflow's native UI before acquisition. This created two parallel correction workflows — one cloud-based (Roboflow UI) and one local (FiftyOne/CVAT for large-scale sources).
 
 ### Decision
 
-For every Roboflow Universe project used as a source, **fork the project into our own workspace before acquisition**. Correction/annotation-gap-filling happens directly in the forked copy using Roboflow's native UI (health check, class balance tools, manual re-annotation), prior to `acquire_roboflow.py` ever running against it.
+Roboflow Universe projects are **pulled locally** via a pinned dataset version (Python SDK: `project.version(N).download(format)`) rather than forked and edited on Roboflow's platform. The pinned `workspace/project/version` triplet is recorded in `config/datasets.yaml` as the provenance anchor (replacing the former `forked_project_id`).
 
-`config/datasets.yaml` stores the **forked project ID**, not the original public URL, as the acquisition target. Original source URL, fork date, and correction notes are retained for provenance.
+Roboflow-native pools then flow through the **same curation pipeline** as large-scale sources (Stage 5.3 box audit, Stage 5.5 mistakenness) rather than a separate cloud-editing workflow. Given their smaller size, Roboflow pools may be reviewed **near-exhaustively** at Stage 5.3 (box audit) and Stage 5.5 (mistakenness) rather than sampled.
+
+Native class remapping (e.g., renaming the pole dataset's verbose class label to `"pole"`) happens during conversion (Stage 5.2) rather than in a Roboflow fork.
 
 ### Rationale
 
-- Roboflow's built-in tools (health check, class balance, annotation UI) are purpose-built for this kind of correction
-- Forking preserves the original project untouched while allowing corrections
-- Fixing before acquisition means downstream scripts never encounter known-bad annotations
-- Audit gates (DEC-017) are resolved during this stage
+- Avoids maintaining two parallel correction workflows (Roboflow UI-based vs. FiftyOne/CVAT-based)
+- Keeps all annotation correction infrastructure and audit logs local and under repo version control rather than split across a third-party platform
+- Pinned versions provide reproducible provenance without depending on Roboflow workspace state
+- Smaller Roboflow pools benefit from the same mistakenness ranking — near-exhaustive review is practical at their scale
+
+### Alternatives Considered
+
+- **Fork-and-Fix on Roboflow (original D-018)**: Rejected — required maintaining two correction workflows and split audit logs between cloud and local
+- **No version pinning**: Rejected — Roboflow Universe projects can be updated by their owners at any time; unpinned downloads are not reproducible
 
 ### Consequences
 
-- `config/datasets.yaml` has a `forked_project_id` field per Roboflow project — initially `TBD-post-fork`
-- `acquire_roboflow.py` must read from `datasets.yaml` to get the forked project ID
-- Stage 5.0 (Fork & Fix) is a manual/semi-manual stage that precedes all scripted acquisition
+- `config/datasets.yaml` has `pinned_version` and `download_format` fields per Roboflow project (replacing `forked_project_id` / `fork_date` / `corrections`)
+- `acquire_roboflow.py` reads pinned version from `datasets.yaml` and downloads via SDK
+- Stage 5.0 is **eliminated** as a separate stage — Roboflow audit/correction happens at Stages 5.3 and 5.5 alongside all other sources
+- Native class remapping is handled in conversion scripts (Stage 5.2), not on the Roboflow platform
 
 ---
 
@@ -419,7 +429,7 @@ For every Roboflow Universe project used as a source, **fork the project into ou
 
 ### Context
 
-Large-scale sources (Objects365, CrowdHuman, ExDark, Open Images, RDD2022) contain too many images for manual review. A scalable approach to annotation quality was needed.
+Large-scale sources (Open Images, CrowdHuman, ExDark, RDD2022) contain too many images for manual review. A scalable approach to annotation quality was needed.
 
 ### Decision
 
@@ -488,7 +498,7 @@ Cart (ID 3) was included in the original 15-class schema (DEC-002) but no viable
 - Cart: no annotated dataset found across Roboflow Universe, Dataset Ninja, Objects365, or other public sources
 - Pole: utility poles and street poles are common physical obstacles in Philippine urban/suburban environments; visually distinct enough for reliable detection
 - ID 3 slot reuse avoids schema reordering
-- Per D-018, the Roboflow source will be forked and the native class label (currently a dataset-title string) renamed to "pole"
+- Per D-018r, the Roboflow source is pulled locally and the native class label remapped to "pole" during conversion (Stage 5.2)
 
 ### Consequences
 
@@ -506,7 +516,7 @@ Cart (ID 3) was included in the original 15-class schema (DEC-002) but no viable
 
 ### Context
 
-DEC-003 established YOLOv8n (nano) as the baseline architecture, noting that upgrading to YOLOv8s was straightforward if needed. During dataset planning, the larger and more diverse dataset (Objects365 + multi-source aggregation) motivated reconsidering the model capacity.
+DEC-003 established YOLOv8n (nano) as the baseline architecture, noting that upgrading to YOLOv8s was straightforward if needed. During dataset planning, the larger and more diverse dataset (Open Images + multi-source aggregation) motivated reconsidering the model capacity.
 
 ### Decision
 
@@ -542,22 +552,72 @@ After adding Pole to the canonical schema at ID 3 (DEC-021), a source dataset ne
 Use Roboflow project **`test-j2maq/pole-detection-z76mb`** as the primary (and only) source for the Pole class.
 
 - ~3,100 images, single class
-- Native class label in original project: `"Utility pole detection - v1 2023-05-17 3:44pm"` — rename to `"pole"` in forked copy per D-018
+- Native class label in original project: `"Utility pole detection - v1 2023-05-17 3:44pm"` — remapped to `"pole"` during conversion (Stage 5.2)
+- Pinned at version 2 in `datasets.yaml`
 - No cap (naturally volume-limited)
 - No ExDark cross-cutting
-- Standard D-018 fork-and-fix workflow applies
+- Standard D-018r local pull-and-resolve workflow applies
 
 ### Rationale
 
 - Single-class dataset reduces class-filtering complexity
 - Volume (~3,100) is adequate for an obstacle class
-- Per DEC-018, annotation quality will be reviewed in the forked copy before acquisition
+- Per DEC-018r, annotation quality is reviewed through the same FiftyOne/CVAT pipeline as all other sources
 
 ### Consequences
 
 - `pole-detection-z76mb` added to `config/datasets.yaml` under `roboflow_projects`
 - `classes.yaml` pole entry references this project
-- Fork workflow (Stage 5.0) must rename the class label before acquisition
+- Native class remapping handled in conversion scripts (Stage 5.2)
+
+---
+
+## DEC-024: Objects365 Dropped, Open Images V7 as Primary
+
+- **Date:** 2026-08-06
+- **Status:** Accepted
+
+### Context
+
+Objects365 was originally designated as the primary source for 7 high-volume classes (Person, Vehicle, Two Wheeler, Animals, Chairs, Tables, Trash Bins). During implementation planning, Objects365 proved infeasible — the dataset is ~712 GB total, requires complex category-indexed annotation JSON parsing to filter needed images, and the download infrastructure is unreliable.
+
+Open Images V7 was already in the pipeline as a secondary source for Two Wheeler. It covers all the same classes with a more accessible download mechanism via FiftyOne Zoo.
+
+### Decision
+
+**Objects365 is dropped entirely.** Open Images V7 replaces it as the primary source for all 7 classes:
+
+| Class | Old Primary | New Primary | OI Native Class |
+|-------|-----------|-------------|----------------|
+| Person | Objects365 "Person" | Open Images | "Person" |
+| Vehicle | Objects365 ["Car","Bus","Truck"] | Open Images | ["Car","Bus","Truck"] |
+| Two Wheeler | Objects365 "Motorcycle" | Open Images | ["Motorcycle","Bicycle"] |
+| Animals | Objects365 ["Dog","Cat","Horse"] | Open Images | ["Dog","Cat"] |
+| Chairs | Objects365 "Chair" | Open Images | "Chair" |
+| Tables | Objects365 "Table" | Open Images | "Table" |
+| Trash Bins | Objects365 "Trash bin Can" | Open Images | "Waste container" |
+
+### Rationale
+
+- Objects365 download is ~712 GB total with unreliable infrastructure — even class-filtered downloads require parsing the full annotation JSON first
+- Open Images V7 via FiftyOne Zoo provides native class-filtered downloads — no bulk download needed
+- Open Images has sufficient volume and diversity for all 7 classes
+- FiftyOne is already a hard dependency (DEC-019) — using it for acquisition unifies the toolchain
+- Two Wheeler simplifies from dual-source (Objects365 primary + OI secondary) to single-source (OI only)
+
+### Alternatives Considered
+
+- **Keep Objects365 with selective download**: Rejected — even selective download requires parsing the full annotation JSON (~several GB), and the download servers are unreliable
+- **COCO 2017 as replacement**: Rejected — already superseded in DEC-005; fewer classes and less diversity than Open Images
+
+### Consequences
+
+- `acquire_objects365.py` is no longer needed — replaced by expanded `acquire_openimages.py`
+- `dataset/raw/objects365/` directory removed
+- Animals class drops Horse (not available in ExDark for low-light augmentation consistency; verify OI availability)
+- Trash Bins native class name is "Waste container" in OI — must verify before writing acquire script
+- Open Images native class names for all 7 classes must be verified against OI class hierarchy (replaces old Blocker #5 scope)
+- DEC-005 supersession note updated to reference Open Images instead of Objects365
 
 ---
 
@@ -584,4 +644,3 @@ Use Roboflow project **`test-j2maq/pole-detection-z76mb`** as the primary (and o
 ### Consequences
 [Expected impact, tradeoffs, and follow-up actions]
 ```
-

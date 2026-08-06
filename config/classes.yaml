@@ -13,7 +13,7 @@
 # Note: Hailo runtime injects a Background class at index 0,
 # shifting all IDs by +1 at deployment time.
 #
-# Schema: HANDOFF v3 Section 6 (frozen 2026-08-04)
+# Schema: HANDOFF v3 + DEC-018r, DEC-024 (updated 2026-08-06)
 # ============================================================
 
 # --- Annotation Policy ---
@@ -75,15 +75,20 @@ hailo_runtime_names:
 #   cap:                            max images per class (null = uncapped)
 #   role:                           diversity | volume_topup
 #   native_class_filter:            source-side class name(s) to extract
-#   audit_note:                     blockers that must be resolved via Stage 5.0
+#   audit_note:                     blockers resolved during Stage 5.3/5.5
 #   status:                         confirmed | possible
 #   guaranteed_floor:               if true, ExDark images reserved before primary fill
+#
+# Roboflow sources per D-018r (Local Pull-and-Resolve):
+#   Downloaded locally via pinned SDK version, then curated through
+#   the same FiftyOne/CVAT pipeline as large-scale sources.
+#   Native class remapping happens during conversion (Stage 5.2).
 
 classes:
   person:
     id: 0
     primary:
-      source: objects365
+      source: open_images
       native_class: "Person"
     secondary:
       source: crowdhuman
@@ -98,7 +103,7 @@ classes:
   vehicle:
     id: 1
     primary:
-      source: objects365
+      source: open_images
       native_class: ["Car", "Bus", "Truck"]
     secondary_providers:
       - source: roboflow
@@ -110,7 +115,7 @@ classes:
         native_class_filter: "TBD-post-audit"
         audit_note: >
           Confirm class list before use; possible overlap with
-          tricycle/two_wheeler. Resolve during Stage 5.0 fork.
+          tricycle/two_wheeler. Resolve during Stage 5.3 box audit.
     secondary_role: diversity
     lowlight_augment:
       source: exdark
@@ -121,12 +126,8 @@ classes:
   two_wheeler:
     id: 2
     primary:
-      source: objects365
-      native_class: "Motorcycle"
-    secondary:
       source: open_images
       native_class: ["Motorcycle", "Bicycle"]
-      role: volume_topup
     lowlight_augment:
       source: exdark
       native_class: ["Motorbike", "Bicycle"]
@@ -142,14 +143,14 @@ classes:
         note: >
           Native class in original project is
           "Utility pole detection - v1 2023-05-17 3:44pm" —
-          rename to "pole" in forked copy per D-018.
+          remapped to "pole" during conversion (Stage 5.2).
     cap: null
 
   animals:
     id: 4
     primary:
-      source: objects365
-      native_class: ["Dog", "Cat", "Horse"]
+      source: open_images
+      native_class: ["Dog", "Cat"]
     lowlight_augment:
       source: exdark
       native_class: ["Dog", "Cat"]
@@ -188,7 +189,7 @@ classes:
   chairs:
     id: 8
     primary:
-      source: objects365
+      source: open_images
       native_class: "Chair"
     lowlight_augment:
       source: exdark
@@ -199,7 +200,7 @@ classes:
   tables:
     id: 9
     primary:
-      source: objects365
+      source: open_images
       native_class: "Table"
     lowlight_augment:
       source: exdark
@@ -235,8 +236,12 @@ classes:
   trash_bins:
     id: 12
     primary:
-      source: objects365
-      native_class: "Trash bin Can"
+      source: open_images
+      native_class: "Waste container"
+      verify_note: >
+        Open Images class name for trash bins/cans may be
+        "Waste container" — verify against OI class hierarchy
+        before writing acquire script.
     secondary_providers:
       - source: roboflow
         project: "TBD"
@@ -253,7 +258,7 @@ classes:
         project: "rightly-ai-huxry/elevator-status-s4lrk"
         audit_note: >
           Verify detection vs classification taxonomy before
-          including. Resolve during Stage 5.0 fork.
+          including. Resolve during Stage 5.3 box audit.
     cap: null
 
   pedestrian_lane:
@@ -264,5 +269,5 @@ classes:
         native_class_filter: "pedestrian_crossing"
         audit_note: >
           Multi-class source, also contains animal-crossing.
-          Confirm exact class label once forked.
+          Confirm exact class label after download.
     cap: null

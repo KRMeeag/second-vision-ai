@@ -1,10 +1,10 @@
 # PLAN.md — Second Vision AI Implementation Roadmap
 
-> **Last updated:** 2026-08-04
+> **Last updated:** 2026-08-06
 >
-> Pipeline architecture: HANDOFF v3 (frozen 2026-08-04)
+> Pipeline architecture: HANDOFF v3 + D-018r, DEC-024
 
-This document outlines the phased implementation plan for the Second Vision AI model pipeline. The dataset pipeline follows a 10-stage architecture (Stages 5.0–5.9) defined in HANDOFF v3, progressing from Roboflow fork-and-fix through final YAML generation.
+This document outlines the phased implementation plan for the Second Vision AI model pipeline. The dataset pipeline follows a 9-stage architecture (Stages 5.1–5.9) defined in HANDOFF v3 with revisions, progressing from acquisition through final YAML generation. Stage 5.0 (Fork & Fix) was eliminated by D-018r — Roboflow sources are pulled locally and curated through the same pipeline as all other sources.
 
 ---
 
@@ -22,11 +22,11 @@ This document outlines the phased implementation plan for the Second Vision AI m
 | Write DECISIONS.md | ✅ Done |
 | Write TASKS.md | ✅ Done |
 | Create `.gitignore` | ✅ Done |
-| Create `config/classes.yaml` (v2 — full provider schema) | ✅ Done |
+| Create `config/classes.yaml` (v3 — OI primary, local pull) | ✅ Done |
 | Create `config/datasets.yaml` (per-source config) | ✅ Done |
 | Create `.gitkeep` files for empty directories | ✅ Done |
 | Scaffold directory structure per HANDOFF v3 | ✅ Done |
-| Align docs with HANDOFF v3 + DEC-012–023 | ✅ Done |
+| Align docs with HANDOFF v3 + D-018r + DEC-024 | ✅ Done |
 | Create `requirements.txt` | ⬜ Todo |
 
 ---
@@ -51,53 +51,40 @@ This document outlines the phased implementation plan for the Second Vision AI m
 
 | Tool | Purpose |
 |------|---------|
-| FiftyOne | Dataset curation, mistakenness detection, dedup, CVAT/LS integration |
-| Roboflow SDK | Roboflow project forking and dataset download |
+| FiftyOne | Dataset acquisition (OI Zoo), curation, mistakenness, dedup, CVAT/LS integration |
+| Roboflow SDK | Roboflow pinned-version dataset download |
 | Ultralytics | YOLOv8s training target + pretrained model for mistakenness |
 | supervision | Dataset Ninja format handling |
 
 ---
 
-## Phase 2: Dataset Pipeline (Stages 5.0–5.9)
+## Phase 2: Dataset Pipeline (Stages 5.1–5.9)
 
 **Goal:** Execute the full dataset acquisition, conversion, curation, merging, and splitting pipeline.
 
-This phase follows the frozen 10-stage pipeline from HANDOFF v3. Each stage produces outputs consumed by the next stage, with audit gates enforced at key checkpoints.
-
-### Stage 5.0: Fork & Fix (Roboflow-native sources) — DEC-018
-
-| Task | Status |
-|------|--------|
-| Fork all Roboflow projects into workspace | ⬜ Todo |
-| Run health check + class balance review on each fork | ⬜ Todo |
-| Resolve audit: `elevator-status-s4lrk` (detection vs classification) | ⬜ Todo |
-| Resolve audit: `traffico-y1` (full class list, cross-class overlap) | ⬜ Todo |
-| Resolve audit: `pedestrian-and-animal-crossing` (confirm class names) | ⬜ Todo |
-| Rename class label in `pole-detection-z76mb` fork (`→ "pole"`) | ⬜ Todo |
-| Correct/fill annotations in forked copies | ⬜ Todo |
-| Record forked project IDs in `config/datasets.yaml` | ⬜ Todo |
+This phase follows a 9-stage pipeline (Stage 5.0 eliminated by D-018r). Each stage produces outputs consumed by the next stage, with audit gates enforced at key checkpoints.
 
 ### Stage 5.1: Acquisition
 
 | Task | Status |
 |------|--------|
-| Build `scripts/acquire/acquire_objects365.py` | ⬜ Todo |
-| Verify Objects365 native class name strings (Blocker #5) | ⬜ Todo |
+| Verify Open Images native class name strings (Blocker #5 scope) | ⬜ Todo |
+| Build `scripts/acquire/acquire_openimages.py` (FiftyOne Zoo) | ⬜ Todo |
 | Build `scripts/acquire/acquire_crowdhuman.py` | ⬜ Todo |
 | Build `scripts/acquire/acquire_exdark.py` | ⬜ Todo |
-| Build `scripts/acquire/acquire_openimages.py` (FiftyOne Zoo) | ⬜ Todo |
 | Build `scripts/acquire/acquire_datasetninja.py` | ⬜ Todo |
-| Build `scripts/acquire/acquire_roboflow.py` (from forked projects) | ⬜ Todo |
+| Build `scripts/acquire/acquire_roboflow.py` (pinned SDK versions) | ⬜ Todo |
+| Pin versions for all Roboflow projects in `datasets.yaml` | ⬜ Todo |
 
 ### Stage 5.2: Conversion
 
 | Task | Status |
 |------|--------|
-| Build `scripts/convert/coco_style_to_intermediate.py` | ⬜ Todo |
+| Build `scripts/convert/openimages_to_intermediate.py` | ⬜ Todo |
 | Build `scripts/convert/crowdhuman_odgt_to_intermediate.py` | ⬜ Todo |
 | Build `scripts/convert/exdark_to_intermediate.py` | ⬜ Todo |
 | Build `scripts/convert/voc_to_intermediate.py` | ⬜ Todo |
-| Build `scripts/convert/yolo_to_intermediate.py` | ⬜ Todo |
+| Build `scripts/convert/yolo_to_intermediate.py` (Roboflow YOLO format) | ⬜ Todo |
 
 ### Stage 5.3: Box Audit
 
@@ -106,6 +93,10 @@ This phase follows the frozen 10-stage pipeline from HANDOFF v3. Each stage prod
 | Build `scripts/preprocess/box_audit.py` | ⬜ Todo |
 | Run box audit on all `native_unspecified` sources | ⬜ Todo |
 | Run box audit on all `project_dependent` sources | ⬜ Todo |
+| Resolve audit: `elevator-status-s4lrk` (detection vs classification) | ⬜ Todo |
+| Resolve audit: `traffico-y1` (full class list, cross-class overlap) | ⬜ Todo |
+| Resolve audit: `pedestrian-and-animal-crossing` (class names) | ⬜ Todo |
+| Near-exhaustive review for smaller Roboflow pools (D-018r) | ⬜ Todo |
 | Review and approve audit results | ⬜ Todo |
 
 ### Stage 5.4: Per-Class Capping
@@ -122,7 +113,7 @@ This phase follows the frozen 10-stage pipeline from HANDOFF v3. Each stage prod
 |------|--------|
 | Build `scripts/curate/run_mistakenness.py` (FiftyOne) | ⬜ Todo |
 | Build `scripts/curate/reimport_corrections.py` (CVAT/LS) | ⬜ Todo |
-| Run mistakenness on capped pools | ⬜ Todo |
+| Run mistakenness on capped pools (all sources, including Roboflow) | ⬜ Todo |
 | Review and correct flagged samples in CVAT/Label Studio | ⬜ Todo |
 | Re-import corrections into `dataset/curated/` | ⬜ Todo |
 
@@ -259,10 +250,10 @@ Key decisions that will arise during execution:
 
 | Decision | Phase | Notes |
 |----------|-------|-------|
-| Objects365 native class name strings | 2 (5.1) | Verify before writing acquire script — Blocker #5 |
-| traffico-y1 canonical class contributions | 2 (5.0) | Resolve during fork review — Blocker #2 |
-| elevator-status-s4lrk taxonomy | 2 (5.0) | Verify during fork review — Blocker #3 |
-| Stairs source narrowing (4 → fewer?) | 2 (5.0/5.3) | After fork + box audit quality comparison |
+| Open Images native class name verification | 2 (5.1) | Verify before writing acquire script — replaces old Blocker #5 |
+| traffico-y1 canonical class contributions | 2 (5.3) | Resolve during box audit |
+| elevator-status-s4lrk taxonomy | 2 (5.3) | Verify during box audit |
+| Stairs source narrowing (4 → fewer?) | 2 (5.3) | After box audit quality comparison |
 | Duplicate detection threshold | 2 (5.6) | Perceptual hash distance cutoff |
 | Train/val/test split ratios | 2 (5.8) | Balance between training data and evaluation quality |
 | Image size (640 vs 320) | 3 | Tradeoff between accuracy and inference speed |
