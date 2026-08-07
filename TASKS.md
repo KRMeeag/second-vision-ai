@@ -35,15 +35,17 @@ Repository documentation aligned with HANDOFF v3 + D-018r + DEC-024. Configurati
 
 ### ⬜ Phase 1: Configuration & Tooling (Up Next)
 
-- [ ] Create `requirements.txt` — FiftyOne, Roboflow SDK, Ultralytics, supervision, etc.
-- [ ] Install and verify FiftyOne
-- [ ] Install and verify Roboflow SDK
+> Scope narrowed by DEC-025 (2026-08-06) — see docs/DECISIONS.md.
+
+- [x] Create `requirements.txt` — FiftyOne, Roboflow SDK, Ultralytics, supervision, etc.
+- [x] Install and verify FiftyOne
+- [x] Install and verify Roboflow SDK
 - [ ] Verify CVAT/Label Studio integration via FiftyOne
-- [ ] Build `scripts/utils/config_loader.py` — YAML config reader for classes.yaml + datasets.yaml
-- [ ] Build `scripts/utils/file_utils.py` — path helpers, safe copy/move
-- [ ] Build `scripts/utils/bbox_utils.py` — bbox validation, conversion, clipping
-- [ ] Build `scripts/utils/image_utils.py` — image reading, validation, hashing
-- [ ] Create `config/training.yaml` — YOLOv8s baseline hyperparameters
+- [x] Build `scripts/utils/config_loader.py` — YAML config reader for classes.yaml + datasets.yaml
+- [x] Build `scripts/utils/file_utils.py` — path helpers, safe copy/move
+- [x] Build `scripts/utils/bbox_utils.py` — ExDark + CrowdHuman raw box parsing, validate/clip guard (DEC-025: narrowed — VOC/COCO-style/YOLO sources use FiftyOne's native importers instead of custom conversion code)
+- [ ] ~~Build `scripts/utils/image_utils.py`~~ — dropped per DEC-025: corrupt-image checks via `compute_metadata()`, dedup via FiftyOne Brain, no standalone module
+- [x] Create `config/training.yaml` — YOLOv8s baseline hyperparameters
 
 ---
 
@@ -116,3 +118,6 @@ See [PLAN.md](file:///Users/luna/Projects/Thesis/second-vision-ai/docs/PLAN.md) 
 | `config/classes.yaml` v1 created | 2026-07-31 | 15-class canonical schema (original) |
 | HANDOFF v3 alignment | 2026-08-04 | Full doc overhaul — DEC-012–023, classes.yaml v2, datasets.yaml |
 | D-018r + DEC-024 alignment | 2026-08-06 | Fork→local pull, Objects365→Open Images, pipeline to 9 stages |
+| Repo hygiene pass + AGENTS.md mentor-mode update | 2026-08-06 | Removed stale `curate.py`, fixed README clone URL, added `models/current/`, DEC-002 status note, Documentation & Recording Policy + student-mentor collaboration rules added to AGENTS.md |
+| `file_utils.py` + `bbox_utils.py` built (DEC-025 scope) | 2026-08-07 | Path helpers/safe copy-move; ExDark+CrowdHuman box conversion + validate/clip guard. Both smoke-tested clean |
+| FiftyOne + Roboflow SDK verified, `config/training.yaml` created | 2026-08-07 | fiftyone 1.20.0 (pre-installed) + roboflow 1.4.0 (installed) both import cleanly together (roboflow pinned numpy/opencv-python-headless down slightly — no conflict). Baseline training config parses clean |

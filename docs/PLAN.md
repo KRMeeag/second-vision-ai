@@ -35,17 +35,19 @@ This document outlines the phased implementation plan for the Second Vision AI m
 
 **Goal:** Set up tooling dependencies, shared utilities, and validate configuration files.
 
+> Scope narrowed by DEC-025 (2026-08-06) — see docs/DECISIONS.md.
+
 | Task | Status |
 |------|--------|
-| Create `requirements.txt` with pinned dependencies | ⬜ Todo |
-| Install and verify FiftyOne | ⬜ Todo |
-| Install and verify Roboflow SDK | ⬜ Todo |
+| Create `requirements.txt` with pinned dependencies | ✅ Done |
+| Install and verify FiftyOne | ✅ Done |
+| Install and verify Roboflow SDK | ✅ Done |
 | Verify CVAT/Label Studio integration via FiftyOne | ⬜ Todo |
-| Build `scripts/utils/file_utils.py` — path helpers, safe copy/move | ⬜ Todo |
-| Build `scripts/utils/bbox_utils.py` — bbox validation, conversion, clipping | ⬜ Todo |
-| Build `scripts/utils/image_utils.py` — image reading, validation, hashing | ⬜ Todo |
-| Build `scripts/utils/config_loader.py` — YAML config reader | ⬜ Todo |
-| Create `config/training.yaml` with YOLOv8s baseline hyperparameters | ⬜ Todo |
+| Build `scripts/utils/file_utils.py` — path helpers, safe copy/move | ✅ Done |
+| Build `scripts/utils/bbox_utils.py` — ExDark + CrowdHuman parsing, validate/clip guard (DEC-025) | ✅ Done |
+| ~~Build `scripts/utils/image_utils.py`~~ — dropped, see DEC-025 | — |
+| Build `scripts/utils/config_loader.py` — YAML config reader | ✅ Done |
+| Create `config/training.yaml` with YOLOv8s baseline hyperparameters | ✅ Done |
 
 ### Key Dependencies
 
