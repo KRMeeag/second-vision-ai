@@ -72,7 +72,7 @@ The AI must avoid recommendations that increase risk of:
 
 2. **Background class injection**: Hailo inserts `0: Background` at runtime, shifting all class IDs by +1.
 
-3. **Custom labels**: This project uses 15 custom classes, not COCO defaults. Always use the canonical class list from `config/classes.yaml`.
+3. **Custom labels**: This project uses 16 custom classes, not COCO defaults. Always use the canonical class list from `config/classes.yaml`.
 
 4. **GPU compilation**: GPU-accelerated Hailo compilation is required for production. Do not recommend CPU-only compilation unless explicitly requested.
 
@@ -80,12 +80,12 @@ The AI must avoid recommendations that increase risk of:
 
 ## Canonical Class List
 
-The authoritative 15-class schema (0-indexed for YOLO):
+The authoritative 16-class schema (0-indexed for YOLO):
 
 ```
 0: Person
 1: Vehicle
-2: Two Wheeler
+2: Motorcycle
 3: Pole
 4: Animals
 5: Stairs
@@ -98,6 +98,7 @@ The authoritative 15-class schema (0-indexed for YOLO):
 12: Trash Bins
 13: Elevator
 14: Pedestrian Lane
+15: Bicycle
 ```
 
 Do not add, remove, or reorder classes unless the user explicitly requests it.
@@ -140,7 +141,7 @@ The **dataset is the primary performance lever**. Always prioritize:
 
 ## Dataset Curation Rules
 
-1. **Single canonical class list** — Every source dataset maps into the 15-class schema
+1. **Single canonical class list** — Every source dataset maps into the 16-class schema
 2. **Annotation consistency** — Identify inconsistent boxes, conflicting labeling policies, invalid/missing labels
 3. **No data leakage** — No duplicated or near-identical images across train/val/test splits
 4. **Source diversity** — Multiple lighting conditions, camera angles, environments, backgrounds

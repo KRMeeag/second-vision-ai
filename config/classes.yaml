@@ -8,12 +8,12 @@
 # file.
 #
 # DO NOT modify without updating DECISIONS.md.
-# Supersedes DEC-002 via DEC-015, DEC-021.
+# Supersedes DEC-002 via DEC-015, DEC-021, DEC-038.
 #
 # Note: Hailo runtime injects a Background class at index 0,
 # shifting all IDs by +1 at deployment time.
 #
-# Schema: HANDOFF v3 + DEC-018r, DEC-024 (updated 2026-08-06)
+# Schema: HANDOFF v3 + DEC-018r, DEC-024, DEC-038 (updated 2026-08-08)
 # ============================================================
 
 # --- Annotation Policy ---
@@ -24,13 +24,13 @@ annotation_policy:
     Hidden object extent must not be estimated. See DEC-012.
 
 # --- Number of classes ---
-nc: 15
+nc: 16
 
 # --- Class names (0-indexed for YOLO training) ---
 names:
   0: Person
   1: Vehicle
-  2: Two Wheeler
+  2: Motorcycle
   3: Pole
   4: Animals
   5: Stairs
@@ -43,6 +43,7 @@ names:
   12: Trash Bins
   13: Elevator
   14: Pedestrian Lane
+  15: Bicycle
 
 # --- Hailo runtime mapping (after background class injection) ---
 # Reference only — used when generating custom label JSON
@@ -50,7 +51,7 @@ hailo_runtime_names:
   0: Background
   1: Person
   2: Vehicle
-  3: Two Wheeler
+  3: Motorcycle
   4: Pole
   5: Animals
   6: Stairs
@@ -63,6 +64,7 @@ hailo_runtime_names:
   13: Trash Bins
   14: Elevator
   15: Pedestrian Lane
+  16: Bicycle
 
 # --- Per-Class Source Configuration ---
 # Defines primary, secondary, and low-light augmentation providers
@@ -108,14 +110,23 @@ classes:
     secondary_providers:
       - source: roboflow
         project: "machine-exercise-5/me5-u6rvg"
+        native_class_filter: ["Ambulance", "Cars", "Jeepney"]
+        note: >
+          Active as of 2026-08-08 (DEC-037) — replaces jeep_hozhs.
+          Multi-class source (see datasets.yaml for full mapping incl.
+          motorcycle). Jeepney slice is a Philippine-specific edge
+          case, same DEC-033 treatment as before (not volume-discounted).
       - source: roboflow
         project: "lozanomartirezquimno-thesis/jeep-hozhs"
+        note: "Benched 2026-08-08 (DEC-037) in favor of me5_u6rvg — see datasets.yaml."
       - source: roboflow
         project: "yoloffico/traffico-y1"
-        native_class_filter: "TBD-post-audit"
-        audit_note: >
-          Confirm class list before use; possible overlap with
-          tricycle/two_wheeler. Resolve during Stage 5.3 box audit.
+        native_class_filter: "Jeepney"
+        note: >
+          Class list resolved 2026-08-08 (DEC-032). Jeepney is a
+          Philippine-specific vehicle type with no Open Images/COCO
+          analogue — see DEC-033 for why its volume isn't discounted
+          the way ordinary Vehicle imagery is.
     secondary_role: diversity
     lowlight_augment:
       source: exdark
@@ -123,14 +134,48 @@ classes:
       guaranteed_floor: true
     cap: 5000
 
-  two_wheeler:
+  motorcycle:
     id: 2
+    # Split from the former combined "Two Wheeler" class per DEC-038
+    # (2026-08-08) — motorcycle (fast, high kinetic risk) and bicycle
+    # (slow, silent) have different enough hazard profiles to warrant
+    # distinct TTS feedback. Was ID 2 as "Two Wheeler"; slot reused,
+    # same pattern as DEC-015/DEC-021.
     primary:
       source: open_images
-      native_class: ["Motorcycle", "Bicycle"]
+      native_class: "Motorcycle"
+    secondary_providers:
+      - source: roboflow
+        project: "machine-exercise-5/me5-u6rvg"
+        native_class_filter: "Motorcycle"
+        role: diversity
+        note: "Active as of 2026-08-08 (DEC-037) — see datasets.yaml for the full multi-class mapping."
+      - source: roboflow
+        project: "yoloffico/traffico-y1"
+        native_class_filter: "Motorcycle"
+        role: diversity
+        note: >
+          Added once traffico-y1's class list was resolved (DEC-032).
+          Currently blocked (zero generated versions, forking declined)
+          — see datasets.yaml. Not the active Motorcycle secondary
+          right now; me5_u6rvg is.
     lowlight_augment:
       source: exdark
-      native_class: ["Motorbike", "Bicycle"]
+      native_class: "Motorbike"
+      guaranteed_floor: true
+    cap: 5000
+
+  bicycle:
+    id: 15
+    # New class per DEC-038 (2026-08-08), split out of "Two Wheeler."
+    # No new acquisition work needed — both sources already label
+    # Bicycle separately from Motorcycle/Motorbike.
+    primary:
+      source: open_images
+      native_class: "Bicycle"
+    lowlight_augment:
+      source: exdark
+      native_class: "Bicycle"
       guaranteed_floor: true
     cap: 5000
 
@@ -144,6 +189,11 @@ classes:
           Native class in original project is
           "Utility pole detection - v1 2023-05-17 3:44pm" —
           remapped to "pole" during conversion (Stage 5.2).
+    secondary_providers:
+      - source: roboflow
+        project: "mahindra-university-ogyod/utility-poles-44tzx"
+        role: diversity
+        note: "Dual-purpose source, also contributes to Potholes. Added 2026-08-08, DEC-035."
     cap: null
 
   animals:
@@ -159,6 +209,9 @@ classes:
 
   stairs:
     id: 5
+    # stairs_i2yia + escalator_stairs prioritized (still `pending` in
+    # datasets.yaml); stairs_lusiz + stairs_hsatv are `failed` pending
+    # possible relabel — see DEC-031 and docs/preprocessing.md.
     primary_providers:
       - source: roboflow
         project: "stairs-n9kkx/stairs-lusiz"
@@ -201,7 +254,11 @@ classes:
     id: 9
     primary:
       source: open_images
-      native_class: "Table"
+      native_class: ["Table", "Coffee table"]
+      note: >
+        Coffee table added alongside Table per DEC-029 — mall/lounge
+        deployment environments commonly feature coffee tables, not
+        just dining tables.
     lowlight_augment:
       source: exdark
       native_class: "Table"
@@ -216,21 +273,33 @@ classes:
         project: "traffico-augmented/augmented-tricycle"
       - source: roboflow
         project: "yoloffico/traffico-y1"
-        native_class_filter: "Tricycle"
+        native_class_filter: ["Tricycle", "tricycle"]
         role: volume_topup
+        note: "Source has both case variants as separate labels (DEC-032) — both map here."
     cap: null
 
   potholes:
     id: 11
-    primary:
-      source: dataset_ninja
-      dataset_name: "pothole-detection"
-      format: pascal_voc
-    secondary:
-      source: dataset_ninja
-      dataset_name: "road-damage-detector"
-      native_class_filter: "pothole"
-      role: volume_topup
+    # Combined-source strategy per DEC-034: two co-primary "pure
+    # pothole" sources, expected to stay under 3500 combined without
+    # needing road-damage-detector's messier multi-class volume.
+    primary_providers:
+      - source: dataset_ninja
+        dataset_name: "pothole-detection"
+        format: pascal_voc
+        note: "Currently blocked — Dropbox link rate-limited 2026-08-08. Retry later."
+      - source: roboflow
+        project: "yeeun-kim-fyvoj/pothole-vhmow"
+    secondary_providers:
+      - source: dataset_ninja
+        dataset_name: "road-damage-detector"
+        native_class_filter: "pothole"
+        role: volume_topup
+        note: "Deprioritized (DEC-034) — fallback only if combined primary volume is insufficient."
+      - source: roboflow
+        project: "mahindra-university-ogyod/utility-poles-44tzx"
+        role: diversity
+        note: "Dual-purpose source, also contributes to Pole. Added 2026-08-08, DEC-035."
     cap: 5000
 
   trash_bins:
@@ -257,8 +326,12 @@ classes:
       - source: roboflow
         project: "rightly-ai-huxry/elevator-status-s4lrk"
         audit_note: >
-          Verify detection vs classification taxonomy before
-          including. Resolve during Stage 5.3 box audit.
+          Mini-audit 2026-08-08 (DEC-031): partially usable — has
+          genuine detection-style samples (people in elevators with
+          real boxes), not purely a scene classifier as first
+          suspected. State-related labels collapse into a single
+          "elevator" class. Same box-shape concern as Stairs. Full
+          Stage 5.3 audit still needed to isolate the usable subset.
     cap: null
 
   pedestrian_lane:

@@ -169,8 +169,11 @@ This phase follows a 9-stage pipeline (Stage 5.0 eliminated by D-018r). Each sta
 
 **Goal:** Train an initial YOLOv8s model and establish baseline metrics.
 
+> Runs on RunPod (cloud GPU), not the local machine — see DEC-026.
+
 | Task | Status |
 |------|--------|
+| Package `dataset/final/` + `data.yaml` and upload to RunPod | ⬜ Todo |
 | Create `notebooks/train_yolov8.ipynb` | ⬜ Todo |
 | Train YOLOv8s baseline with default augmentation | ⬜ Todo |
 | Log baseline metrics (mAP, precision, recall per class) | ⬜ Todo |

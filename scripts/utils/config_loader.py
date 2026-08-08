@@ -60,14 +60,16 @@ CLASSES_YAML: Path = REPO_ROOT / "config" / "classes.yaml"
 DATASETS_YAML: Path = REPO_ROOT / "config" / "datasets.yaml"
 
 # Authoritative class count — must match nc in classes.yaml
-EXPECTED_NC: int = 15
+EXPECTED_NC: int = 16
 
 # Canonical class names in YOLO id order (0-indexed).
 # Must stay in sync with AGENTS.md and config/classes.yaml.
+# ID 2 was "Two Wheeler" until DEC-038 (2026-08-08) split it into
+# Motorcycle (slot reused, ID 2) and Bicycle (new, appended at ID 15).
 CANONICAL_NAMES: list[str] = [
     "Person",
     "Vehicle",
-    "Two Wheeler",
+    "Motorcycle",
     "Pole",
     "Animals",
     "Stairs",
@@ -80,6 +82,7 @@ CANONICAL_NAMES: list[str] = [
     "Trash Bins",
     "Elevator",
     "Pedestrian Lane",
+    "Bicycle",
 ]
 
 
@@ -111,7 +114,7 @@ def load_classes() -> dict[str, Any]:
 
     Validation checks:
       - File exists and parses as a YAML mapping.
-      - 'nc' field matches EXPECTED_NC (15).
+      - 'nc' field matches EXPECTED_NC (16).
       - 'names' field has exactly nc entries.
       - Each canonical name matches the hardcoded CANONICAL_NAMES list.
 
@@ -183,7 +186,7 @@ def load_datasets() -> dict[str, Any]:
 
 def get_canonical_names() -> list[str]:
     """
-    Return the ordered list of 15 canonical class names (0-indexed for YOLO).
+    Return the ordered list of 16 canonical class names (0-indexed for YOLO).
 
     This is the authoritative source for class ordering in training YAML,
     converter scripts, and evaluation scripts.
@@ -191,7 +194,7 @@ def get_canonical_names() -> list[str]:
     Returns
     -------
     list[str]
-        15 class names in YOLO label order.
+        16 class names in YOLO label order.
     """
     return CANONICAL_NAMES.copy()
 
@@ -209,7 +212,7 @@ def get_class_id(name: str) -> int:
     Returns
     -------
     int
-        Class ID (0–14).
+        Class ID (0–15).
 
     Raises
     ------
@@ -232,7 +235,7 @@ def get_class_name(class_id: int) -> str:
     Parameters
     ----------
     class_id : int
-        YOLO class ID (0–14).
+        YOLO class ID (0–15).
 
     Returns
     -------
@@ -242,7 +245,7 @@ def get_class_name(class_id: int) -> str:
     Raises
     ------
     IndexError
-        If class_id is out of the valid range 0–14.
+        If class_id is out of the valid range 0–15.
     """
     if not (0 <= class_id < EXPECTED_NC):
         raise IndexError(

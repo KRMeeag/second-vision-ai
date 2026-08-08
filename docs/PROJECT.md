@@ -81,13 +81,13 @@ The detection model provides **semantic object identification** that complements
 
 ## Target Classes
 
-15 classes (14 confirmed + 1 possible) selected from user research (survey data, Figures B.6–B.11):
+16 classes (15 confirmed + 1 possible) selected from user research (survey data, Figures B.6–B.11):
 
 | ID | Class | Category | Why It Matters |
 |----|-------|----------|---------------|
 | 0 | Person | Dynamic hazard | 80% struggle with unpredictable crowds |
 | 1 | Vehicle | Life safety | High-mass kinetic threat during outdoor transit |
-| 2 | Two Wheeler | Life safety | Fast-moving, common in Philippine streets |
+| 2 | Motorcycle | Life safety | Fast, high-speed hazard common in Philippine streets |
 | 3 | Pole | Static obstacle | Utility poles as common street-level collision hazard |
 | 4 | Animals | Dynamic hazard | Unpredictable, low-level living obstacles |
 | 5 | Stairs | Elevation | 84% struggle with elevation changes |
@@ -100,6 +100,7 @@ The detection model provides **semantic object identification** that complements
 | 12 | Trash Bins | Obstacle | Frequently relocated barriers |
 | 13 | Elevator | Navigation + Elevation | Multi-floor transit, specific interaction |
 | 14 | Pedestrian Lane | Safety (invisible to depth) | Guides safe street crossing |
+| 15 | Bicycle | Life safety | Slow, silent hazard — easy to miss without engine noise |
 
 ---
 
@@ -135,9 +136,9 @@ Training (this repo)          Runtime (after Hailo)
 ─────────────────             ─────────────────────
 0: Person                     0: Background (injected)
 1: Vehicle                    1: Person
-2: Two Wheeler                2: Vehicle
+2: Motorcycle                 2: Vehicle
 ...                           ...
-14: Pedestrian Lane           15: Pedestrian Lane
+15: Bicycle                   16: Bicycle
 ```
 
 ---
@@ -146,13 +147,13 @@ Training (this repo)          Runtime (after Hailo)
 
 | Source | Type | Expected Contribution |
 |--------|------|----------------------|
-| Open Images V7 | Large-scale annotated | Primary for Person, Vehicle, Two Wheeler, Animals, Chairs, Tables, Trash Bins |
+| Open Images V7 | Large-scale annotated | Primary for Person, Vehicle, Motorcycle, Bicycle, Animals, Chairs, Tables, Trash Bins |
 | CrowdHuman | Person-focused detection | Secondary (volume_topup) for Person |
 | ExDark | Low-light imagery | Cross-cutting augmentation for 6 classes (DEC-014) |
 | Roboflow Universe (14 projects) | Community curated | Stairs, Escalator, Doors, Elevator, Pedestrian Lane, Tricycle, Pole, Vehicle secondary |
 | Dataset Ninja (2 datasets) | Pothole-specific | Primary + secondary for Potholes |
 
-All sources are mapped into the single canonical 15-class schema. Roboflow sources are pulled locally via pinned SDK versions (DEC-018r).
+All sources are mapped into the single canonical 16-class schema. Roboflow sources are pulled locally via pinned SDK versions (DEC-018r).
 
 > **Dropped sources:** MS COCO 2017, Mapillary Vistas (DEC-013), Objects365 (DEC-024), Custom-collected.
 
@@ -168,7 +169,7 @@ A model is considered deployment-ready when:
 - [ ] Hailo DFC compilation succeeds
 - [ ] HEF model runs correctly on Hailo-8 via hailo-apps
 - [ ] Inference latency is acceptable for real-time use
-- [ ] Custom label JSON correctly maps all 15 classes
+- [ ] Custom label JSON correctly maps all 16 classes
 
 ---
 

@@ -11,12 +11,29 @@
 #   - pinned_version: the dataset version number to download
 #     (set after identifying the best version; null until then)
 #   - download_format: yolov8 | coco | voc (format for SDK download)
-#   - audit_status: pending | approved | rejected
+#   - audit_status: pending | approved | rejected | failed | benched
+#     ("failed" = did not pass initial manual look (e.g. bad box
+#     geometry) — a relabel candidate, distinct from "rejected" which
+#     is final. "benched" = nothing wrong with the source itself, just
+#     not the currently-chosen option for strategic/logistics reasons
+#     — e.g. a better-fit alternative was found, or the source is
+#     temporarily impractical to acquire. Both are "not pursued right
+#     now" but for different reasons — keep them distinct so a future
+#     read knows whether revisiting it means fixing a problem or just
+#     reconsidering a choice.)
 #
 # Roboflow pools are pulled locally via the Python SDK:
 #   project.version(N).download(format)
 # and then curated through the same FiftyOne/CVAT pipeline
 # as all other sources (Stages 5.3 + 5.5).
+#
+# Version-selection default (2026-08-08): pin whichever version is
+# latest / currently visible when browsing the project on Roboflow's
+# site, since that's what quality judgments are actually based on —
+# NOT necessarily the version with the most images. See escalator_stairs
+# and pothole_vhmow for cases where an older version had more images
+# than the latest. Deviate only with a specific reason, noted inline.
+# Verified via scripts/acquire/list_roboflow_versions.py.
 #
 # Schema: HANDOFF v3 + D-018r, DEC-024 (updated 2026-08-06)
 # ============================================================
@@ -28,8 +45,8 @@
 open_images:
   description: >
     Google Open Images V7 — large-scale annotated dataset with
-    600+ classes. Primary source for Person, Vehicle, Two Wheeler,
-    Animals, Chairs, Tables, Trash Bins. Also serves as the
+    600+ classes. Primary source for Person, Vehicle, Motorcycle,
+    Bicycle, Animals, Chairs, Tables, Trash Bins. Also serves as the
     unified high-volume backbone replacing Objects365 (DEC-024).
   loader: fiftyone_zoo
   fiftyone_dataset_name: "open-images-v7"
@@ -52,13 +69,14 @@ open_images:
     - "Cat"
     - "Chair"
     - "Table"
+    - "Coffee table"
     - "Waste container"
   notes: >
-    Verify exact native class name strings against the Open Images
-    class hierarchy before writing acquire_openimages.py. In
-    particular, "Waste container" for Trash Bins and "Table" (vs
-    "Coffee table", "Kitchen & dining room table") need confirmation.
-    This replaces the old Objects365 Blocker #5.
+    Verified 2026-08-08 via fiftyone.utils.openimages.get_classes()
+    against the live OI V7 class hierarchy (601 total classes) —
+    "Waste container" and "Table" both confirmed exact matches.
+    "Coffee table" confirmed to exist and added per DEC-029 (mall/
+    lounge deployment scenes). Resolves Blocker #5.
 
 crowdhuman:
   description: >
@@ -93,8 +111,8 @@ exdark:
   exdark_to_canonical_class_map:
     People: person
     Car: vehicle
-    Motorbike: two_wheeler
-    Bicycle: two_wheeler
+    Motorbike: motorcycle
+    Bicycle: bicycle
     Dog: animals
     Cat: animals
     Chair: chairs
@@ -109,20 +127,45 @@ exdark:
 dataset_ninja_pothole_detection:
   description: >
     Pothole detection dataset — 665 images, single class.
-    Primary source for Potholes.
+    Co-primary source for Potholes, alongside Roboflow pothole-vhmow
+    (DEC-034). Combined volume expected to stay under 3500 without
+    needing road-damage-detector.
   dataset_name: "pothole-detection"
+  loader: dataset_tools
+  download_command: >
+    pip install dataset-tools; then
+    dataset_tools.download(dataset="Pothole Detection", dst_dir=...)
+  native_delivery_format: supervisely
   annotation_format: pascal_voc
   bbox_mode: project_dependent
   license: "Check Dataset Ninja listing"
   total_images: 665
   native_classes_needed:
     - "pothole"
+  audit_status: blocked
+  audit_note: >
+    Attempted 2026-08-08: dataset-tools resolves to a Dropbox-hosted
+    file link that returned "Link Temporarily Disabled" (Dropbox
+    free-tier rate limit), not real data. Also required `brew install
+    libmagic` (system-level, not pip) before dataset-tools/supervisely
+    would even import, and installing supervisely downgraded xmltodict
+    below fiftyone's stated floor (fiftyone still imported fine in
+    this environment, but the conflict is real — pip flagged it).
+    Not rejected — retry later, Dropbox link limits are often
+    temporary. Note: native delivery format is Supervisely's own
+    schema, NOT directly Pascal VOC as this file previously assumed —
+    needs sly.convert.to_pascal_voc() before FiftyOne's native VOC
+    importer can read it (FiftyOne has no native Supervisely importer).
+    DEC-034.
 
 dataset_ninja_road_damage_detector:
   description: >
     Road Damage Detector (RDD2022) — 47,420 images, 7 classes.
-    Secondary (volume_topup) source for Potholes.
-    REQUIRES class-filtering to extract only pothole instances.
+    Deprioritized (DEC-034) — mixes potholes with crack/repair
+    classes requiring filtering, in favor of combining two
+    single-purpose "pure pothole" sources (this dataset's sibling
+    + Roboflow pothole-vhmow) instead. Kept as a fallback if the
+    combined volume proves insufficient.
   dataset_name: "road-damage-detector"
   annotation_format: coco_style
   bbox_mode: project_dependent
@@ -133,7 +176,9 @@ dataset_ninja_road_damage_detector:
     - "pothole"
   notes: >
     Filter to "pothole" class only, discard crack/repair
-    classes during conversion.
+    classes during conversion. Same native-delivery-format caveat
+    as dataset_ninja_pothole_detection likely applies (unverified —
+    not attempted yet).
 
 # ========================
 # Roboflow Sources
@@ -148,28 +193,41 @@ roboflow_projects:
   stairs_lusiz:
     canonical_class: stairs
     original_url: "https://universe.roboflow.com/stairs-n9kkx/stairs-lusiz"
-    pinned_version: null
+    pinned_version: 1  # only version available (4089 images), 2026-08-08
     download_format: yolov8
-    audit_status: pending
+    audit_status: failed
+    audit_note: >
+      Boxes wrap tightly around the staircase silhouette rather than
+      sitting as a clean axis-aligned rectangle — looks polygon-derived,
+      not a true bbox. Not discarded — relabel candidate if volume is
+      worth recovering. See docs/preprocessing.md. DEC-031.
 
   stairs_hsatv:
     canonical_class: stairs
     original_url: "https://universe.roboflow.com/abeera-munir-v9edc/stairs-hsatv"
-    pinned_version: null
+    pinned_version: 1  # only version available (559 images), 2026-08-08
     download_format: yolov8
-    audit_status: pending
+    audit_status: failed
+    audit_note: >
+      Same box-shape issue as stairs_lusiz — see docs/preprocessing.md.
+      DEC-031.
 
+  # Priority: stairs_i2yia and escalator_stairs are the two Stairs
+  # sources still pending and are prioritized over relabeling the
+  # two failed sources above (DEC-031).
   stairs_i2yia:
     canonical_class: stairs
     original_url: "https://universe.roboflow.com/tom-lai-8bp7n/stairs-i2yia"
-    pinned_version: null
+    pinned_version: 3  # only version returned (1567 images) — v1/v2 apparently retired by owner, 2026-08-08
     download_format: yolov8
     audit_status: pending
 
   escalator_stairs:
     canonical_classes: [stairs, escalator]
     original_url: "https://universe.roboflow.com/escalatorstairsdetection/escalator-stairs"
-    pinned_version: null
+    pinned_version: 3  # latest, 8685 images — matches what the student visually reviewed in
+    # the Roboflow GUI. v2 (34740 images) is oddly ~4x larger than both v1 and v3; not used
+    # since it doesn't match the visually-inspected current project state. 2026-08-08.
     download_format: yolov8
     audit_status: pending
     native_class_filter:
@@ -180,7 +238,7 @@ roboflow_projects:
   cv_project_hovyc:
     canonical_class: doors
     original_url: "https://universe.roboflow.com/testspace-xwkgk/cv-project-hovyc"
-    pinned_version: null
+    pinned_version: 2  # latest of 2 (1341 images), 2026-08-08
     download_format: yolov8
     audit_status: pending
 
@@ -188,26 +246,33 @@ roboflow_projects:
   elevator_awvus:
     canonical_class: elevator
     original_url: "https://universe.roboflow.com/detection-3h20r/elevator-awvus"
-    pinned_version: null
+    pinned_version: 2  # latest of 2 (1778 images), 2026-08-08
     download_format: yolov8
     audit_status: pending
 
   elevator_status_s4lrk:
     canonical_class: elevator
     original_url: "https://universe.roboflow.com/rightly-ai-huxry/elevator-status-s4lrk"
-    pinned_version: null
+    pinned_version: 1  # only version available (3656 images), 2026-08-08
     download_format: yolov8
     audit_status: pending
     audit_note: >
-      PRIORITY AUDIT: Confirm this is a true object-detection set
-      with usable bounding boxes for "elevator" as an object,
-      not a scene/state classifier. Resolve during Stage 5.3.
+      Mini-audit 2026-08-08: primarily close-up elevator shots.
+      Multiple state-related labels exist but can all collapse into
+      the single canonical "elevator" class — this project doesn't
+      need state discrimination. Does contain genuine detection-style
+      samples (people inside elevators with real bounding boxes), not
+      purely image-level classification as originally suspected. Same
+      box-shape concern as Stairs applies (boxes cling to object shape
+      rather than a clean axis-aligned rectangle) — see
+      docs/preprocessing.md. Still pending full Stage 5.3 audit to
+      isolate the usable detection-style subset. DEC-031.
 
   # --- Pedestrian Lane ---
   pedestrian_and_animal_crossing:
     canonical_class: pedestrian_lane
     original_url: "https://universe.roboflow.com/anomaly-road-crossing-detection/pedestrian-and-animal-crossing"
-    pinned_version: null
+    pinned_version: 1  # only version available (1071 images), 2026-08-08
     download_format: yolov8
     audit_status: pending
     native_class_filter: "pedestrian_crossing"
@@ -219,38 +284,76 @@ roboflow_projects:
   augmented_tricycle:
     canonical_class: tricycle
     original_url: "https://universe.roboflow.com/traffico-augmented/augmented-tricycle"
-    pinned_version: null
+    pinned_version: 1  # only version available (3021 images), 2026-08-08
     download_format: yolov8
     audit_status: pending
+    audit_note: >
+      Needs a duplicate-image pass at Stage 5.6 (FiftyOne Brain,
+      DEC-025). Missing Person annotations for images where people
+      are visibly present (e.g. the tricycle driver) — see the
+      model-assisted pre-labeling procedure in docs/preprocessing.md.
 
   traffico_y1:
-    canonical_classes: [tricycle, vehicle, two_wheeler]
+    canonical_classes: [tricycle, vehicle, motorcycle]
     original_url: "https://universe.roboflow.com/yoloffico/traffico-y1"
     pinned_version: null
     download_format: yolov8
     audit_status: pending
-    native_class_filter: "TBD-post-audit"
+    native_class_filter:
+      vehicle: "Jeepney"
+      motorcycle: "Motorcycle"
+      tricycle: ["Tricycle", "tricycle"]
     audit_note: >
-      PRIORITY AUDIT: Full class list dump required. Confirm
-      which canonical classes (Vehicle / Two Wheeler / Tricycle)
-      it legitimately contributes to. Check overlap with
-      Jeepney/tricycle-dedicated sources. Run dedup checks.
-      Resolve during Stage 5.3.
+      Full class list obtained 2026-08-08 (DEC-032): Jeepney,
+      Motorcycle, null, Tricycle, tricycle. Mapped as above — the
+      "Tricycle"/"tricycle" case-variant pair both map to the
+      canonical tricycle class. The "null" entry is left unresolved
+      for now (likely an empty/background class artifact, not a real
+      label). Dedup against Jeepney/tricycle-dedicated sources still
+      needed at Stage 5.6.
 
-  # --- Vehicle secondary (Jeepney) ---
+      BLOCKED 2026-08-08: list_roboflow_versions.py returned zero
+      generated versions for this project via the API, despite the
+      class list above having been obtained by browsing it directly.
+      Likely nobody has clicked "Generate" on Roboflow's side yet —
+      needs checking on the project page before a version can be
+      pinned.
+
+  # --- Vehicle + Motorcycle secondary (Jeepney/Ambulance/Cars/Motorcycle) ---
   me5_u6rvg:
-    canonical_class: vehicle
+    canonical_classes: [vehicle, motorcycle]
     original_url: "https://universe.roboflow.com/machine-exercise-5/me5-u6rvg"
-    pinned_version: null
+    pinned_version: 1  # only version available (7243 images total, across all classes below)
     download_format: yolov8
     audit_status: pending
+    native_class_filter:
+      vehicle: ["Ambulance", "Cars", "Jeepney"]
+      motorcycle: "Motorcycle"
+    audit_note: >
+      Reactivated 2026-08-08 (DEC-037, supersedes the relevant part of
+      DEC-032) — traffico-y1 remains blocked (zero generated versions)
+      and forking it was declined (uncertainty over Roboflow credit
+      consumption), so this replaces jeep_hozhs as Vehicle's active
+      secondary. Full class list: Ambulance, Cars, Jeepney, Motorcycle,
+      null — same multi-class shape as traffico-y1, mapped the same
+      way. "null" left unresolved, same reasoning as traffico-y1.
+      Vehicle-specific image count is NOT the full 7243 — that's the
+      total across all 5 classes; the Ambulance+Cars+Jeepney subset is
+      unknown until acquired and class-filtered.
 
   jeep_hozhs:
     canonical_class: vehicle
     original_url: "https://universe.roboflow.com/lozanomartirezquimno-thesis/jeep-hozhs"
-    pinned_version: null
+    pinned_version: 3  # latest — all 3 versions have identical 1988 images; per-version split
+    # differences (v3 has almost no test set) don't matter since source splits are discarded
+    # and rebuilt at Stage 5.8 regardless (DEC-036). 2026-08-08.
     download_format: yolov8
-    audit_status: pending
+    audit_status: benched
+    audit_note: >
+      Benched 2026-08-08 (DEC-037) in favor of me5_u6rvg — nothing
+      wrong with this source itself, just not currently the chosen
+      one. Not deleted; reconsider if me5_u6rvg's actual Vehicle-only
+      count proves insufficient.
 
   # --- Pole ---
   pole_detection_z76mb:
@@ -263,6 +366,36 @@ roboflow_projects:
       Original native class is "Utility pole detection - v1
       2023-05-17 3:44pm" — remapped to "pole" during conversion.
     estimated_images: ~3100
+
+  # --- Potholes ---
+  pothole_vhmow:
+    canonical_class: potholes
+    original_url: "https://universe.roboflow.com/yeeun-kim-fyvoj/pothole-vhmow"
+    pinned_version: 18  # latest (1302 images). Note: smaller than v17 (2718) — same
+    # latest-isn't-largest pattern as escalator_stairs. Defaulting to latest per the
+    # visually-inspected-version rule; flag if the live GUI showed something closer to v17. 2026-08-08.
+    download_format: yolov8
+    audit_status: pending
+    audit_note: >
+      Prioritized 2026-08-08 (DEC-034) — pure-pothole project (no
+      other classes to filter out), paired with Dataset Ninja's
+      pothole-detection as the two co-primary sources for Potholes.
+      Student's own note: "a bit lower quality" than Dataset Ninja's
+      set — worth a closer look once pulled, box_audit.py (Stage 5.3)
+      should catch specifics.
+
+  # --- Pole + Potholes secondary (dual-purpose) ---
+  utility_poles_44tzx:
+    canonical_classes: [pole, potholes]
+    original_url: "https://universe.roboflow.com/mahindra-university-ogyod/utility-poles-44tzx"
+    pinned_version: 2  # latest (5089 images, larger than v1's 3616 — consistent growth, no anomaly). 2026-08-08.
+    download_format: yolov8
+    audit_status: pending
+    audit_note: >
+      Dual-purpose source — contains both poles and potholes. Added
+      2026-08-08 (DEC-035) as secondary for both classes. Native class
+      list not yet verified; confirm exact labels during Stage 5.3
+      box audit (same multi-class pattern as escalator_stairs).
 
   # --- Trash Bins secondary (TBD) ---
   trash_bins_secondary:

@@ -48,13 +48,13 @@ Deployment via hailo-apps on Raspberry Pi 5
 
 ## Target Classes
 
-The following **15 classes** (14 confirmed + 1 possible) define the canonical label schema:
+The following **16 classes** (15 confirmed + 1 possible) define the canonical label schema:
 
 | ID | Class | Rationale |
 |----|-------|-----------| 
 | 0 | Person | Dynamic collision hazard — crowds and moving pedestrians |
 | 1 | Vehicle | High-mass kinetic threat during outdoor transit |
-| 2 | Two Wheeler | Fast-moving hazard common in Philippine streets |
+| 2 | Motorcycle | Fast-moving, high-speed hazard common in Philippine streets |
 | 3 | Pole | Utility poles as common street-level collision obstacles |
 | 4 | Animals | Unpredictable low-level living obstacles (dogs, cats) |
 | 5 | Stairs | Elevation change requiring rhythmic stepping preparation |
@@ -67,6 +67,7 @@ The following **15 classes** (14 confirmed + 1 possible) define the canonical la
 | 12 | Trash Bins | Frequently relocated static barriers on memorized routes |
 | 13 | Elevator | Multi-floor transit point with specific interaction needs |
 | 14 | Pedestrian Lane | Painted crossings invisible to depth — guides safe crossing |
+| 15 | Bicycle | Slow, silent hazard — easy to miss without visual/audio cues |
 
 These classes were selected based on user research and are the authoritative class list unless explicitly changed. See DEC-002, DEC-015, DEC-021.
 
