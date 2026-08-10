@@ -307,14 +307,17 @@ classes:
     primary:
       source: open_images
       native_class: "Waste container"
-      verify_note: >
-        Open Images class name for trash bins/cans may be
-        "Waste container" — verify against OI class hierarchy
-        before writing acquire script.
+      # Verified 2026-08-08 (DEC-029) — exact match confirmed via
+      # fiftyone.utils.openimages.get_classes().
     secondary_providers:
       - source: roboflow
         project: "TBD"
-        audit_note: "Secondary Roboflow project not yet identified."
+        audit_status: benched
+        audit_note: >
+          Benched 2026-08-08 (DEC-039) — Open Images primary judged
+          sufficient for now rather than continuing to search for a
+          project. Revisit only if post-acquisition evaluation shows
+          the primary alone is insufficient in volume/diversity.
     secondary_role: diversity
     cap: 5000
 

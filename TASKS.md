@@ -53,12 +53,12 @@ Repository documentation aligned with HANDOFF v3 + D-018r + DEC-024. Configurati
 
 #### Stage 5.1: Acquisition
 - [x] Verify Open Images native class name strings (Blocker #5 scope) — resolved 2026-08-08, DEC-029
-- [ ] Build `scripts/acquire/acquire_openimages.py` (FiftyOne Zoo, 7 classes)
+- [ ] Build `scripts/acquire/acquire_openimages.py` (FiftyOne Zoo, 8 classes — Motorcycle/Bicycle split per DEC-038)
 - [ ] Build `scripts/acquire/acquire_crowdhuman.py`
 - [ ] Build `scripts/acquire/acquire_exdark.py`
 - [ ] Build `scripts/acquire/acquire_datasetninja.py`
 - [ ] Build `scripts/acquire/acquire_roboflow.py` (pinned SDK versions)
-- [x] Pin versions for all Roboflow projects in `datasets.yaml` — resolved 2026-08-08 via `list_roboflow_versions.py` + DEC-036 (splits discarded regardless, so version choice = latest by default). Exceptions still open: `traffico_y1` (zero generated versions, needs checking on Roboflow's side), `me5_u6rvg` (deprioritized, not pinned), `trash_bins_secondary` (project still TBD)
+- [x] Pin versions for all Roboflow projects in `datasets.yaml` — resolved 2026-08-08 via `list_roboflow_versions.py` + DEC-036 (splits discarded regardless, so version choice = latest by default). Only remaining exception: `traffico_y1` (zero generated versions, needs checking on Roboflow's side). `me5_u6rvg` reactivated and pinned (v1, DEC-037); `trash_bins` secondary benched, not pursued (DEC-039)
 
 #### Stage 5.2: Conversion
 - [ ] Build 5 converter scripts (OI, CrowdHuman, ExDark, VOC, YOLO → intermediate)
@@ -100,7 +100,7 @@ See [PLAN.md](file:///Users/luna/Projects/Thesis/second-vision-ai/docs/PLAN.md) 
 
 | # | Blocker | Status |
 |---|---------|--------|
-| 1 | Trash Bins secondary Roboflow project — TBD | ⬜ Unresolved |
+| 1 | Trash Bins secondary Roboflow project — TBD | 🔵 Benched 2026-08-08 (DEC-039) — Open Images primary judged sufficient; revisit only if evaluation shows it's not |
 | 2 | traffico-y1 full class audit | ✅ Resolved 2026-08-08 — DEC-032 |
 | 3 | elevator-status-s4lrk audit | 🟡 Partially resolved 2026-08-08 (DEC-031) — usable subset confirmed, full isolation still needs Stage 5.3 |
 | 4 | pedestrian-and-animal-crossing class names | ⬜ Resolve during Stage 5.3 |
@@ -124,3 +124,4 @@ See [PLAN.md](file:///Users/luna/Projects/Thesis/second-vision-ai/docs/PLAN.md) 
 | FiftyOne + Roboflow SDK verified, `config/training.yaml` created | 2026-08-07 | fiftyone 1.20.0 (pre-installed) + roboflow 1.4.0 (installed) both import cleanly together (roboflow pinned numpy/opencv-python-headless down slightly — no conflict). Baseline training config parses clean |
 | Source re-audit round: Stairs/Elevator box-shape findings, traffico-y1 resolved, Jeepney consolidated, Potholes sourcing resolved, Pole/Potholes dual-source added | 2026-08-08 | DEC-031 through DEC-035. `docs/preprocessing.md` created for findings log + model-assisted labeling procedure. Dataset Ninja `pothole-detection` confirmed blocked (Dropbox rate limit) via live attempt, not just guessed |
 | Jeepney secondary reworked, `Two Wheeler` split into `Motorcycle` + `Bicycle` | 2026-08-08 | DEC-037 (jeep_hozhs benched, me5_u6rvg reactivated), DEC-038 (schema: nc 15→16, ID 2 renamed Two Wheeler→Motorcycle, new ID 15 Bicycle). Propagated across classes.yaml, datasets.yaml, config_loader.py, AGENTS.md, README.md, PROJECT.md, DECISIONS.md |
+| Trash Bins secondary search benched | 2026-08-08 | DEC-039 — Blocker #1 closed as benched, not resolved. Open Images `"Waste container"` primary judged sufficient for now |

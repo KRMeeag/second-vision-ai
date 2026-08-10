@@ -78,6 +78,12 @@ models/archived/
 .env.*
 
 # ==========================
+# Agent handoffs (local scratch, not for git)
+# ==========================
+
+.agents/
+
+# ==========================
 # Temporary
 # ==========================
 

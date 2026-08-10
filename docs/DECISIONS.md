@@ -1045,6 +1045,36 @@ Discussing whether to keep them merged surfaced two independent arguments for sp
 
 ---
 
+## DEC-039: Trash Bins Secondary Source Benched — Open Images Primary Judged Sufficient
+
+- **Date:** 2026-08-08
+- **Status:** Accepted
+
+### Context
+
+Blocker #1 (open since Phase 0) — no secondary Roboflow project had ever been identified for Trash Bins; `classes.yaml`'s `secondary_providers` entry was left as a `"TBD"` placeholder. Rather than keep searching for a project with no clear evidence it's needed, the student chose to move on and revisit only if warranted later.
+
+### Decision
+
+Bench the search for a Trash Bins secondary source. Open Images (`"Waste container"`, already verified per DEC-029) remains the sole source for now. The `"TBD"` placeholder in `classes.yaml` is marked `audit_status: benched`, not deleted — the slot stays reserved for later.
+
+### Rationale
+
+Same benched-vs-failed distinction established in DEC-037: nothing is wrong with the idea of a secondary source, it's just not currently justified. No evidence yet that the Open Images primary is insufficient, and continuing to search preemptively delays other pipeline work — consistent with DEC-027's bounded-effort philosophy.
+
+### Alternatives Considered
+
+- **Keep searching for a Roboflow secondary now**: Rejected — no evidence of insufficiency yet; premature effort.
+- **Delete the secondary_providers entry entirely**: Rejected — keeping the benched placeholder preserves the reminder that a secondary was considered, without implying it's an open TODO blocking other work.
+
+### Consequences
+
+- Blocker #1 marked benched (not resolved) in `TASKS.md`'s Open Blockers table.
+- Revisit trigger: post-acquisition/curation evaluation (Stage 5.1 or later) shows Open Images `"Waste container"` volume/diversity is insufficient for the target range.
+- If revisited, the same Roboflow-search workflow used for other classes applies — no new process needed.
+
+---
+
 ## Template for Future Decisions
 
 ```markdown
