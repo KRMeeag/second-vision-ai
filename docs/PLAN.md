@@ -70,23 +70,27 @@ This phase follows a 9-stage pipeline (Stage 5.0 eliminated by D-018r). Each sta
 
 | Task | Status |
 |------|--------|
-| Verify Open Images native class name strings (Blocker #5 scope) | ⬜ Todo |
-| Build `scripts/acquire/acquire_openimages.py` (FiftyOne Zoo) | ⬜ Todo |
-| Build `scripts/acquire/acquire_crowdhuman.py` | ⬜ Todo |
-| Build `scripts/acquire/acquire_exdark.py` | ⬜ Todo |
-| Build `scripts/acquire/acquire_datasetninja.py` | ⬜ Todo |
-| Build `scripts/acquire/acquire_roboflow.py` (pinned SDK versions) | ⬜ Todo |
-| Pin versions for all Roboflow projects in `datasets.yaml` | ⬜ Todo |
+| Verify Open Images native class name strings (Blocker #5 scope) | ✅ Done (DEC-029) |
+| Build `scripts/acquire/acquire_openimages.py` (FiftyOne Zoo) | ✅ Done (DEC-040, DEC-042-044) — full 8-class run complete (DEC-051) |
+| Build `scripts/acquire/acquire_crowdhuman.py` | ✅ Done (DEC-047, DEC-048) — full real pull complete (DEC-056) |
+| Build `scripts/acquire/acquire_exdark.py` | ✅ Done (DEC-046) — full real conversion run, output on disk |
+| Build `scripts/acquire/acquire_datasetninja.py` | ✅ Done (DEC-049) — full real conversion run, output on disk |
+| Build `scripts/acquire/acquire_roboflow.py` (pinned SDK versions) | ✅ Done (DEC-045) — all 11 eligible projects pulled (DEC-051) |
+| Pin versions for all Roboflow projects in `datasets.yaml` | ✅ Done — all except `traffico_y1` (blocked, zero generated versions) |
+
+**Stage 5.1 status: ✅ 100% complete** (2026-08-13).
 
 ### Stage 5.2: Conversion
 
 | Task | Status |
 |------|--------|
-| Build `scripts/convert/openimages_to_intermediate.py` | ⬜ Todo |
-| Build `scripts/convert/crowdhuman_odgt_to_intermediate.py` | ⬜ Todo |
-| Build `scripts/convert/exdark_to_intermediate.py` | ⬜ Todo |
-| Build `scripts/convert/voc_to_intermediate.py` | ⬜ Todo |
-| Build `scripts/convert/yolo_to_intermediate.py` (Roboflow YOLO format) | ⬜ Todo |
+| Build `scripts/convert/openimages_to_intermediate.py` | ✅ Done (DEC-052) — real run complete, output on disk |
+| Build `scripts/convert/yolo_to_intermediate.py` (Roboflow YOLO format) | ✅ Done (DEC-053, DEC-055) — all 11 projects converted, output on disk |
+| ~~Build `scripts/convert/crowdhuman_odgt_to_intermediate.py`~~ | Not needed — folded into `acquire_crowdhuman.py` (DEC-041, DEC-048) |
+| ~~Build `scripts/convert/exdark_to_intermediate.py`~~ | Not needed — folded into `acquire_exdark.py` (DEC-046) |
+| ~~Build `scripts/convert/voc_to_intermediate.py`~~ | Not needed — Dataset Ninja sources are Supervisely, not VOC; folded into `acquire_datasetninja.py` (DEC-049) |
+
+**Stage 5.2 status: ✅ 100% complete** (2026-08-13, DEC-056) — every source now sits in `dataset/processed/<source>/` in DEC-046's intermediate schema, ready for Stage 5.3.
 
 ### Stage 5.3: Box Audit
 
