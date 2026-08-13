@@ -19,8 +19,9 @@ convention: (cx, cy, w, h), each relative to image width/height.
 
 Pipeline context:
   YOLOv8 Training → ONNX Export → Hailo DFC → HEF → hailo-apps on RPi5
-  Intended for scripts/convert/exdark_to_intermediate.py and
-  scripts/convert/crowdhuman_odgt_to_intermediate.py (Stage 5.2), and
+  Intended for scripts/acquire/acquire_exdark.py and
+  scripts/acquire/acquire_crowdhuman.py (rescoped by DEC-041 to do
+  parsing/conversion themselves, not separate Stage 5.2 scripts), and
   scripts/preprocess/box_audit.py (Stage 5.3).
 """
 
@@ -118,7 +119,7 @@ def clip_bbox(cx: float, cy: float, w: float, h: float) -> tuple[float, float, f
     x1, y1, x2, y2 = _yolo_to_xyxy(cx, cy, w, h)
     x1, y1 = max(0.0, x1), max(0.0, y1)
     x2, y2 = min(1.0, x2), min(1.0, y2)
-    return _xyxy_to_yolo(x1, y1, x2, y2)
+    return xyxy_to_yolo(x1, y1, x2, y2)
 
 
 def _yolo_to_xyxy(cx: float, cy: float, w: float, h: float) -> tuple[float, float, float, float]:
@@ -126,8 +127,32 @@ def _yolo_to_xyxy(cx: float, cy: float, w: float, h: float) -> tuple[float, floa
     return cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2
 
 
-def _xyxy_to_yolo(x1: float, y1: float, x2: float, y2: float) -> tuple[float, float, float, float]:
-    """Corner-based (x1, y1, x2, y2) -> center-based (cx, cy, w, h)."""
+def xyxy_to_yolo(x1: float, y1: float, x2: float, y2: float) -> tuple[float, float, float, float]:
+    """
+    Convert a corner-based box (x1, y1, x2, y2) to center-based (cx, cy, w, h).
+
+    Covers Dataset Ninja's Supervisely-native `points.exterior` rectangle
+    format (two corner points) — used both internally (clip_bbox) and
+    directly by acquire_datasetninja.py, after normalizing pixel
+    coordinates to [0, 1] by image width/height.
+
+    Does not assume (x1, y1) is top-left — if the input is malformed
+    (degenerate or swapped), the resulting w or h will be non-positive
+    and validate_bbox() will correctly flag it rather than silently
+    producing a wrong box.
+
+    Parameters
+    ----------
+    x1, y1, x2, y2 : float
+        Corner-based box, any consistent unit (normalized [0, 1] or
+        absolute pixels — caller's responsibility to normalize before
+        use elsewhere in this module, which otherwise assumes [0, 1]).
+
+    Returns
+    -------
+    tuple[float, float, float, float]
+        (cx, cy, w, h).
+    """
     return (x1 + x2) / 2, (y1 + y2) / 2, x2 - x1, y2 - y1
 
 
