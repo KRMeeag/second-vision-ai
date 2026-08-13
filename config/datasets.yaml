@@ -82,15 +82,29 @@ crowdhuman:
   description: >
     CrowdHuman — person detection in crowded scenes.
     Used as secondary (volume_topup) for Person class.
-  download_url: "https://www.crowdhuman.org/"
+  download_url: "https://huggingface.co/datasets/sshao0516/CrowdHuman"
   annotation_format: odgt
   bbox_mode: native_unspecified
-  license: "Research use only"
+  license: "Research use only (CC-BY-NC-4.0, non-commercial, cite Shao et al. 2018 arXiv:1805.00123)"
   download_strategy: >
-    Full download acceptable (person-only, modest size).
-    Parse .odgt, extract vbox field only per DEC-012.
-    Discard fbox/hbox from training export.
-    Exclude entries tagged 'mask' or with extra.ignore == 1.
+    SCRIPTED (DEC-048, reverses DEC-041's manual-only stance for this
+    one source — mirror moved to HuggingFace under DEC-048, which is
+    public/ungated and has a real SDK, unlike the dead Baidu/Google
+    Drive originals). acquire_crowdhuman.py pulls
+    CrowdHuman_train01/02/03.zip, CrowdHuman_val.zip,
+    annotation_train.odgt, and annotation_val.odgt via
+    huggingface_hub.hf_hub_download() to dataset/raw/crowdhuman/.
+    Skips CrowdHuman_test.zip — DEC-036 discards every source's
+    original split and rebuilds one stratified split at Stage 5.8, so
+    a held-out test set from the source would just get pooled in
+    anyway. The two annotation files are small enough that they were
+    already fetched and verified for real (DEC-048) — the four image
+    zips (~14GB total) are not, left for a deliberate full run.
+    After download, acquire_crowdhuman.py extracts each zip's Images/
+    folder, parses .odgt, extracts vbox field only per DEC-012.
+    Discard fbox/hbox from training export. Exclude entries tagged
+    'mask' or with extra.ignore == 1 (verified against real data,
+    DEC-048 — this note was already correct before that verification).
 
 exdark:
   description: >
@@ -104,9 +118,13 @@ exdark:
   license: "Research use"
   total_images: ~7363
   download_strategy: >
-    Full download acceptable. Use wraphex/ExDark2Yolo parser
-    logic as conversion basis — adapt into shared intermediate
-    schema rather than direct-to-YOLO.
+    MANUAL DOWNLOAD (DEC-041) — not scripted. A single static archive
+    linked from the GitHub README (no direct API), so scripting a
+    one-time file-host download isn't worth the maintenance cost.
+    Download and extract into dataset/raw/exdark/. Once files are in
+    place, acquire_exdark.py uses wraphex/ExDark2Yolo parser logic as
+    conversion basis — adapt into shared intermediate schema rather
+    than direct-to-YOLO.
   parser_reference: "https://github.com/wraphex/ExDark2Yolo"
   exdark_to_canonical_class_map:
     People: person
@@ -131,54 +149,72 @@ dataset_ninja_pothole_detection:
     (DEC-034). Combined volume expected to stay under 3500 without
     needing road-damage-detector.
   dataset_name: "pothole-detection"
-  loader: dataset_tools
   download_command: >
-    pip install dataset-tools; then
-    dataset_tools.download(dataset="Pothole Detection", dst_dir=...)
+    MANUAL DOWNLOAD (DEC-041) — the site's own "Download" button on
+    https://datasetninja.com/pothole-detection, not dataset_tools
+    (rejected, see history below). Student placed files under
+    dataset/raw/dataset_ninja_pothole_detection/ 2026-08-13.
+    acquire_datasetninja.py (DEC-049) parses the real Supervisely
+    format directly — no SDK, no conversion step.
   native_delivery_format: supervisely
-  annotation_format: pascal_voc
-  bbox_mode: project_dependent
+  annotation_format: supervisely
+  bbox_mode: absolute_corner_pair
   license: "Check Dataset Ninja listing"
   total_images: 665
   native_classes_needed:
     - "pothole"
-  audit_status: blocked
+  audit_status: approved
   audit_note: >
-    Attempted 2026-08-08: dataset-tools resolves to a Dropbox-hosted
-    file link that returned "Link Temporarily Disabled" (Dropbox
-    free-tier rate limit), not real data. Also required `brew install
-    libmagic` (system-level, not pip) before dataset-tools/supervisely
-    would even import, and installing supervisely downgraded xmltodict
-    below fiftyone's stated floor (fiftyone still imported fine in
-    this environment, but the conflict is real — pip flagged it).
-    Not rejected — retry later, Dropbox link limits are often
-    temporary. Note: native delivery format is Supervisely's own
-    schema, NOT directly Pascal VOC as this file previously assumed —
-    needs sly.convert.to_pascal_voc() before FiftyOne's native VOC
-    importer can read it (FiftyOne has no native Supervisely importer).
-    DEC-034.
+    Resolved 2026-08-13 (DEC-049) — student placed files manually,
+    format verified directly against real data: genuine Supervisely
+    project export (ds/img/, ds/ann/*.json, meta.json), confirming
+    the 2026-08-08 finding below that it's Supervisely-native, not
+    Pascal VOC. Converted in full: 665/665 images, 1739/1740 boxes
+    kept (1 degenerate zero-width box correctly dropped as invalid).
+    Considered and rejected using the supervisely/dataset_tools SDK
+    for the conversion (as originally planned) — parsing the format
+    directly took ~20 lines and avoided re-hitting the friction noted
+    below, since the schema itself (corner-pair rectangles, in-JSON
+    image dimensions) is simple enough not to need it.
+
+    History: originally blocked 2026-08-08 — dataset-tools resolved
+    to a Dropbox-hosted link that returned "Link Temporarily Disabled"
+    (Dropbox free-tier rate limit), and installing dataset-tools/
+    supervisely required a system-level libmagic dependency and
+    downgraded xmltodict below fiftyone's stated floor. Manual
+    download via the site's own button (DEC-041) avoided the SDK
+    entirely, and the rate limit had cleared by the time the student
+    retried.
 
 dataset_ninja_road_damage_detector:
   description: >
-    Road Damage Detector (RDD2022) — 47,420 images, 7 classes.
-    Deprioritized (DEC-034) — mixes potholes with crack/repair
-    classes requiring filtering, in favor of combining two
-    single-purpose "pure pothole" sources (this dataset's sibling
-    + Roboflow pothole-vhmow) instead. Kept as a fallback if the
-    combined volume proves insufficient.
+    Road Damage Detector — deprioritized (DEC-034) fallback, mixes
+    potholes with crack/repair classes requiring filtering, in favor
+    of combining two single-purpose "pure pothole" sources (this
+    dataset's sibling + Roboflow pothole-vhmow) instead. Kept as a
+    fallback if the combined volume proves insufficient.
+    The full academic RDD2022 dataset is 47,420 images / 7 classes,
+    but the Dataset Ninja-hosted export actually placed under
+    dataset/raw/ (2026-08-13) is a smaller curated subset — 3,321
+    images, 4 classes (alligator/lateral/longitudinal crack, pothole).
+    Verified directly (meta.json + file count), not assumed — this
+    project's total_images/total_classes fields below describe that
+    subset, not the full RDD2022 figure.
   dataset_name: "road-damage-detector"
-  annotation_format: coco_style
-  bbox_mode: project_dependent
+  annotation_format: supervisely
+  bbox_mode: absolute_corner_pair
   license: "Check Dataset Ninja listing"
-  total_images: 47420
-  total_classes: 7
+  total_images: 3321
+  total_classes: 4
   native_classes_needed:
     - "pothole"
   notes: >
     Filter to "pothole" class only, discard crack/repair
     classes during conversion. Same native-delivery-format caveat
     as dataset_ninja_pothole_detection likely applies (unverified —
-    not attempted yet).
+    not attempted yet). If ever activated, same manual-download
+    guidance as dataset_ninja_pothole_detection applies (DEC-041) —
+    use the site's own "Download" button, not dataset_tools.
 
 # ========================
 # Roboflow Sources
@@ -231,8 +267,14 @@ roboflow_projects:
     download_format: yolov8
     audit_status: pending
     native_class_filter:
-      stairs: "stairs"
-      escalator: "escalator"
+      stairs: ["downstair", "upstair"]
+      escalator: "Escalator"
+    audit_note: >
+      2026-08-13: real exported class names are downstair/upstair/
+      Escalator, not stairs/escalator as originally configured (filter
+      keys didn't match anything real — verified against actual
+      data.yaml before writing openimages/yolo converters, DEC-053).
+      Fixed to match real names.
 
   # --- Doors ---
   cv_project_hovyc:
@@ -241,6 +283,12 @@ roboflow_projects:
     pinned_version: 2  # latest of 2 (1341 images), 2026-08-08
     download_format: yolov8
     audit_status: pending
+    native_class_filter: "Door"
+    audit_note: >
+      2026-08-13: real export has 5 classes (Door, Exit down, Exit left,
+      Exit right, Exit up) — only Door has a canonical slot. The other
+      4 are navigational signage with no canonical class; dropped, same
+      "drop what doesn't map" pattern as every other source (DEC-053).
 
   # --- Elevator (2 sources, 1 flagged for audit) ---
   elevator_awvus:
@@ -271,14 +319,31 @@ roboflow_projects:
   # --- Pedestrian Lane ---
   pedestrian_and_animal_crossing:
     canonical_class: pedestrian_lane
-    original_url: "https://universe.roboflow.com/anomaly-road-crossing-detection/pedestrian-and-animal-crossing"
-    pinned_version: 1  # only version available (1071 images), 2026-08-08
+    original_url: "https://universe.roboflow.com/kenth/pedestrian-and-animal-crossing-vcjuo"
+    forked_from_url: "https://universe.roboflow.com/anomaly-road-crossing-detection/pedestrian-and-animal-crossing"
+    pinned_version: 1  # forked + regenerated 2026-08-13 (DEC-053) — see audit_note
     download_format: yolov8
     audit_status: pending
-    native_class_filter: "pedestrian_crossing"
+    native_class_filter: "------------------------------"
     audit_note: >
-      Multi-class source containing both pedestrian and animal
-      crossings. Confirm exact class label after download.
+      2026-08-13 (DEC-053): the original project's only generated
+      version (v1, 1071 images) exported just one class, "people" —
+      pedestrians, not the crosswalk/lane marking this canonical class
+      needs. The real marking class existed in the source project's raw
+      uploads but was never included in any generated version; its live
+      API name was "==============================" (2,610 instances,
+      almost certainly a garbage name from a mislabeled annotation
+      batch). Forked the project into the student's own workspace
+      (kenth/pedestrian-and-animal-crossing-vcjuo) and generated a new
+      version with no augmentation/preprocessing, which pulled in all 4
+      raw classes — 3,536 images. Roboflow's export sanitizes special
+      characters for YOLO format, so the real filterable name changed
+      to "------------------------------" (30 dashes) — verified
+      directly against the downloaded data.yaml, not assumed to match
+      the API's original name. original_url now points at the forked
+      project so future acquire_roboflow.py reruns reproduce this, not
+      the original narrow export; true source project recorded
+      separately in forked_from_url for attribution.
 
   # --- Tricycle (2 sources) ---
   augmented_tricycle:
@@ -321,25 +386,45 @@ roboflow_projects:
 
   # --- Vehicle + Motorcycle secondary (Jeepney/Ambulance/Cars/Motorcycle) ---
   me5_u6rvg:
-    canonical_classes: [vehicle, motorcycle]
+    canonical_classes: [vehicle, motorcycle, tricycle]
     original_url: "https://universe.roboflow.com/machine-exercise-5/me5-u6rvg"
     pinned_version: 1  # only version available (7243 images total, across all classes below)
     download_format: yolov8
     audit_status: pending
+    # The exported data.yaml's `names` are placeholder digit strings
+    # ("0".."7"), not real class names — a real export bug on Roboflow's
+    # side (verified 2026-08-13). Real names recovered via the Roboflow
+    # API (Project.classes, live class-instance counts) and matched to
+    # indices by exact instance count: index 2=Motorcycle(709),
+    # 3=Tricycle(610), 4=Van(872), 5=Ambulance(254), 6=Cars(722),
+    # 7=Truck(974) — unique exact matches, high confidence. Indices 0+1
+    # (3244+1149=4393) are both very likely "Jeepney" (API total 4394,
+    # off by 1 — plausible version/split discrepancy, not treated as a
+    # blocker). Student explicitly approved using the full recovered
+    # mapping (DEC-053) rather than staying conservative or skipping.
+    native_class_index_override:
+      "0": "Jeepney"
+      "1": "Jeepney"
+      "2": "Motorcycle"
+      "3": "Tricycle"
+      "4": "Van"
+      "5": "Ambulance"
+      "6": "Cars"
+      "7": "Truck"
     native_class_filter:
-      vehicle: ["Ambulance", "Cars", "Jeepney"]
+      vehicle: ["Ambulance", "Cars", "Jeepney", "Van", "Truck"]
       motorcycle: "Motorcycle"
+      tricycle: "Tricycle"
     audit_note: >
       Reactivated 2026-08-08 (DEC-037, supersedes the relevant part of
       DEC-032) — traffico-y1 remains blocked (zero generated versions)
       and forking it was declined (uncertainty over Roboflow credit
       consumption), so this replaces jeep_hozhs as Vehicle's active
-      secondary. Full class list: Ambulance, Cars, Jeepney, Motorcycle,
-      null — same multi-class shape as traffico-y1, mapped the same
-      way. "null" left unresolved, same reasoning as traffico-y1.
-      Vehicle-specific image count is NOT the full 7243 — that's the
-      total across all 5 classes; the Ambulance+Cars+Jeepney subset is
-      unknown until acquired and class-filtered.
+      secondary. 2026-08-13 (DEC-053): real full class list recovered
+      via API is Ambulance/Cars/Jeepney/Van/Truck/Motorcycle/Tricycle
+      (7 named classes across 8 indices, Jeepney split across 2) — not
+      the originally-assumed 5. Tricycle presence is a genuine bonus
+      given the class's Philippine-context relevance; now mapped in.
 
   jeep_hozhs:
     canonical_class: vehicle

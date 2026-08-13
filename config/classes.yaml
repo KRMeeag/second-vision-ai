@@ -74,7 +74,9 @@ hailo_runtime_names:
 #   primary / primary_providers:    main data source(s)
 #   secondary / secondary_providers: supplemental source(s)
 #   lowlight_augment:               ExDark cross-cutting layer (6 eligible classes)
-#   cap:                            max images per class (null = uncapped)
+#   cap:                            max images per class — hard cap 4500 for
+#                                    every class per DEC-042 (3:1 ratio off a
+#                                    1500 floor); no class may be uncapped
 #   role:                           diversity | volume_topup
 #   native_class_filter:            source-side class name(s) to extract
 #   audit_note:                     blockers resolved during Stage 5.3/5.5
@@ -100,7 +102,7 @@ classes:
       source: exdark
       native_class: "People"
       guaranteed_floor: true
-    cap: 5000
+    cap: 4500
 
   vehicle:
     id: 1
@@ -132,7 +134,7 @@ classes:
       source: exdark
       native_class: "Car"
       guaranteed_floor: true
-    cap: 5000
+    cap: 4500
 
   motorcycle:
     id: 2
@@ -163,7 +165,7 @@ classes:
       source: exdark
       native_class: "Motorbike"
       guaranteed_floor: true
-    cap: 5000
+    cap: 4500
 
   bicycle:
     id: 15
@@ -177,7 +179,7 @@ classes:
       source: exdark
       native_class: "Bicycle"
       guaranteed_floor: true
-    cap: 5000
+    cap: 4500
 
   pole:
     id: 3
@@ -194,7 +196,7 @@ classes:
         project: "mahindra-university-ogyod/utility-poles-44tzx"
         role: diversity
         note: "Dual-purpose source, also contributes to Potholes. Added 2026-08-08, DEC-035."
-    cap: null
+    cap: 4500
 
   animals:
     id: 4
@@ -205,7 +207,7 @@ classes:
       source: exdark
       native_class: ["Dog", "Cat"]
       guaranteed_floor: true
-    cap: 5000
+    cap: 4500
 
   stairs:
     id: 5
@@ -222,7 +224,7 @@ classes:
       - source: roboflow
         project: "escalatorstairsdetection/escalator-stairs"
         native_class_filter: "stairs"
-    cap: null
+    cap: 4500
 
   escalator:
     id: 6
@@ -230,14 +232,14 @@ classes:
       - source: roboflow
         project: "escalatorstairsdetection/escalator-stairs"
         native_class_filter: "escalator"
-    cap: null
+    cap: 4500
 
   doors:
     id: 7
     primary_providers:
       - source: roboflow
         project: "testspace-xwkgk/cv-project-hovyc"
-    cap: null
+    cap: 4500
 
   chairs:
     id: 8
@@ -248,7 +250,7 @@ classes:
       source: exdark
       native_class: "Chair"
       guaranteed_floor: true
-    cap: 5000
+    cap: 4500
 
   tables:
     id: 9
@@ -263,7 +265,7 @@ classes:
       source: exdark
       native_class: "Table"
       guaranteed_floor: true
-    cap: 5000
+    cap: 4500
 
   tricycle:
     id: 10
@@ -276,7 +278,7 @@ classes:
         native_class_filter: ["Tricycle", "tricycle"]
         role: volume_topup
         note: "Source has both case variants as separate labels (DEC-032) — both map here."
-    cap: null
+    cap: 4500
 
   potholes:
     id: 11
@@ -300,7 +302,7 @@ classes:
         project: "mahindra-university-ogyod/utility-poles-44tzx"
         role: diversity
         note: "Dual-purpose source, also contributes to Pole. Added 2026-08-08, DEC-035."
-    cap: 5000
+    cap: 4500
 
   trash_bins:
     id: 12
@@ -319,7 +321,7 @@ classes:
           project. Revisit only if post-acquisition evaluation shows
           the primary alone is insufficient in volume/diversity.
     secondary_role: diversity
-    cap: 5000
+    cap: 4500
 
   elevator:
     id: 13
@@ -335,7 +337,7 @@ classes:
           suspected. State-related labels collapse into a single
           "elevator" class. Same box-shape concern as Stairs. Full
           Stage 5.3 audit still needed to isolate the usable subset.
-    cap: null
+    cap: 4500
 
   pedestrian_lane:
     id: 14
@@ -346,4 +348,4 @@ classes:
         audit_note: >
           Multi-class source, also contains animal-crossing.
           Confirm exact class label after download.
-    cap: null
+    cap: 4500
