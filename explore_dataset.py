@@ -8,7 +8,7 @@ dataset = foz.load_zoo_dataset(
     "open-images-v7",
     split="validation",
     dataset_name="sv-common-v1",
-    classes=["Person", "Car", "Bus", "Waste Container"],
+    classes=["Person", "Car", "Bus", "Waste container"],
     label_types=["detections"],
     max_samples=200,
     shuffle=True,
