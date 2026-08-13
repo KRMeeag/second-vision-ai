@@ -10,6 +10,8 @@
 
 Phases 0-1 complete. **Stage 5.1 (Acquisition) and Stage 5.2 (Conversion) are both 100% complete** as of 2026-08-13 — all 5 sources (Open Images, Roboflow, ExDark, Dataset Ninja ×2, CrowdHuman) pulled and converted to DEC-046's intermediate schema, real data on disk, verified for real at every step. Next up: Stage 5.3 Box Audit — `scripts/preprocess/box_audit.py`, plus the specific per-project reviews already queued in `docs/PLAN.md`.
 
+Student is time-constrained — planning an autonomous session to build as much of Stage 5.3–5.9 as possible unattended. See `docs/OPEN_QUESTIONS.md` (new, 2026-08-13) for the standing list of decisions that block specific scripts; check it before assuming something is a fresh question.
+
 ---
 
 ## Active Tasks

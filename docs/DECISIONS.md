@@ -272,6 +272,8 @@ The ExDark (Exclusively Dark Image Dataset) contains ~7,363 low-light images acr
 
 ExDark is a **cross-cutting low-light augmentation layer** that injects low-light image variants into **six classes**: Person, Vehicle, Two Wheeler, Chairs, Tables, Animals — the classes present in both ExDark's 12-class taxonomy and our canonical list.
 
+> **2026-08-13 correction:** DEC-038 later split "Two Wheeler" into Motorcycle + Bicycle. ExDark's Motorbike/Bicycle native classes both still map to canonical classes (Motorcycle and Bicycle respectively — see `datasets.yaml`'s `exdark_to_canonical_class_map`), so the real overlap is now **seven** classes, not six: `animals, bicycle, chairs, motorcycle, person, tables, vehicle`. Verified directly against the current config before this count fed into `cap_per_class.py`'s design.
+
 ExDark images are subject to a **guaranteed floor** rule in `cap_per_class.py`: available ExDark images are reserved FIRST before Primary/Secondary volume fills the cap, preventing them from being crowded out.
 
 Use `wraphex/ExDark2Yolo` parser as the basis for `convert/exdark_to_intermediate.py`.
