@@ -2203,6 +2203,224 @@ Killing now rather than "let it finish for the data point" was the student's own
 
 ---
 
+## DEC-073: `door_detection_zqt59`'s `hinged` Class Confirmed Hardware (No Action Needed); `ronits-workspace-e52mh/nyb` Dropped; License Confirmed CC BY 4.0 for Both New Roboflow Sources
+
+- **Date:** 2026-08-18
+- **Status:** Accepted
+- **Related:** DEC-069 (`trashcan_detection_pihfn` added, `ronits-workspace-e52mh/nyb` flagged but not added), DEC-071 (`door_detection_zqt59` added, `hinged` flagged as ambiguous), `docs/OPEN_QUESTIONS.md` #1 (all three sub-items closed by this entry)
+
+### Context
+
+Three loose ends from DEC-069/071 needed the student's own judgment, not something resolvable from API metadata alone: whether `ronits-workspace-e52mh/nyb` (the mixed pest/wildlife-camera-trap Trash Bins candidate) was worth a closer look; whether `door_detection_zqt59`'s `hinged` class (1,739 instances, filtered out pending review) was additional real door instances or hardware; and the license for both `trashcan_detection_pihfn` and `door_detection_zqt59`, which neither the Roboflow SDK nor WebFetch could surface.
+
+### Decision
+
+- **`ronits-workspace-e52mh/nyb` dropped.** Student's call: not worth pursuing — Trash Bins is no longer the bottleneck now that `trashcan_detection_pihfn` is in (DEC-069), and the mixed-context class list was reason enough on its own. Comment block in `config/datasets.yaml` updated to record the closure (not deleted, same as every other considered-but-declined source in this file).
+- **`hinged` confirmed to be door-hinge hardware, not an additional door-type label.** Student's visual read: every image containing a `hinged` box also contains the door it's attached to, so `native_class_filter: "door"` (already in place since DEC-071) was already doing the right thing — dropping the hinge box while keeping the image, since the image's `door` box survives the filter regardless. No image is lost unless it contained *only* `hinged` boxes with no `door` box at all, which the student's review didn't find to be the case in this source. **No code change or re-pull needed** — this closes the open question as "already correct," not as a fix.
+- **License confirmed CC BY 4.0 for both `trashcan_detection_pihfn` and `door_detection_zqt59`**, checked by the student directly on each Roboflow project page (neither the SDK nor `WebFetch` could surface it — SDK exposes no license field, WebFetch was blocked/403'd on both pages in earlier sessions). Recorded as a new `license:` field on both `config/datasets.yaml` entries, matching the field already used by `openimages`/`crowdhuman`/`exdark`.
+
+### Rationale
+
+Same pattern as every other source-inclusion judgment call in this project (DEC-037's jeepney swap, DEC-039's Trash Bins bench, DEC-069's eyecue-vs-nyb choice): when the deciding factor is real image content or licensing terms not exposed via API, it goes to the student rather than being guessed at. All three were flagged rather than silently resolved when originally found (DEC-069, DEC-071) — this entry closes them now that the student has looked.
+
+### Consequences
+
+- `docs/OPEN_QUESTIONS.md` #1 fully closed — all three sub-items resolved, nothing outstanding on the Doors/Trash Bins data-scope question.
+- No re-pull, re-convert, or code change triggered by this entry. `door_detection_zqt59`'s existing `dataset/processed/roboflow_door_detection_zqt59/` output (4,493 images/4,888 boxes, DEC-071) remains correct as-is.
+- Both sources are now confirmed license-clean (CC BY 4.0) for any external use, removing the last "unverified for external use" caveat DEC-069/071 had left open.
+
+---
+
+## DEC-074: Mistakenness Top-N Review Tooling Built for `fiftyone_review_processed.ipynb` — Bounded to 1,000 Images, Deferred-Full-Review Recommendation Superseded for This Slice
+
+- **Date:** 2026-08-18
+- **Status:** Accepted
+- **Related:** DEC-060 (`run_mistakenness.py` built, 22,846 images scored), `docs/PLAN.md` Stage 5.5 ("Review and correct flagged samples... Todo")
+
+### Context
+
+Discussing whether to review Stage 5.5's mistakenness-ranked images before or after a first training baseline, the student asked directly why deferring was recommended, then — after the tradeoffs were laid out (partial 7/16-class coverage, a proxy model's disagreement being a heuristic not a ground truth, opportunity cost of reviewing 22,846 images against a baseline-informed alternative) — proposed a middle ground: review a bounded top slice (1,000 images, ~1 hour of their own time) rather than either extreme. No tooling existed for this; `fiftyone_review_processed.ipynb`'s existing modes are all single-source (`source_key`), but mistakenness ranking spans every source contributing to the 7 COCO-eligible classes at once.
+
+### Decision
+
+Added a new, clearly-separated section to `fiftyone_review_processed.ipynb` (4 new code cells + 2 markdown, after the existing box-audit write-back):
+
+- **Build**: takes `mistakenness_report.json`'s top `MISTAKENNESS_TOP_N` (1,000) ranked entries, resolves each to a real image path via `build_stem_index()`, and — since the report only stored `gt_box_count`/`pred_box_count`, not actual box coordinates — **re-runs yolov8n inference fresh** for just this slice, importing `COCO_CROSSWALK`/`CANONICAL_KEY_TO_NAME`/`ELIGIBLE_CANONICAL_IDS`/`load_eligible_ground_truth` directly from `run_mistakenness.py` rather than reimplementing them, so this can't silently drift from what actually produced the ranking. Builds a FiftyOne dataset with both `ground_truth` (eligible-classes-only) and `predictions` (proxy model output, with confidence) as separate fields, plus the real `mistakenness` score as a sortable/filterable field — letting the student see *why* each image was flagged (the actual disagreement), not just that it was.
+- **Write-back**: a real design difference from the box-audit write-back, not a copy-paste — `ground_truth` here only ever held the 7 eligible classes' boxes, so blindly writing it back out would silently delete any other canonical-class box an image happens to have. Instead, reads each original label file fresh, splits it into eligible/non-eligible lines by class id, keeps non-eligible lines exactly as they were, and only replaces eligible lines with the current (possibly edited) `ground_truth` state. Also deliberately does **not** clear the whole `labels_reviewed/` folder before writing (unlike the box-audit write-back) — a 1,000-image, multi-source review is more likely to span several sittings than the single-source elevator/stairs case, and shouldn't wipe out another already-promoted source's files on every re-run.
+- Verified for real before handing over, not just written: ran the actual build path end-to-end on a real 20-image slice (real inference, real gt/pred box counts, e.g. one sample scored 0.9714 with gt=2/pred=3 — a real, visible disagreement). Separately verified the write-back merge logic against a real mixed-class label file (`open_images/3b6b7e47e005e7cb.txt`, Person + 2 Trash Bins boxes): simulated deleting the eligible Person box, confirmed both non-eligible Trash Bins lines survived byte-for-byte in the merged output, and confirmed the original file on disk was untouched.
+
+### Rationale
+
+The earlier "defer the whole mistakenness review past a first baseline" recommendation was reasonable as a default but overstated for a *cheap, bounded* slice — the real argument was against spending many hours reviewing a partial-coverage heuristic before ever training anything, not against any review at all. A ~1,000-image, ~1-hour pass costs little against that opportunity-cost argument while still catching anything glaringly wrong early. Reusing `run_mistakenness.py`'s own crosswalk/eligibility/box-conversion logic directly (matching `final_merge_curation.py`'s already-established pattern of doing the same) was chosen over reimplementing similar logic, so the review tool can never disagree with what actually produced the ranking it's reviewing.
+
+### Consequences
+
+- `dataset/processed/<source>/labels_reviewed/` is now a write target for **two** independent review flows (box-audit and mistakenness) that can touch different or overlapping sources — both write per-file, neither wholesale-clears a source's folder except the box-audit flow (single-source, single-sitting, safe to clear each run).
+- Promotion (copying `labels_reviewed/*.txt` over the real `labels/`) remains manual for both flows — no auto-promote script exists yet.
+- Doesn't change anything about Stage 5.7's `final_merge_curation_report.json` (the post-merge mistakenness pass) — that one's still stale and still deferred, same reasoning as before, just not addressed by this entry.
+
+---
+
+## DEC-075: `box_audit.py` Extended with `--pool merged` — Box Review Reordered to Run Post-Cap/Merge, Not Pre-Cap
+
+- **Date:** 2026-08-18
+- **Status:** Accepted
+- **Related:** DEC-057 (original box_audit.py, pre-cap only), DEC-058 (`cap_per_class.py`, confirmed to not consume box-quality signal)
+
+### Context
+
+Auditing the full flagged-box picture (not just elevator/stairs) surfaced that `box_audit.py`'s Tukey-fence heuristic flags boxes across **all 16 sources**, not just the two with a dedicated reviewable list — 84,950 boxes total (14.6% of the 581,872-box pre-cap pool), of which elevator_status_s4lrk + stairs_i2yia's reviewable lists covered only 1,077 (1.3%). The other 14 sources' flags existed only as a truncated 300-entry sample inside `box_audit_report.json`, unreviewable at full detail. crowdhuman alone accounted for 68,430 (80% of all flags).
+
+Separately, checking whether `cap_per_class.py`'s selection logic uses box-quality/flag data at all (it doesn't — confirmed by inspection, selection is purely priority-source + seeded-random against instance/image targets) exposed that auditing pre-cap wastes review effort proportional to each source's cap discard rate. Real numbers from the current (pre-Doors) merge: crowdhuman keeps only 729 of 19,370 candidate images (96.2% discarded) — meaning up to 96% of any pre-cap crowdhuman review would target images that never reach `dataset/merged/` at all. Other sources lose less (open_images 47.9%, stairs_i2yia 23.3%, elevator_status_s4lrk 24.1%), but the effect is universal and free to eliminate.
+
+### Decision
+
+- **`box_audit.py` gets a new `--pool {processed,merged}` flag** (default `processed`, unchanged existing behavior). `--pool merged` audits `dataset/merged/` instead: recovers each box's origin source + original filename from `merge.py`'s own `<source>__<original>` prefix (`file_utils.prefixed_filename`'s format) via a new `_split_prefixed_stem()` helper, then runs the identical per-(source, class) Tukey-fence logic (refactored into a shared `audit_boxes()` core, used by both pools) against that recovered population.
+- In `merged` mode, writes a **full** flagged-boxes JSON per source (not the 300-entry sample) — cheap now that cap has already cut most sources down substantially. Filenames follow the existing `<source-without-roboflow-prefix>_flagged.json` convention (`elevator_status_s4lrk_flagged.json`, `stairs_i2yia_flagged.json`) so every source's flagged list is directly loadable by `notebooks/fiftyone_review_processed.ipynb`'s existing `flagged_report_path` mechanism with **zero notebook changes** — label paths are written as the original (unprefixed) filename, matching what that source's own `dataset/processed/<source>/labels/` expects.
+- **Pipeline reordering**: box-shape review now happens *after* `cap_per_class.py` → `merge.py`, not before. Verified via a real dry-run against the current on-disk (pre-Doors) merged pool: crowdhuman's flagged count drops from 68,430 → 133 (99.8%), open_images 8,851 → 5,211, elevator_status_s4lrk 844 → 645, stairs_i2yia 233 → 178; exdark stays flat at 2,154 (100% cap survival via its floor reservation). Global class balance from the merged-pool parse matched `merge_report.json`'s own `real_post_merge_class_counts` exactly, confirming the source/filename recovery is correct.
+- Real (non-dry-run) generation of the merged-pool report/flagged lists is **deliberately deferred** — the current `dataset/merged/` predates this session's Doors merge, so running it for real now would produce lists for a pool about to be replaced. Run `python3 scripts/preprocess/box_audit.py --pool merged` for real right after the next `cap_per_class.py` → `merge.py` pass (which folds in Doors).
+
+### Rationale
+
+`cap_per_class.py` not using box-quality signal at all means pre-cap auditing buys nothing for review purposes — it only costs wasted human review time on images that never reach training data. Reusing the existing per-(source, class) Tukey-fence/flagged-list machinery (via a shared `audit_boxes()` core) rather than writing a parallel merged-only script keeps both pools' flagging logic guaranteed identical, and preserving the existing flagged-JSON naming/label-path convention means the notebook needs no changes to review any of the 16 sources this way, not just elevator/stairs.
+
+### Consequences
+
+- The pre-cap `processed` pool mode (default, unchanged) remains useful as a cheap diagnostic — spotting a systemic per-source labeling problem early, before deciding cap priority — but is no longer the mode used to generate lists intended for box-by-box review.
+- `elevator_status_s4lrk_flagged.json`/`stairs_i2yia_flagged.json` will be **overwritten** by the next real `--pool merged` run with smaller, more relevant (post-cap) lists — intentional, supersedes the pre-cap versions from DEC-057/070.
+- Every other source (crowdhuman, open_images, exdark, etc.) will get its own reviewable flagged list for the first time once `--pool merged` runs for real — Stage 5.3's review scope question (raised this session) is now answerable at low cost, not blocked on hand-building per-source tooling.
+- No `dataset/processed/` or `dataset/merged/` files are touched by this change — read-only, writes only to `dataset/reports/`, same posture as the original script.
+
+---
+
+## DEC-076: DEC-018r's "Near-Exhaustive" Roboflow Review — Scoped to Risk-Ranked Full Pass, Not a Thorough/Skip Split
+
+- **Date:** 2026-08-18
+- **Status:** Accepted
+- **Related:** DEC-018r (original "may be reviewed near-exhaustively" commitment for smaller Roboflow pools), DEC-019 (large-scale sources explicitly exempted from manual review), DEC-075 (`box_audit.py --pool merged`, source of the flag-rate ranking used here), `docs/OPEN_QUESTIONS.md` #4
+
+### Context
+
+DEC-018r (2026-08-06) committed to "near-exhaustive" review of Roboflow-native pools, on the assumption this was practical at their scale. Checking that assumption for real this session: the 12 currently-merged small Roboflow pools total 30,072 images / 41,793 instances post-cap (cap only cut this group ~23%, since most of these sources already sit at or under their per-class caps — unlike crowdhuman's 96% cut). `docs/OPEN_QUESTIONS.md` #4 had been marked "Resolved," but that only confirmed `fiftyone_review_processed.ipynb` is *capable* of browsing a full pool — nobody had actually decided how the review itself would be scoped, and `docs/PLAN.md`'s own status table still listed it "Todo."
+
+Discussed four options (exhaustive-as-decided, bounded top-N per source, risk-prioritized-skip-the-rest, defer-decide-later). Student rejected all four as posed and proposed a fifth: rank every small pool by risk, but not as a binary include/exclude split — go through **every image in every pool regardless**, varying *pace* (slow/thorough vs. fast skim) by that pool's rank.
+
+### Decision
+
+- **No source gets skipped.** Every one of the 12 small Roboflow pools (13 once `door_detection_zqt59` merges) gets a full pass through `notebooks/fiftyone_review_processed.ipynb` (`source_key` set to that source, `flagged_report_path=None` so every image is visible, not just flagged ones) — this is what "near-exhaustive" ends up meaning in practice, honoring DEC-018r's original commitment rather than quietly narrowing it.
+- **Pace varies by a risk ranking**, computed from `box_audit.py --pool merged`'s per-source flagged-box rate (Tukey-fence outliers ÷ total boxes), cross-checked against DEC-031's already-documented Stairs/Elevator box-shape defect. Real ranking (post-cap, pre-Doors): `roboflow_cv_project_hovyc` (14.38%), `roboflow_elevator_status_s4lrk` (12.47%, DEC-031), `roboflow_stairs_i2yia` (12.32%, DEC-031), `roboflow_pothole_vhmow` (12.11%), `roboflow_escalator_stairs` (10.79%, DEC-031), `roboflow_pedestrian_and_animal_crossing` (10.23%), `roboflow_elevator_awvus` (9.31%, DEC-031), `roboflow_utility_poles_44tzx` (8.44%), `roboflow_pole_detection_z76mb` (7.97%), `roboflow_augmented_tricycle` (6.16%), `roboflow_me5_u6rvg` (4.49%), `roboflow_trashcan_detection_pihfn` (3.54%).
+- **No hard cutoff between "thorough" and "skim" tiers** — student's explicit call: the rank is a pacing guide for their own attention, not a scope gate. `roboflow_escalator_stairs` (7,560 images, the largest pool) stays at its ranked position despite its size — its size is a structural consequence of feeding two canonical classes (Stairs *and* Escalator, each capped independently at 4,500; `merge.py` unions both classes' selections without dedup against a source's other class-quota usage), not evidence it should be treated specially.
+- **Update 2026-08-18, same day**: `door_detection_zqt59` merged for real (DEC-077), ranking recomputed with it included — it takes **#1** at 15.88% (3,460 images), ahead of `cv_project_hovyc` (now 13.63%, its image share having dropped to 1,040 once Doors' cap selection split between both sources). Full 13-source ranking (post-Doors): door_detection_zqt59 15.88%, cv_project_hovyc 13.63%, stairs_i2yia 12.32%, elevator_status_s4lrk 12.20%, pothole_vhmow 12.11%, escalator_stairs 10.79%, pedestrian_and_animal_crossing 10.23%, elevator_awvus 9.31%, utility_poles_44tzx 8.44%, pole_detection_z76mb 7.97%, augmented_tricycle 6.16%, me5_u6rvg 4.49%, trashcan_detection_pihfn 3.54%.
+- **`elevator_awvus`'s DEC-031 status does not override its measured 9.31% rank** — asked directly, student's explicit answer: the rank stays purely the hard number `box_audit.py` produces; DEC-031-known-issue status isn't a manual boost. The human-judgment layer belongs to the student during the actual review pass ("it will be up to me... to be more careful based on what i actually see"), not baked into the ranking itself.
+
+### Rationale
+
+A binary thorough/skip split risked either under-covering pools that didn't make a cutoff (leaving DEC-018r's commitment quietly unmet, the exact gap this session found) or over-committing time uniformly regardless of actual risk signal. Variable-pace-across-the-full-pool keeps the commitment intact while still using the real, data-driven flag-rate signal to direct where careful attention actually pays off, rather than a rate number silently deciding what gets looked at at all.
+
+### Consequences
+
+- `docs/OPEN_QUESTIONS.md` #4 should be updated to reflect this as the actual resolution (a scoped review *approach*, not just tooling availability) — pending next docs pass.
+- `docs/PLAN.md`'s Stage 5.3 "Near-exhaustive review for smaller Roboflow pools" row stays "Todo" until the student has actually gone through all 12/13 pools — this decision sets the method, not completion.
+- No new tooling needed — `flagged_report_path=None` (full-pool browsing) already existed in the notebook; this decision is about how the student uses it, not a code change.
+
+---
+
+## DEC-077: `cap_per_class.py` + `merge.py` Rerun — Doors Folded In, Ratio Invariant Now Met
+
+- **Date:** 2026-08-18
+- **Status:** Accepted
+- **Related:** DEC-069 (ratio invariant last measured 4.08, Doors identified as the bottleneck), DEC-071 (`door_detection_zqt59` acquired, deliberately held out of the merge until now), `docs/OPEN_QUESTIONS.md` #1
+
+### Context
+
+`door_detection_zqt59` (4,493 images) had been sitting processed-but-unmerged since DEC-071 (2026-08-18, earlier same day) — deliberately held back while the box-audit review notebook and the (later-killed, DEC-072) dedup run were in flight. With those blockers cleared and the review-scope questions (DEC-075, DEC-076) settled, this was the first point Doors' new source could actually be folded into the trainable pool.
+
+### Decision
+
+Ran `cap_per_class.py` then `merge.py` for real. Real results:
+
+- **Doors: 1,337 → 5,830 candidates → 4,500 selected images / 5,029 instances** (hit the hard image cap, `stop=image_hard_cap` — the first time Doors has had *more* candidates than the cap allows, rather than being candidate-starved).
+- **Ratio invariant now met**: `max=Vehicle(4,500) / min=Trash Bins(1,663) = 2.71` (≤ 3.0) — resolves `docs/OPEN_QUESTIONS.md` #1's last open sub-item ("if Doors is still short after the merge... fall back to (a) accept ratio or (b) recompute cap") without needing either fallback.
+- **Merged pool: 52,756 → 55,917 images** (up 3,161 — mostly Doors' net gain, since `cv_project_hovyc`'s prior 1,337 was already counted). Verified on disk: `dataset/merged/images/` and `labels/` both contain exactly 55,917 files, `door_detection_zqt59` contributes 3,460 of Doors' new 4,500-image selection directly.
+- Every other class's real post-merge count moved only marginally (e.g. Person instances 12,745 → 12,814, Tables images 4,662 → 4,675) — expected noise from the seeded-random general pool, not a Doors side-effect.
+
+### Rationale
+
+Mechanical rerun of already-built, already-decided logic (DEC-058/059) — no new policy decisions, just executing the pipeline now that its inputs (Doors) and blockers (review-scope questions) are resolved.
+
+### Consequences
+
+- `docs/OPEN_QUESTIONS.md` #1 can be closed entirely now — its last open sub-item is resolved.
+- The `dataset/merged/` pool driving `box_audit.py --pool merged` (DEC-075) is no longer stale — real (non-dry-run) flagged-list generation, deferred in DEC-075 for exactly this reason, can now proceed.
+- `elevator_status_s4lrk_flagged.json`/`stairs_i2yia_flagged.json` will be regenerated (and every other source will get one for the first time) against this pool, not the pre-Doors one DEC-075's dry-run smoke-tested against — numbers will shift slightly from what was shown then.
+- Downstream (dedup, split, generate_yaml) all still pending a rerun against this pool, per the established plan.
+
+---
+
+## DEC-078: Whole-Image Removal via App Tag (`exclude`), Not Sample Deletion — `merge.py` Reads a Per-Source Exclusion File
+
+- **Date:** 2026-08-18
+- **Status:** Accepted
+- **Related:** DEC-072 (box-audit write-back cell, the mechanism this extends), DEC-076 (the risk-ranked full-pool review this unblocks)
+
+### Context
+
+Starting the DEC-076 full-pool review surfaced a real gap: the review notebook could edit an image's boxes, but had no way to remove an image from the dataset entirely (wrong content, duplicate, doesn't belong). The obvious approach — delete the sample in the FiftyOne App, detect its absence in the write-back cell — was checked against the actual write-back code (`for sample in dataset: ...`) and confirmed to silently do nothing: a deleted sample just isn't iterated, so no file is written for it either way, and the original image/label in `dataset/processed/<source>/` is never touched. Asked whether a simpler or more robust alternative existed before building the deletion-diffing version.
+
+### Decision
+
+- **Tag, don't delete.** Verified via `docs.voxel51.com`: FiftyOne's App supports tagging samples natively (a tag icon above the sample grid, works on single or multi-selection) — no plugin needed, same "native App feature" category as the box editing already in use. The write-back cell (`notebooks/fiftyone_review_processed.ipynb`, cell `2343228f`) now checks `"exclude" in sample.tags` per sample.
+- Newly-excluded filenames are merged with any existing exclusions for that source (read from `dataset/reports/<source>_excluded.json` if present, unioned, rewritten) — same "don't clobber an earlier sitting's work" posture as DEC-074's mistakenness write-back, since a full-pool review spans multiple sessions.
+- An excluded sample still gets its `labels_reviewed/` file written normally — exclusion is tracked as a separate, parallel signal, not a special case in the box-writing logic. Untagging before a later write-back run removes it from the exclusion list on that run.
+- **`merge.py` is the enforcement point**, not `cap_per_class.py`. New `load_excluded_pairs()` reads every `dataset/reports/*_excluded.json` (globbed, each file's own `"source"` field is authoritative — not parsed from the filename) and subtracts that set from `cap_report.json`'s selected union before copying. `cap_per_class.py`'s selection is **not** re-run — an excluded image's quota slot is simply lost, not backfilled with a replacement candidate, to avoid cascading the seeded-random selection elsewhere just because one image got excluded.
+- Verified for real, not just written: smoke-tested against 2 real `roboflow_trashcan_detection_pihfn` filenames actually present in `cap_report.json`'s selection — `merge.py --dry-run` correctly dropped the union from 55,917 to 55,915, then the smoke-test exclusion file was deleted, leaving no trace on real state.
+
+### Rationale
+
+Tag-based exclusion is both simpler and more robust than the deletion-diffing alternative it replaced before being built: no need to snapshot the original file list at load time and diff it against the live dataset at write-back time, and — more importantly — it makes the student's intent explicit and visible (a tag persists and is inspectable in the App) rather than inferred from a side effect (a sample's absence, which could have other causes). It's also reversible mid-session: untag to change your mind, no full source reload required.
+
+### Consequences
+
+- `dataset/reports/<source>_excluded.json` is a new, small, per-source file — one for any source where at least one image gets excluded during review.
+- `merge_report.json` gains an `excluded_count` field.
+- A class that loses an excluded image ends up marginally under its `cap_report.json` figure — expected, not a bug; re-running `cap_per_class.py` to backfill was deliberately not automated (see Decision above).
+- This mechanism is currently only wired into the box-audit-style write-back cell (the one used for DEC-076's full-pool review), not the separate mistakenness write-back cell — not needed there yet, could be extended the same way if the student wants it.
+
+---
+
+## DEC-079: Predictions Overlay Generalized to Full-Pool Review (`show_predictions`); Per-Label `accept` Tag Promotes a Prediction into Ground Truth
+
+- **Date:** 2026-08-18
+- **Status:** Accepted
+- **Related:** DEC-074 (mistakenness top-N section, source of the reused inference logic), DEC-078 (`exclude` sample-tag pattern this mirrors at the label level), `docs/preprocessing.md` (pre-existing, narrower "Model-Assisted Pre-Labeling" procedure this generalizes)
+
+### Context
+
+Student flagged missing-label detection as a real problem across the DEC-076 full-pool review (~33k images) and asked to automate it as much as possible. Checked the actual ceiling first: any pretrained-model assist is bounded by COCO's vocabulary, which only overlaps 7 of 16 canonical classes (Person, Vehicle, Motorcycle, Bicycle, Animals, Chairs, Tables — `run_mistakenness.py`'s `COCO_CROSSWALK`). Student confirmed this ceiling is acceptable — the classes they're most worried about missing labels for are exactly the COCO-eligible ones (incidental background objects, e.g. a person walking through a Door-labeled scene), not each source's own deliberately-labeled primary class. Matches `docs/preprocessing.md`'s existing (but only ever applied once, to `augmented_tricycle`) "Model-Assisted Pre-Labeling for Missing Classes" procedure.
+
+Also asked why the mistakenness section caps at `MISTAKENNESS_TOP_N = 1000`. Checked rather than assumed: benchmarked real `yolov8n` inference on this machine against real project images — **32.4 img/s**, meaning even the largest single small-pool source (`escalator_stairs`, 7,560 images) finishes in under 4 minutes, and all 13 small pools combined would take ~17 minutes if run eagerly. The 1,000 cap is a *student review-time* budget (DEC-074: "~1hr"), not an inference-cost constraint — doesn't apply to a per-source overlay used alongside a full-pool pass the student is already committed to.
+
+Finally asked for the acceptance mechanism, correctly anticipating that naively merging `predictions` into `ground_truth` would create redundant duplicate boxes (one from each field, over the same real object). Checked FiftyOne's real capabilities via `docs.voxel51.com` before designing: individual **label-level** tagging (not just sample-level) is a native App feature — "any label or collection of labels can be tagged at any time in the sample grid or expanded sample view" — and there's a Patches view (`Patches > Labels > predictions`) that shows each individual detection as its own thumbnail for faster triage. No built-in "copy field A's label into field B" App action exists; that part needed code.
+
+### Decision
+
+- **`show_predictions` (new toggle, `notebooks/fiftyone_review_processed.ipynb`, cell `p0review2source`, default `False`)**: when set, the main load cell (`p0review3build`) runs `yolov8n` inference over *every* image in whatever `source_key` is currently loaded (no top-N cap) and attaches a `predictions` field alongside `ground_truth`, reusing `run_mistakenness.py`'s `COCO_CROSSWALK`/`CANONICAL_KEY_TO_NAME` directly (not reimplemented, so it can't drift from what that script does).
+- **Acceptance mechanism**: tag a specific predicted box `accept` in the App (click it, tag from the Labels list or Patches view) — a per-*label* tag, distinct from DEC-078's per-*sample* `exclude` tag. The write-back cell (`2343228f`) now promotes any `accept`-tagged prediction into `ground_truth` (appending, not replacing) *before* its existing write logic runs, so the rest of the pipeline treats it like any other ground-truth box. Predictions themselves are never written to `labels_reviewed/` or anywhere else — only `ground_truth`'s post-promotion state does — so the redundant-duplicate-box concern doesn't arise: nothing merges both fields wholesale, only the specific boxes the student explicitly accepted.
+- Verified for real: benchmarked inference (32.4 img/s, real images), then a full mechanism smoke test against 10 real `roboflow_trashcan_detection_pihfn` images — found 4 real predictions (confirming the incidental-Person pattern), simulated tagging one `accept`, confirmed `ground_truth` grew 3→4 boxes exactly, simulated tagging the same sample `exclude` simultaneously and confirmed both mechanisms coexist cleanly on one sample.
+
+### Rationale
+
+Generalizing the existing mistakenness-section inference logic (rather than writing a second, separate implementation) keeps the crosswalk/model/device-selection logic in one place. Label-level tagging for acceptance (rather than, say, a confidence-threshold auto-accept) keeps a human decision in the loop for every promoted box, consistent with this project's standing posture that scripts flag/assist but don't silently decide — same principle as `box_audit.py`'s flag-don't-fix stance and DEC-078's tag-don't-infer choice for exclusion.
+
+### Consequences
+
+- `show_predictions = True` adds real time to the load cell (a few minutes for large sources) — off by default so the existing fast path is unaffected when not wanted.
+- The write-back cell now has three stages in order: promote accepted predictions → track exclusions → write ground_truth to `labels_reviewed/`. Order matters: promotion must land in `ground_truth` before the write logic reads it.
+- No change to the mistakenness section itself (`MISTAKENNESS_TOP_N` stays 1,000) — that cap remains a deliberate review-time bound, not something this entry argues should change.
+- Doesn't help with the 9 non-COCO classes at all — explicitly out of scope, not a gap to revisit without a trained model of this project's own first.
+
+---
+
 ## Template for Future Decisions
 
 ```markdown
