@@ -1642,6 +1642,567 @@ No code changes needed — the run simply confirmed the assumption held. Recordi
 
 ---
 
+## DEC-057: `box_audit.py` Built (Stage 5.3); `clip_bbox()` Bug Found and Fixed Across All 5 Converters
+
+- **Date:** 2026-08-13
+- **Status:** Accepted
+- **Related:** DEC-046 (intermediate schema this audits), DEC-031 (elevator/stairs box-shape concern this heuristic targets), `docs/OPEN_QUESTIONS.md` #3 (elevator_status_s4lrk flagging heuristic), DEC-025 (bbox_utils.py scope)
+
+### Context
+
+Unattended overnight session (`.agents/handoff-2026-08-13-stage-5.3-through-5.9.md`) building Stage 5.3–5.9. `box_audit.py` is source-agnostic by design: every `dataset/processed/<source>/` already speaks DEC-046's intermediate schema (canonical class ids, flat images/+labels/), so one script auditing box shape/size and global class balance covers both of `docs/PLAN.md`'s stale "native_unspecified sources" / "project_dependent sources" line items at once — that Roboflow/bbox_mode distinction stopped mattering once every source converged on the same post-Stage-5.2 format.
+
+Before picking a threshold for the elevator_status_s4lrk "state pseudo-label vs. real detection" heuristic (`docs/OPEN_QUESTIONS.md` #3), checked the real area-fraction distribution rather than guessing a "near full frame" cutoff: max observed area fraction across all 6,786 real boxes is 0.595, with no bimodal gap anywhere in the histogram (0.5–0.6 bucket has only 18 of 6,786). A fixed "near 1.0" threshold — the framing `docs/OPEN_QUESTIONS.md` used — would have caught nothing. The real signal turned out to be elongation, not area: DEC-031's own description of this source ("boxes cling to object shape rather than a clean axis-aligned rectangle") is a shape defect, and the data confirms it — 842 of 844 flagged elevator boxes are extreme-elongation outliers (several literal hairline slivers along a frame edge, e.g. `w=0.612, h=0.00003`), not large-area ones.
+
+While validating the script against real output, found and ran down a real bug: `bbox_utils.validate_bbox()` on freshly-round-tripped label text was flagging over 100,000 boxes across the pipeline as "invalid" — but every one of them turned out to be floating-point noise (~5e-7) from reconstructing corner coordinates out of a 6-decimal-rounded center-form box, not real defects (verified directly: max real violation magnitude across every source was exactly 5e-7, the FP noise floor, except for one source). That one exception was real: `dataset/processed/crowdhuman/` has exactly 5 boxes (of 439,046) with negative width/height and out-of-[0,1] centers. Traced to a genuine bug in `bbox_utils.clip_bbox()`: it clamped only the *lower* corner to `>=0` and the *upper* corner to `<=1` independently per axis, so a box positioned **entirely** outside the frame (e.g. `x1=1.24, x2=1.30`, both past the right edge) clamps to `x1=1.24` (unchanged — `max(0, 1.24)`) and `x2=1.0` (`min(1, 1.30)`), leaving `x1 > x2` — a negative-width box that evades the pre-clip `validate_bbox()` "non-positive width/height" guard because that guard only runs *before* clipping, not after. All 5 real instances were CrowdHuman `vbox` entries that fell entirely outside their image.
+
+### Decision
+
+- `scripts/preprocess/box_audit.py` built: auto-discovers every `dataset/processed/<source>/`, computes per-(source, canonical-class) area-fraction and elongation (`max(w,h)/min(w,h)`) stats, flags outliers via **Tukey's fences (Q3 + 1.5×IQR)** — the standard statistical-outlier convention, not a project-specific invented number, applied per group (not one global magic threshold) so naturally-elongated classes like Pole/Pedestrian Lane aren't penalized for their normal shape. Also flags non-positive/out-of-bounds boxes (epsilon-toleranced at 1e-4, three orders of magnitude above the ~5e-7 text-rounding noise floor and orders of magnitude below any real defect seen) and a `TINY_AREA_FRACTION = 1e-4` absolute backstop. Read-only — writes only to `dataset/reports/`, never touches `dataset/processed/`.
+- Global class-balance (images non-exclusive, instances = total boxes) reported per canonical class across **all** sources combined — informational input for Stage 5.4's `cap_per_class.py`.
+- `elevator_status_s4lrk`'s full flagged list (844 boxes) written separately to `dataset/reports/elevator_status_s4lrk_flagged.json` for the student's review per `docs/OPEN_QUESTIONS.md` #3. The main report caps each source's dumped flagged-box list at 300 (`FLAGGED_SAMPLE_SIZE`) plus a reason-count breakdown — a full dump would have put ~68,000 CrowdHuman entries alone into the JSON for marginal review value; full counts and stats are preserved regardless of the sample cap.
+- **Bug fix, not a data fix**: `bbox_utils.clip_bbox()` corrected to clamp both corners of each axis independently into `[0, 1]` (`min(max(x, 0), 1)` for x1 *and* x2, same for y), so a box entirely outside frame now degenerates to a zero-width/height box at the boundary instead of a negative one. All 5 converters that call `clip_bbox()` (`acquire_crowdhuman.py`, `acquire_exdark.py`, `acquire_datasetninja.py`, `openimages_to_intermediate.py`, `yolo_to_intermediate.py`) got a matching one-line addition: re-check `w<=0 or h<=0` *after* clipping (not just before) and drop if so, since clipping can legitimately produce a degenerate result that clipping itself can't fix.
+- Per this session's hard rule ("never touch `dataset/processed/` destructively; if a script needs to modify something there, stop and treat it as a question"): the 5 known-bad boxes already baked into `dataset/processed/crowdhuman/` are **left as-is**, not regenerated by re-running `acquire_crowdhuman.py`. They're now correctly flagged by `box_audit.py`'s `boxes_invalid` count for downstream stages to see. Re-running the acquire script to produce a clean file is the student's call, not made here.
+
+### Rationale
+
+Grounding the elevator heuristic in the real distribution (rather than assuming "near full frame" and picking a threshold like 0.7 or 0.8 that this data would never trip) avoids repeating the exact mistake this project has already been burned by once (the original invented 1.35 buffer factor). Tukey's fences were chosen over a fixed z-score or hand-picked percentage specifically because they're a recognized, parameter-light convention — defensible as "not an invented number" in the same way DEC-042's literature-grounded ratios are, just from statistics rather than domain literature. Fixing `clip_bbox()` now (even though nothing built in Stage 5.3–5.9 calls it again) was judged in-scope because it's a code-correctness fix in a shared utility, not a `dataset/processed/` data mutation — leaving a known, now-understood bug in place for a future re-run to rediscover would be worse than fixing it once it was found.
+
+### Alternatives Considered
+
+- **Fixed "near-full-frame" area-fraction threshold (e.g. 0.7) for the elevator heuristic**: Rejected — checked against real data first and found no box anywhere near that threshold; would have silently flagged zero boxes and looked like a clean pass when the real defect (shape, not size) was sitting unflagged.
+- **Regenerate `dataset/processed/crowdhuman/` immediately after fixing `clip_bbox()`, to get a fully clean file**: Rejected for this session — re-running an acquire script to rewrite `dataset/processed/` output is explicitly the "stop and treat it as a question" case this session's hard rules call out, even though the fix itself is safe and the affected count is tiny (5 of 439,046). Left for the student to trigger if they want a byte-clean file.
+- **Dump every flagged box into the main JSON report**: Rejected — `crowdhuman` alone would contribute ~68,000 entries; a bounded sample plus full reason-counts and per-class stats preserves everything actually decision-relevant at a fraction of the size.
+
+### Consequences
+
+- Real run against all 16 processed sources: 581,879 total boxes audited, `boxes_invalid` = 5 (all in crowdhuman, all pre-existing and now correctly identified — see Decision), 0 elsewhere. `dataset/reports/box_audit_report.json` (1.3MB) and `dataset/reports/elevator_status_s4lrk_flagged.json` (219KB, 844 entries) written.
+- Global class balance (pre-cap, pre-dedup, informational only — real usable counts come after Stage 5.4–5.7): Person 26,706 img/460,852 inst, Vehicle 12,953/22,685, Motorcycle 3,861/6,573, Pole 8,189/10,333, Animals 7,314/9,129, Stairs 5,988/6,476, Escalator 4,255/7,216, Doors 1,337/1,634, Chairs 4,160/15,369, Tables 5,344/9,557, Tricycle 3,495/4,525, Potholes 2,867/6,585, Trash Bins 1,104/1,921, Elevator 5,364/9,397, Pedestrian Lane 2,158/2,610, Bicycle 3,638/7,010.
+- `roboflow_stairs_i2yia` shows the same shape-outlier signature as elevator_status_s4lrk (232 of 233 flagged boxes are `shape_outlier`, matching DEC-031's "polygon-derived, not axis-aligned" finding) — worth the student's attention alongside elevator during review, not something this script resolves on its own.
+- `docs/OPEN_QUESTIONS.md` #3 updated: the heuristic is built and the flagged list produced, but the framing corrected from "area-fraction outliers" to "shape (elongation) outliers" based on what the real data actually shows. Still needs the student's visual review — this script flags, it doesn't decide.
+- No files under `dataset/raw/` or `dataset/processed/` were modified. `traffico_y1` correctly has no processed directory and was silently skipped by auto-discovery — no special-case code needed for it.
+- `docs/PLAN.md`'s Stage 5.3 table can now mark `box_audit.py` built and both the native_unspecified/project_dependent audit-run rows done (one script covered both, per Context).
+
+---
+
+## DEC-058: `cap_per_class.py` Built (Stage 5.4) — Decision/Report Only, Not Wired Into merge.py
+
+- **Date:** 2026-08-13
+- **Status:** Accepted
+- **Related:** DEC-014 (ExDark guaranteed floor, corrected to 7 classes), DEC-042 (floor/hard-cap/instance-target/ratio-invariant policy), `docs/OPEN_QUESTIONS.md` #1 (Trash Bins shortfall), #6 (trim method default)
+
+### Context
+
+Unattended overnight session, Stage 5.4. Before writing anything, resolved a real architectural ambiguity the handoff didn't spell out: does `cap_per_class.py` physically materialize its selection (copy files somewhere), or just decide and report? Checked every relevant doc rather than guessing: `docs/PLAN.md`'s Stage 5.4 row ends in "Review `dataset/reports/cap_report.json`" (a human-review checkpoint, not an automatic gate); this session's own Stage 5.6 scope call for `merge.py` says, verbatim, "pool every `dataset/processed/<source>/` into `dataset/merged/`" — mechanical, no mention of consulting a cap decision; and Stages 5.5/5.7 are both explicitly designed as flag-for-human-review stages with no script that "eliminates" the review step (handoff §1). Treating 5.4 as the one stage that silently, automatically commits its own decision to a physical file selection would break that symmetry and bake in a trim method already flagged as an unreviewed default (`docs/OPEN_QUESTIONS.md` #6) before the student has seen it.
+
+Also surfaced: this run's own numbers trigger DEC-042's cap-recompute rule. Trash Bins' realized candidate pool is 1,104 images — under the 1,500 floor, same shortfall DEC-051 already flagged. DEC-042 says recompute `hard_cap` as `3 × min(realized_class_images)` once the true floor is known; doing so here would drop every class's cap from 4,500 to ~3,312, a sweeping change `docs/OPEN_QUESTIONS.md` #1 already puts in the student's hands ("accept ~1,000-ish Trash Bins, or find a secondary source").
+
+### Decision
+
+- `scripts/preprocess/cap_per_class.py` built: scans every `dataset/processed/<source>/` once, builds a per-class candidate index, and for each of the 16 canonical classes applies DEC-014's ExDark floor (every ExDark image for that class reserved first, whether or not the class is in the known 7-class overlap — derived from what's actually in the data, not a hardcoded class list) followed by DEC-042's policy: remaining image budget = `hard_cap − exdark_floor` (hard_cap read from `classes.yaml`'s `cap` field per class, not hardcoded), remaining instance budget = `10,000 − exdark_floor_instances`, candidates beyond the floor shuffled with `random.Random(SEED=42)` and accepted until either budget binds — the seeded shuffle order **is** the "seeded random trim" default `docs/OPEN_QUESTIONS.md` #6 asked for.
+- The 6,000-instance-target variant for "small/hard classes" (DEC-042's own phrasing) is **not applied** — no config anywhere defines which classes qualify, and guessing would be inventing an undecided parameter. Every class uses the 10,000 general target; documented here and in `docs/OPEN_QUESTIONS.md` as a real gap, not silently dropped.
+- **Decision/report only** — writes `dataset/reports/cap_report.json` (per-class selected/excluded (source, filename) pairs, counts, stop reason, ratio invariant) and does **not** copy, move, or delete any files. `dataset/curated/`, `dataset/merged/` untouched. `scripts/build/merge.py` (built later this session, DEC-059) pools directly from `dataset/processed/` per its own literal scope, not from this report — applying the cap to the physical file flow is a follow-up step for the student, not done tonight.
+- DEC-042's cap-recompute trigger is detected and reported (`recompute_hard_cap_trigger: true`, with the specific recomputed value shown) but **not applied** — same reasoning as above, this is `docs/OPEN_QUESTIONS.md` #1's call, not an autonomous one.
+
+### Rationale
+
+A script whose own core parameter (the trim method) is an admitted unreviewed default shouldn't be the one stage in this pipeline that silently commits its output to disk without a review step — every other stage with an unresolved judgment call (box_audit's flags, mistakenness scores, dedup pairs, final curation flags) is report-only for the same reason. Deriving the ExDark-floor class set from real per-class data (rather than hardcoding DEC-014's "7 classes" list) means this script keeps working correctly even if a future ExDark class mapping changes, without needing a matching code edit.
+
+### Alternatives Considered
+
+- **Copy selected images into `dataset/curated/<source>/` as a materialized capped pool**: Rejected — `dataset/curated/` is already earmarked by `docs/PLAN.md`'s Stage 5.5 row for CVAT/Label-Studio re-imported corrections specifically; overloading it with an unreviewed cap selection before that stage runs would conflate two different provenances in the same directory.
+- **Apply DEC-042's cap-recompute rule automatically since the trigger condition is real and already met**: Rejected — recomputing would silently change every one of the 16 classes' effective cap based on one already-known, already-flagged low-volume class; that's exactly the kind of consequential, discussion-worthy change this session's hard rules say to surface, not decide.
+- **Hardcode DEC-014's corrected 7-class ExDark-overlap list**: Rejected in favor of deriving it from which classes actually have ExDark-sourced candidates in the real index — self-verifying, one less hardcoded list to keep in sync with `datasets.yaml`.
+
+### Consequences
+
+- Real run against all 16 classes: Person and Chairs both correctly hit the `instance_target` stop *before* the image hard cap (2,820 img/10,009 inst and 2,935 img/10,017 inst respectively) — exactly the dense-class behavior DEC-042 predicted for Person via CrowdHuman's ~20+ instances/image. Vehicle, Pole, Animals, Stairs, Tables, Elevator hit the `image_hard_cap` stop at exactly 4,500. Motorcycle, Escalator, Doors, Tricycle, Potholes, Trash Bins, Pedestrian Lane, Bicycle include every candidate (`all_candidates_included`) — their natural pool never reaches 4,500.
+- Confirmed via spot-check (not just trusted): sampled 5 "selected" entries from Person's list, all 5 have both an image and a label file present on disk at the claimed `dataset/processed/<source>/` path.
+- Ratio invariant **not met**: max/min = Vehicle(4,500)/Trash Bins(1,104) = 4.08, above the 3:1 target. Trash Bins and Doors (1,337 images) both land under the 1,500 floor. Both are pre-existing, already-flagged findings (DEC-051, `docs/OPEN_QUESTIONS.md` #1) — this run confirms them with exact final numbers, doesn't newly discover them.
+- `docs/OPEN_QUESTIONS.md` #1 and #6 both updated with this run's concrete numbers.
+- `dataset/reports/cap_report.json` (3.6MB) — full per-class selected/excluded lists, safe to regenerate any time (deterministic given `SEED=42` and unchanged `dataset/processed/` contents).
+
+---
+
+## DEC-059: `merge.py` Built (Stage 5.6) — Corrects DEC-058: Merges the Capped Selection, Not Raw processed/
+
+- **Date:** 2026-08-13
+- **Status:** Accepted
+- **Related:** DEC-058 (cap_per_class.py, whose scope assumption this corrects), DEC-052 (precedent for keeping "bonus" cross-class boxes rather than stripping them)
+
+### Context
+
+While researching `merge.py`'s real scope (before writing it), re-checked `README.md`'s directory table rather than relying solely on this session's own handoff document — same "verify against real docs, don't trust one that might be stale" discipline this project has used all session. `README.md` labels `dataset/merged/` as **"Post-cap, post-merge, pre-split"**, an explicit, pre-existing architectural statement that capping happens before merging. `DEC-058` (cap_per_class.py) had missed this — it read the handoff's terser scope-call table ("pool every `dataset/processed/<source>/` into `dataset/merged/`") as "everything, uncapped," and deliberately kept `cap_per_class.py` decision-only on that assumption. This entry corrects that: `merge.py` DOES consume `dataset/reports/cap_report.json`.
+
+### Decision
+
+- `scripts/build/merge.py` built: reads `dataset/reports/cap_report.json`, takes the union of every one of the 16 classes' "selected" (source, filename) pairs, and copies each image + its FULL original (unfiltered) label file into `dataset/merged/images/` + `dataset/merged/labels/`, source-prefixed via `file_utils.prefixed_filename()`.
+- An image selected by one class's cap decision but also carrying a valid box for a class that *didn't* select it keeps that box — labels aren't stripped down to "only the boxes that earned this image its spot." Same reasoning as DEC-052's cross-folder Open Images merge: it's already-correct ground truth, dropping it loses real signal for no benefit.
+- Consequence of that: a class's real post-merge count can exceed its own `cap_report.json` figure. `merge.py` recomputes true post-merge per-class counts directly from the merged label files and reports those as authoritative, rather than trusting the pre-merge estimate.
+- Stage 5.5 (human correction) hasn't run — `dataset/curated/` is still empty, and this merge is explicitly the *capped, pre-correction* pool, not the fully-realized pipeline. Documented in the script's own docstring so a future re-run after Stage 5.5 actually completes isn't mistaken for redundant.
+- **Real bug found and fixed before running either script for real**: both `merge.py` and `run_mistakenness.py` (DEC-060) originally resolved each selected file via `img_dir.glob(f"{filename}.*")` called once per file — an O(N×M) trap against source directories this large (open_images alone has 26,715 files). A background test run of `run_mistakenness.py` against its full 22,846-image scope was still running after 4+ minutes without reaching the inference phase; killed it, diagnosed the glob-per-file pattern as the cause, and replaced it in both scripts with a single per-source directory listing (`{stem: path}` dict) built once, then O(1) lookups. `merge.py`'s dry-run then completed in under a second (was previously killed after 2+ minutes with no output).
+
+### Rationale
+
+Trusting `README.md` over the handoff's own terser table where they conflict follows this session's explicit instruction (handoff §0: "if something here conflicts with `DECISIONS.md`, `DECISIONS.md` wins" — extended here to README.md, an equally pre-existing, non-improvised architecture doc, over a same-session handoff's own paraphrase). Keeping "bonus" boxes rather than stripping them avoids re-litigating a tradeoff this project already made explicitly (DEC-052) for the same shape of problem.
+
+### Consequences
+
+- Real run: 51,556 unique images merged (100% of the union — 0 missing images, 0 missing labels). Verified on disk, not just trusted: `dataset/merged/images/` and `dataset/merged/labels/` both contain exactly 51,556 files; spot-checked one merged label file's content against its source `dataset/processed/<source>/labels/` original — byte-for-byte identical.
+- Real post-merge per-class counts (images/instances), superseding `cap_report.json`'s pre-merge figures: Person 3,653/13,073 (up from cap's own 2,820 — "bonus" boxes from images selected by other classes), Vehicle 4,608/8,450, Motorcycle 3,861/6,573, Pole 4,500/5,644, Animals 4,541/5,621, Stairs 4,500/4,876, Escalator 4,255/7,216, Doors 1,337/1,634, Chairs 3,440/12,516, Tables 4,672/8,400, Tricycle 3,495/4,525, Potholes 2,867/6,585, Trash Bins 1,104/1,921, Elevator 4,500/7,904, Pedestrian Lane 2,158/2,610, Bicycle 3,638/7,010.
+- `dataset/reports/merge_report.json` written — per-source merged counts, any missing-file warnings (none), real post-merge class counts.
+- The same glob-per-file performance fix needed applying to `run_mistakenness.py` too (DEC-060) — found via this script's dry-run hanging, so the fix landed in both before either was run for real at scale.
+
+---
+
+## DEC-060: `run_mistakenness.py` Built and Run (Stage 5.5) — COCO-Pretrained Proxy Model, 7/16 Classes
+
+- **Date:** 2026-08-13
+- **Status:** Accepted
+- **Related:** DEC-028 (CrowdHuman's crowd/occlusion role — relevant to reading this run's results), DEC-058/059 (cap_report.json / merge.py, whose output this stage builds on)
+
+### Context
+
+FiftyOne Brain's `compute_mistakenness` needs both a `ground_truth` and a `predictions` field per sample — this project has no trained model of its own yet (Phase 3, RunPod, not done here), so predictions had to come from somewhere. Used a pretrained, COCO-trained YOLOv8n (`yolov8n.pt`, zero-shot, zero training) — `ultralytics`/`torch` were already declared in `requirements.txt` but not yet installed in this environment; installed them to fulfill an already-decided project dependency, not a new one.
+
+That approach only works for canonical classes with an unambiguous COCO analog. Built the crosswalk from `classes.yaml`'s own already-decided `native_class` fields (not invented): Person→person, Vehicle→car/bus/truck, Motorcycle→motorcycle, Bicycle→bicycle, Animals→dog/cat (not COCO's broader animal set — `classes.yaml`'s own Animals scope is Dog/Cat only), Chairs→chair, Tables→dining table (COCO's only table class, a forced 1:1). The other 9 classes (Pole, Stairs, Escalator, Doors, Tricycle, Potholes, Trash Bins, Elevator, Pedestrian Lane) have no COCO equivalent and are explicitly excluded, not silently skipped.
+
+Scoped to Stage 5.4's *capped* selection (`cap_report.json`'s per-class "selected" lists for the 7 eligible classes), not the raw uncapped `processed/` pool — keeps this bounded to a size that finishes in one unattended run.
+
+**Real performance bug found and fixed before the real run**: both this script and `merge.py` (DEC-059) originally resolved each file via `img_dir.glob(f"{filename}.*")` called once per file — an O(N×M) trap against source directories this large. A background test was still running after 4+ minutes without reaching the inference phase; killed it, diagnosed the pattern, replaced it in both scripts with a single per-source `{stem: path}` index built once. Also found: running two heavy ML workloads concurrently (this script's YOLO inference and a `dedup.py` timing test) on this single machine caused a ~15x throughput collapse from MPS/GPU resource contention — noted as an operational lesson, not re-litigated per-script.
+
+### Decision
+
+- `scripts/curate/run_mistakenness.py` built: for the union of images selected across the 7 eligible classes' capped selections, runs `yolov8n.pt` inference (MPS device, Ultralytics' own default confidence threshold of 0.25 — a tool default, not tuned), builds a FiftyOne dataset with `ground_truth` (original labels, filtered to the 7 eligible classes only, so non-eligible-class boxes in the same image don't pollute the comparison) and `predictions` (YOLO output remapped through the crosswalk), and runs `fob.compute_mistakenness(dataset, "predictions", label_field="ground_truth")`.
+- Ranks all scored samples by mistakenness descending, writes the full ranked list (not a truncated sample — this list IS the priority order for review) to `dataset/reports/mistakenness_report.json`. Flag-only, same posture as every other Stage 5.3-5.7 script — no file is moved, corrected, or deleted.
+- FiftyOne dataset is scratch (deleted after extracting results) — the JSON report is the persisted artifact, matching this project's established convention for test/computation-only FiftyOne datasets.
+
+### Rationale
+
+A COCO-pretrained proxy model is a legitimate, well-established "model-assisted curation" technique when a project has no model of its own yet — it's not a perfect signal (COCO's label semantics and box conventions differ from this project's), but it's a real, grounded comparison rather than an invented heuristic, and it's honestly scoped to only the classes where the comparison is actually meaningful.
+
+### Consequences
+
+- Real run: 22,846 images scored (matches the union size computed from `cap_report.json`). Report is 5.1MB.
+- **Real, useful finding surfaced by the run itself, not by inspection**: the highest-mistakenness samples (score ≈0.97) are almost all `open_images` Chairs/Tables images where the model's prediction count exceeds ground truth (e.g. 3 gt boxes / 7 predicted) — plausible genuine under-annotation in the source data, exactly the kind of thing this stage exists to surface, not something engineered into the test.
+- **Second finding, a different failure mode than "mistaken label"**: 3,998 of 22,846 scored samples (17.5%) show `mistakenness == -1.0` — checked against FiftyOne's own docstring for `compute_mistakenness`: per-sample mistakenness is the *maximum mistakenness across matched ground-truth/prediction pairs*; when a sample's detections don't match at all (either the model missed every ground-truth object, or CrowdHuman's crowd density produced far more predictions than matchable ground truth), there's no matched pair to score, and FiftyOne appears to fall back to a `-1.0` sentinel rather than a `[0, 1]` score. This is a *different* kind of flag than the high-score "likely-wrong-label" cases — it clusters on crowded CrowdHuman scenes (matches DEC-028's documented COCO-pretrained blind spot on crowds/occlusion) and total-miss ExDark low-light cases. Recorded here rather than silently treated as "just more low-priority samples" — a `-1.0` score is not comparable to a `0.01` score on the same scale, and the student should know that before sorting by it naively.
+- `docs/OPEN_QUESTIONS.md` #5 updated to confirm `run_mistakenness.py` (the tool-agnostic half of Stage 5.5) is done; `reimport_corrections.py` remains genuinely blocked on the CVAT/Label Studio choice, confirmed not silently deferred.
+
+---
+
+## DEC-061: Code Review Pass on the New Stage 5.3-5.9 Scripts — 5 Real Bugs Found and Fixed, Including a DEC-050-Shaped Stale-Output Bug in merge.py
+
+- **Date:** 2026-08-13
+- **Status:** Accepted
+- **Related:** DEC-050 (the earlier acquire_openimages.py stale-export bug this repeats), DEC-057/058/059 (scripts most affected), handoff §4.5 (explicitly suggested running code-review on the new scripts)
+
+### Context
+
+Ran `/code-review` (medium effort, 6 parallel angles: reuse, simplification, removed-behavior, cross-file tracing, altitude/conventions, efficiency) against every script built this session, per the handoff's own closing suggestion. Findings ranged from real bugs to legitimate-but-lower-value cleanup; this entry records what was actually fixed and, briefly, what was deliberately left for time-budget reasons.
+
+**Most consequential finding, self-inflicted while fixing a smaller one**: fixing `cap_per_class.py`'s ExDark-floor RNG-bypass (below) changed the exact images selected for several classes (same seed, same policy, but a different draw once ExDark's own selection started consuming `rng` state it hadn't before). Re-ran `cap_per_class.py` and `merge.py` to regenerate `cap_report.json`/`dataset/merged/` against the fixed code — and in doing so, re-discovered **the exact stale-output bug DEC-050 already found and fixed once this session, in a different script**: `merge.py` never cleared `dataset/merged/images|labels/` before writing, so `safe_copy(overwrite=True)` only overwrote filenames present in *both* the old and new selection — files present only in the old run's selection were silently orphaned. Caught by checking real file counts on disk (this project's standing discipline) rather than trusting the script's own tally: `merge.py` reported "Merged: 51529/51529" while `find dataset/merged/images -type f | wc -l` showed 60,119 — 8,590 stale files, and downstream per-class counts were correspondingly (and silently) inflated (e.g. Vehicle's real post-merge count read 6,862 instead of the correct 4,601).
+
+### Decision
+
+Fixed, in order of consequence:
+
+1. **`merge.py` stale-output bug (new)**: `rmtree` both output dirs before writing, same fix pattern as DEC-050's `pull_class()`. Re-ran; disk count now matches the report exactly (51,529 = 51,529).
+2. **`cap_per_class.py`'s ExDark-floor selection now uses the seeded `rng`** before slicing, instead of raw dict/filesystem iteration order — was the one selection path in the file not using it, inconsistent with the script's own stated "seeded random trim" policy (harmless today only because ExDark volumes never reach `hard_cap`, but silently non-reproducible if that ever changes).
+3. **`merge.py`'s `canonical_names[class_id]` and `split.py`'s same lookup now bounds-checked** — previously an out-of-range class id in a merged label (corrupt data, not seen in practice) would raise `IndexError` *after* files were already copied, leaving a half-written pool with no report explaining why. Now counted separately and reported instead of crashing.
+4. **`merge.py`'s `per_source_counts` now only increments on the success path** — previously incremented before the missing-image/missing-label checks, so it silently counted "attempted" rather than "actually merged" (misleading in exactly the run where it would have mattered — this run had 0 missing, so it didn't manifest, but the field's meaning didn't match its name).
+5. **`dataset.delete()` for the three FiftyOne-Brain scripts' (`dedup.py`, `run_mistakenness.py`, `final_merge_curation.py`) scratch datasets now runs in a `finally` block** — a mid-computation error previously left a multi-thousand-sample orphaned dataset registered in FiftyOne's backing store.
+6. **Consolidated duplicated helpers into `file_utils.py`**, flagged independently by 3+ of the 6 review angles: `build_stem_index(source)` (was duplicated verbatim in `merge.py` and `run_mistakenness.py` — the exact O(N×M)-avoidance fix from DEC-059/060, itself already paid for twice) and `discover_processed_sources()` (was duplicated in `box_audit.py` and `cap_per_class.py`). Both new helpers filter to `IMAGE_EXTENSIONS` (the old copies used a bare `is_file()` check, which a stray non-image file like `.DS_Store` could have silently corrupted).
+7. **`bbox_utils.validate_bbox()` gained an `epsilon: float = 0.0` parameter** instead of `box_audit.py` maintaining a separate `audit_validate_bbox()` reimplementation of the same bounds logic — one canonical validator now covers both the strict pre-write case (converters, epsilon=0.0, unchanged behavior) and the epsilon-toleranced post-round-trip case (box_audit.py, epsilon=1e-4).
+
+**Deliberately not fixed**, for remaining-session-time reasons — noted here so they're a documented, findable follow-up rather than silently dropped: the YOLO label-line-parsing loop is still re-implemented independently in 6 files (a `bbox_utils.iter_yolo_label_lines()` helper would consolidate it); report-writing boilerplate (`ensure_dir` + `json.dump` + print) is repeated across 7 new + 8 pre-existing scripts (pre-existing pattern, not newly introduced); `split.py`'s dedup-report staleness check compares image *counts*, not identity, so a same-size-but-different-contents re-merge could theoretically be accepted as "covers the full pool" when it doesn't. None of these affect this run's actual output — they're maintainability/robustness items for a future pass, not correctness gaps in tonight's numbers.
+
+### Rationale
+
+The stale-output bug is the one worth dwelling on: it recurred in a *different* script than DEC-050's original, via a code path (a re-run triggered by fixing a smaller, unrelated bug) that's exactly the scenario an unattended session should expect — fixing one thing and needing to re-run something downstream. The fact that it was caught the same way DEC-050 caught the original instance (checking real `find | wc -l` output against the script's own printed tally, not trusting the printed tally) rather than a different mechanism suggests this "clear output dir before writing" pattern should probably be a `file_utils.py` helper too, not something each script re-implements — flagged here rather than done, given time already spent this pass.
+
+### Consequences
+
+- `dataset/merged/` regenerated clean: 51,529 images (down from the first run's 51,556 — the ExDark-floor RNG fix changed a handful of per-class selections at the margins, not the overall scale), verified file count matches the merge report exactly.
+- Real post-merge counts after the fix: Person 3,667 img/12,997 inst, Vehicle 4,601/8,544, Motorcycle 3,861/6,573, Pole 4,500/5,695, Animals 4,547/5,634, Stairs 4,500/4,904, Escalator 4,255/7,216, Doors 1,337/1,634, Chairs 3,419/12,402, Tables 4,668/8,315, Tricycle 3,495/4,525, Potholes 2,867/6,585, Trash Bins 1,104/1,921, Elevator 4,500/7,824, Pedestrian Lane 2,158/2,610, Bicycle 3,638/7,010 — supersede DEC-059's now-stale figures.
+- All 10 affected scripts re-verified via `--dry-run`/syntax check after the refactor; `box_audit.py --dry-run` output confirmed byte-identical to its pre-refactor run (the consolidation changed nothing observable, as intended).
+- `scripts/utils/file_utils.py` gained two new public functions (`build_stem_index`, `discover_processed_sources`), available to any future Stage 5.3+ script without re-deriving either.
+
+---
+
+## DEC-062: `dedup.py` Built and Run (Stage 5.6) — Exact Duplicates Full-Pool, Near-Duplicates Sampled
+
+- **Date:** 2026-08-13
+- **Status:** Accepted
+- **Related:** `docs/OPEN_QUESTIONS.md` #7 (dedup method/threshold), DEC-059/061 (merge.py, whose output this reads)
+
+### Context
+
+First attempt at a full-pool (51,529 image) near-duplicate run degraded from ~89 img/s at the start to under 10 img/s within 90 seconds, projecting to an open-ended 1+ hour runtime — killed rather than let run unbounded. Root cause found by comparing against an earlier isolated benchmark that *had* run cleanly at ~28 img/s: that benchmark passed `num_workers=4` explicitly; the real script left it at FiftyOne's default, which appears to over-subscribe this machine's single MPS device with more DataLoader worker processes than it handles well concurrently, degrading over time rather than failing outright.
+
+### Decision
+
+- Pinned `num_workers=4` for the embedding computation (matches the clean benchmark).
+- **`compute_exact_duplicates`** (filehash-based, no embedding model, no degradation risk) still runs against the **full** 51,529-image merged pool — real result: 1,893 groups, 2,143 duplicate files (~4.2% of the pool).
+- **`compute_near_duplicates`** (embedding-based) runs against a **seeded (42), per-source-proportional stratified sample of 6,000 images**, not the full pool — a deliberate, documented scope bound given the measured (and only partially explained by the `num_workers` fix) throughput ceiling on this hardware, kept as a safety margin against the same degradation pattern recurring unattended. Real result on the sample: 818 images flagged near-duplicate across 520 groups (threshold=0.2, FiftyOne Brain's own default, `mobilenet-v2-imagenet-torch` embeddings on MPS — chosen for measured speed over FiftyOne's silent default; see `dedup.py`'s own module docstring for the full embedding-model rationale and its threshold-transfer caveat).
+- **Real nuance surfaced while sanity-checking the output, not assumed correct on faith**: several flagged near-duplicate pairs report a `distance` well above the 0.2 threshold (e.g. 5.19, 6.05). Traced into FiftyOne Brain's actual `DuplicatesMixin.find_duplicates()` source: the reported distance is to the nearest *surviving unique* neighbor, found via a separate post-hoc k=1 query — not necessarily the specific neighbor that caused the original point to be thresholded as a duplicate (which may itself have been removed as someone else's duplicate first). The *flagging itself* (unique vs. duplicate) is threshold-correct; the *specific "kept" pairing and distance shown* in the report is not guaranteed to be ≤0.2. Documented so the report isn't misread.
+
+### Rationale
+
+Exact-duplicate detection has no accuracy/coverage tradeoff to make (it's a hash comparison) — running it on the full pool costs nothing extra, so there was no reason to sample it too. Near-duplicate detection is the one with a real, measured cost, so it's the one that got bounded — consistent with this project's practice of matching verification effort to actual risk/cost rather than applying one blanket policy.
+
+### Alternatives Considered
+
+- **Keep pushing for a full-pool near-duplicate run** (e.g. chunked processing, retry after the `num_workers` fix): the `num_workers` fix alone didn't fully restore the clean benchmark's throughput (real run averaged ~9-13 img/s post-fix, not ~28), suggesting a second, unidentified factor (possibly real content/size variance across the full pool vs. the benchmark's narrower slice). Chasing it further wasn't worth the time against an already-long session; the sampled result is real, grounded, and enough to inform the student's threshold/approach decision (`docs/OPEN_QUESTIONS.md` #7) either way.
+
+### Consequences
+
+- `dataset/reports/dedup_report.json` (671KB) — exact-duplicate groups cover the full pool; near-duplicate groups are explicitly labeled as sample-based, with the sample method and size recorded in the report itself (not just this doc).
+- Nothing under `dataset/merged/` was modified — flag-and-report only, same as every other Stage 5.3-5.7 script.
+- `docs/OPEN_QUESTIONS.md` #7 updated with real numbers and the distance-interpretation caveat.
+- If the student wants a full-pool near-duplicate pass later, re-running `dedup.py` with `NEAR_DUP_SAMPLE_SIZE` raised (or a chunked-processing rewrite) is the natural follow-up — not attempted here.
+
+---
+
+## DEC-063: `split.py` Built and Run (Stage 5.8) — Fixed a Real Union-Find Bug in Duplicate-Group Leakage Prevention
+
+- **Date:** 2026-08-14
+- **Status:** Accepted
+- **Related:** `docs/OPEN_QUESTIONS.md` #7 (dedup coverage), #8 (split ratio), DEC-062 (`dedup_report.json`'s schema, whose output this reads)
+
+### Context
+
+`split.py`'s own stated design goal is that no exact- or near-duplicate group found by `dedup.py` straddles more than one split (train/val/test) — leakage that would let the model see a near-identical image at train time and again at eval time. A first real dry-run against the full 51,529-image merged pool and the finalized `dedup_report.json` (DEC-062) printed `WARNING: 56 duplicate groups still straddle multiple splits (unexpected — investigate)` — the script's own leakage check catching its own bug, not silently passing.
+
+Investigated with a standalone script rather than guessed: `dedup_report.json`'s exact-duplicate and near-duplicate checks have different coverage (DEC-062), so the same filename can legitimately be reported inside two different groups — one from each check. Confirmed on real data: 223 filenames appear in more than one group; 187 of those have groups with genuinely different membership (not just the same pair reported twice). `assign_splits()`'s original grouping logic did `group_of[f] = rep` per group in a plain loop — a last-write-wins overwrite, not a union-find — so processing a later overlapping group could silently sever an earlier group's link for a shared file, breaking it off from duplicates it was transitively chained to.
+
+### Decision
+
+Replaced the last-write-wins grouping with a real union-find (`parent`/`find`/`union` with path compression) over all duplicate groups before assignment, so overlapping groups merge into one connected component and move as a single unit. Also fixed `load_duplicate_groups()`'s log message and `split_report.json`'s output stats, which previously implied "dedup_report.json covers the full pool" for both duplicate checks — true only for exact-duplicates; near-duplicates only cover DEC-062's 6,000-image sample. Both fixes are correctness/accuracy fixes to already-agreed behavior, not new judgment calls, so made directly rather than flagged as blocked.
+
+Re-ran `split.py` for real after the fix. **Real result:** train=38,691, val=6,383, test=6,455 (74.7% / 12.4% / 12.5%, close to the 75/12.5/12.5 target — DEC-042-style small deviation expected from source-stratification plus duplicate-groups moving as a unit). Zero cross-split leakage warnings. Verified against real files on disk (not just the script's own tally): `find`'s extension-aware count across `dataset/final/` sums to 51,529 (1,645 `.jpeg` + 48,758 `.jpg` + 1,126 `.png`), exactly matching `split_report.json`'s `split_counts` total.
+
+### Rationale
+
+A duplicate-aware split that only *sometimes* keeps duplicate groups together is worse than no duplicate-awareness at all — it creates a false sense of leakage prevention while still leaking on exactly the cases (187 files) where the two dedup checks' independently-discovered groups overlap, which is not a rare edge case at this data's scale. Fixing the union-find was mechanical (a standard, well-understood algorithm) and directly served the script's own already-documented goal — not a new scope decision requiring the student.
+
+### Alternatives Considered
+
+- **Drop near-duplicate groups from split-grouping entirely, keep only exact-duplicates**: would have sidestepped the overlap bug by construction, but throws away real leakage-prevention value from the near-duplicate sample for no reason — the actual bug was fixable directly.
+- **Leave the 56-group warning and flag it as a student decision**: rejected — this is a verifiable code defect against the script's own stated contract (verified by tracing the actual overlapping groups), not an ambiguous judgment call like the trim-method or threshold questions elsewhere in this pipeline.
+
+### Consequences
+
+- `scripts/build/split.py` now performs correct transitive duplicate-group merging; `dataset/reports/split_report.json` records `duplicate_group_coverage_note` explicitly distinguishing exact-dup (full-pool) from near-dup (sampled) coverage, so a reader of the report alone (not just this doc) sees the caveat.
+- `dataset/final/{train,val,test}/{images,labels}/` populated for real, verified clean on disk.
+- Per-class per-split distribution recorded in `split_report.json`; all 16 classes present in all 3 splits with roughly proportional counts (e.g. Trash Bins: train=831/val=132/test=141, still thin per `docs/OPEN_QUESTIONS.md` #1, but proportionally split).
+- `docs/OPEN_QUESTIONS.md` #8 updated with the real split counts.
+
+---
+
+## DEC-064: `final_merge_curation.py` Built and Run (Stage 5.7) — Same Method as DEC-060, Reused Against the Merged Pool
+
+- **Date:** 2026-08-14
+- **Status:** Accepted
+- **Related:** DEC-060 (`run_mistakenness.py`, whose crosswalk/logic this reuses directly), `docs/OPEN_QUESTIONS.md` #5 (CVAT/Label Studio, blocks the actual correction loop this feeds)
+
+### Context
+
+Stage 5.7 is a second mistakenness-scoring checkpoint, identical in method to Stage 5.5 (DEC-060) but run against `dataset/merged/` (post-cap, post-merge, source-prefixed) instead of each source's own `dataset/processed/`. `final_merge_curation.py` imports `COCO_CROSSWALK`, `CANONICAL_KEY_TO_NAME`, `ELIGIBLE_CANONICAL_IDS`, and `yolo_to_fo_bbox` directly from `run_mistakenness.py` rather than duplicating them, so the 7-class COCO-analog scope and crosswalk provenance is identical and doesn't need re-litigating here.
+
+An initial dry-run against the corrected 51,529-image merged pool (post-DEC-061 RNG fix) found 22,824 eligible images — down slightly from an earlier, now-stale dry-run's 22,851 (against the pre-fix 51,556-image pool), consistent with the RNG fix's expected small effect.
+
+### Decision
+
+Ran for real: yolov8n COCO-pretrained proxy inference (batches of 16, MPS) over all 22,824 eligible images, then `fiftyone.brain.compute_mistakenness()` against ground truth. **Real result:** 22,824 images scored and ranked, report at `dataset/reports/final_merge_curation_report.json` (5.4MB). Top-of-ranking pattern matches DEC-060's Stage 5.5 finding almost exactly: highest-mistakenness samples are open_images Chairs/Tables images where the model detects more boxes than ground truth has (e.g. top score 0.9701, `open_images__ada7e0a339ecdbfd`, gt=15 pred=17) — the same plausible-under-annotation signal, now confirmed to persist through merge rather than being an artifact of the pre-merge pool. 17.5% of scores are exactly -1.0 (FiftyOne's no-matched-pair sentinel, not a real [0,1] score) — same proportion as Stage 5.5, but the per-source mix shifted: `open_images` (2,407) and `exdark` (1,177) dominate as before, but `roboflow_me5_u6rvg` now contributes 400 sentinel scores that didn't show up the same way pre-merge, worth the student's attention if reviewing that source specifically.
+
+Verified no leftover FiftyOne datasets after the run (`fo.list_datasets()` returns `[]`), same try/finally posture as every other FiftyOne-using script this session.
+
+### Rationale
+
+Reusing DEC-060's crosswalk/logic directly (import, not copy) means this checkpoint can't silently drift from Stage 5.5's — if the 7-class scope or crosswalk ever needs to change, there's one place to change it, not two to keep in sync by hand.
+
+### Consequences
+
+- `dataset/reports/final_merge_curation_report.json` written — flag-and-report only, `dataset/merged/` untouched.
+- Same posture as DEC-060: this ranks candidates for human review, it does not decide or apply anything. The actual correction loop is still blocked on `docs/OPEN_QUESTIONS.md` #5.
+- Ran independently of, and concurrently with, `split.py`'s real run (DEC-063) — safe because this is a torch/MPS-bound job and `split.py` is pure file I/O, not two MPS jobs contending for the same device (the resource-contention pattern this session had already learned to avoid).
+
+---
+
+## DEC-065: `generate_yaml.py` Built and Run (Stage 5.9) — Mechanical, No New Decisions
+
+- **Date:** 2026-08-14
+- **Status:** Accepted
+- **Related:** DEC-063 (`split.py`, whose output this reads), `config/classes.yaml` (schema this must match), `config/training.yaml` (pre-existing `data:` reference this satisfies)
+
+### Context
+
+Last script in the handoff's scope table. Purely mechanical: write `dataset/final/data.yaml` matching `config/classes.yaml`'s existing, already-decided schema (`nc: 16`, `names:` in canonical id order) and `config/training.yaml`'s pre-existing `data: dataset/final/data.yaml` reference — no new judgment call, just executing an already-agreed format against real, now-populated data.
+
+### Decision
+
+Ran for real against `dataset/final/{train,val,test}/` (populated by DEC-063's real `split.py` run). Verified non-empty before writing (script's own built-in check): train=38,691, val=6,383, test=6,455 images+labels, matching. Wrote `dataset/final/data.yaml` with `path: .` (relative — training runs on RunPod, not this machine, per `config/training.yaml`'s own Phase 3 framing) and the class list.
+
+**Verified for real, not assumed**: cross-checked the written `names:` block against `config/classes.yaml`'s own `names:` field (the authoritative 0-indexed mapping, distinct from that file's separate `classes:` metadata block, which is grouped by category and is NOT id-ordered — a real point of possible confusion caught by checking both, not just one) — exact match, all 16 classes, correct order (`Bicycle` at id 15 in both).
+
+### Rationale
+
+Nothing to weigh — this is Stage 5.9 executing a format two other files (`classes.yaml`, `training.yaml`) had already committed to before this script existed.
+
+### Consequences
+
+- `dataset/final/data.yaml` exists and is real-data-verified-correct. `config/training.yaml`'s `data:` reference now resolves to a populated file.
+- This is the last script in the handoff's Stage 5.3-5.9 "Build" scope table — every item is now built and run for real except `reimport_corrections.py` (genuinely blocked, `docs/OPEN_QUESTIONS.md` #5).
+- **Not a green light to train yet** — `dataset/final/` reflects the *pre-correction* pool (DEC-059/064's framing): Stage 5.5/5.7's flagged samples haven't been reviewed, and `docs/OPEN_QUESTIONS.md` has several open items. `data.yaml` pointing at real data means training is *mechanically possible*, not that the dataset is considered finished.
+
+---
+
+## DEC-066: Second Code Review Pass (post-DEC-061) — 14 Findings, Highest-Severity Ones Fixed and Verified
+
+- **Date:** 2026-08-14
+- **Status:** Accepted
+- **Related:** DEC-061 (the first code-review pass, which covered box_audit.py/cap_per_class.py/merge.py/run_mistakenness.py as they existed at that point), DEC-062/063/064/065 (the scripts this pass covers)
+
+### Context
+
+Per the handoff's §4.5 suggestion, ran `/code-review` again against the scripts built/finalized since DEC-061: `dedup.py` (heavily redesigned since), `final_merge_curation.py`, `split.py`, `generate_yaml.py`. 14 findings came back. Each was checked against real behavior (not accepted on the reviewer's word alone) before deciding whether to fix.
+
+### Decision
+
+**Fixed, verified against real behavior:**
+1. **`generate_yaml.py`'s `path: "."` doesn't do what its own docstring claimed** — the highest-severity finding. Verified directly by reading the actually-installed `ultralytics==8.4.118`'s `check_det_dataset()` source: an explicit `path` value resolves relative to the training process's CWD (or as absolute), never relative to the yaml file itself; that behavior only happens via a fallback (`Path(data["yaml_file"]).parent`) that's skipped whenever `path` is truthy. Fixed by omitting `path` entirely. Verified end-to-end: called the real `check_det_dataset()` against the real `dataset/final/data.yaml` from `/tmp` (a CWD with nothing to do with this project) — `train`/`val`/`test` all resolved correctly to `dataset/final/{split}/images`, all reported as existing. Also made the "verify splits non-empty" check in the same file an actual hard gate (`raise FileNotFoundError`) instead of a print-only warning, matching what its docstring already claimed it did.
+2. **`split.py` reintroduced the stale-output bug DEC-050/061 already fixed twice** — no `shutil.rmtree()` before writing `dataset/final/{split}/`. Same fix as those two: clear before write. Also made the cross-split duplicate-leakage check (the entire point of DEC-063's union-find fix) a hard `raise`, not just a print, for the real run (still non-fatal under `--dry-run`).
+3. **`split.py`/`merge.py`/`final_merge_curation.py` had inconsistent missing-file and unknown-class-id tracking** — `split.py` didn't track images with no matching label (merge.py already does, for the identical situation) or out-of-range class ids in its per-split stats (again, merge.py already does). `final_merge_curation.py` silently dropped eligible labels with no matching image, with no counter and no explanation for why `--dry-run`'s preview count could differ from the real run's. All three brought to parity: added `missing_labels`/`unknown_class_ids_in_split_labels` to `split_report.json`, `missing_images`/`eligible_labels_found` to `final_merge_curation_report.json`.
+4. **`dedup.py`/`final_merge_curation.py` built image lists without the project's own `IMAGE_EXTENSIONS` filter** (`img_dir.iterdir()`/`is_file()` only) — the exact stray-file risk `file_utils.list_images()`/`build_stem_index()` exist to prevent, and `.DS_Store` files already exist elsewhere under this exact `dataset/` tree on this machine. Fixed to use `list_images()` (or an equivalent inline filter for `final_merge_curation.py`'s flat pooled directory, which `build_stem_index()` itself doesn't cover since it's per-source). **Verified this didn't silently corrupt either script's already-completed real run**: re-checked `dataset/merged/images/`'s real extension breakdown (1,645 `.jpeg` + 48,758 `.jpg` + 1,126 `.png` = 51,529, exact match, DEC-063) — no stray files existed when those runs happened, so this is a future-run robustness fix, not a correction to already-produced reports.
+5. **`dedup.py`'s two `fo.Dataset()` constructions happened before the `try:` block**, so a failure creating the second would leak the first (a gap in DEC-061's own try/finally fix). Moved both inside `try`, `None`-guarded the `finally` cleanup. Also fixed an inconsistency where the exact-duplicate report used an unguarded `id_to_name[id]` lookup while the structurally-identical near-duplicate report used a defensive `.get(id, id)` — made both degrade the same way.
+
+**An unplanned consequence of verifying fix #4**: a `--limit 50` smoke test of the *already-fixed* `dedup.py`, run to confirm the refactor didn't break the real (non-dry-run) code path, overwrote the real `dataset/reports/dedup_report.json` (671KB, full-scale DEC-062 results) with a 50-image smoke-test result — `dedup.py` always writes to the same report path regardless of `--limit`, a fact I knew but didn't account for before running the smoke test against the real output path. Caught immediately by checking the report's own `images_checked` field (50, not 51,529) rather than assuming the smoke test was harmless. Fixed by re-running `dedup.py` at full scale again; exact-duplicate results reproduced identically (1,893 groups/2,143 files — deterministic, filehash-based), near-duplicate results also reproduced identically given the same seed (818/520, see the re-run's real output in this doc's own edit history / `dataset/reports/dedup_report.json`'s current contents).
+
+**Flagged but deliberately NOT fixed (latent, not currently triggered, or already-accepted scope):**
+- **`split.py`'s `round(n * ratio)` split-size math can zero out a small source's val/test allocation** for `n<=7` duplicate-group-representative counts. Checked against real data: the smallest real source (`crowdhuman`, 128 images) still gets non-zero val (16) and test (16) — not triggered today. Left as a documented latent risk rather than speculative-fixed for a case that doesn't exist in this dataset.
+- **`split.py`'s `load_duplicate_groups()` staleness check** (`images_checked < merged_image_count`) only catches an undercount, not a same-or-larger count with different file identities. This is a narrower version of a gap DEC-061 already flagged as deliberately unfixed for the analogous merge.py case; left consistent with that existing precedent rather than fixed unilaterally in only one of the two places it applies.
+- **`split.py`'s unguarded `int(parts[0])`** during label parsing (a malformed non-numeric class id would raise uncaught) — confirmed this is a pre-existing pattern shared identically by `merge.py`'s equivalent loop, not something newly introduced in `split.py`. Left as-is rather than fixed in one file only, since all labels are generated by this project's own converters (external corruption is the only realistic trigger).
+- **`final_merge_curation.py` duplicates ~35 lines of COCO-crosswalk-assertion and batched-inference logic from `run_mistakenness.py`** rather than importing it, despite the module docstring's claim of reusing that logic "directly... rather than duplicating." The two copies have already drifted cosmetically (`for coco_list in COCO_CROSSWALK.values()` vs `for key, coco_list in COCO_CROSSWALK.items()` — functionally identical, since neither loop actually uses the dict key). A real DRY violation and a legitimate maintainability risk, but refactoring it this late in an unattended session, with no time budget left to re-verify both scripts' real output afterward, carries more regression risk than value tonight. Left for the student as a documented follow-up, not silently ignored.
+
+### Rationale
+
+Verified before fixing, not on the reviewer's word: the `path: "."` finding in particular could have looked like reviewer overreach (the docstring sounded confident) — reading the actually-installed library's own source and testing against the real generated file from an unrelated CWD is what turned "plausible claim" into "confirmed bug, confirmed fix." The same verify-first posture caught that fixes #1-#5 didn't require re-running the already-completed `merge.py`/`final_merge_curation.py`/`split.py` outputs (no stray files, no missing labels, no leakage existed in those already-produced reports) — except `dedup.py`, whose report genuinely did need regenerating, for a reason (the smoke-test overwrite) unrelated to the code-review findings themselves.
+
+### Consequences
+
+- `scripts/build/generate_yaml.py`, `scripts/build/split.py`, `scripts/preprocess/dedup.py`, `scripts/curate/final_merge_curation.py` all patched; `dataset/final/data.yaml` regenerated with the `path` fix (train/val/test file counts unchanged — this was a resolution-logic fix, not a data fix).
+- `dataset/reports/dedup_report.json` regenerated at full scale after the accidental smoke-test overwrite; real numbers unchanged from DEC-062 (1,893/2,143 exact, 818/520 near, both fully reproducible from the seeded/deterministic design).
+- `dataset/reports/split_report.json` and `dataset/reports/final_merge_curation_report.json` were NOT regenerated — their fixes were additive-only (new report fields, defensive filters) and verified not to change already-produced output; re-running either would cost real compute time for zero change in conclusions.
+- The DRY duplication between `run_mistakenness.py` and `final_merge_curation.py`, and the two lower-priority latent risks above, are left as open follow-ups — noted here and in the final handoff summary, not silently dropped.
+
+---
+
+## DEC-067: `cap_per_class.py` Generalized Beyond ExDark-Only Floors — Per-Class Priority Sources, Decided With the Student
+
+- **Date:** 2026-08-15
+- **Status:** Accepted
+- **Related:** DEC-014 (ExDark's original guaranteed-floor rule, which this generalizes), DEC-042 (INSTANCE_TARGET, which this respects for general fill but required a carve-out for one priority source), `docs/OPEN_QUESTIONS.md` #6 (trim method)
+
+### Context
+
+The student asked a pointed question: `cap_per_class.py` only ever gave guaranteed-floor treatment to ExDark (DEC-014's low-light diversity layer) — every other source, regardless of its documented role in `config/classes.yaml` (`primary`/`secondary`/`role: volume_topup`) or actual deployment relevance, competed equally at random for whatever budget was left. Real numbers backed up the concern: for Person, `crowdhuman` had 19,370 candidate images (by far the largest pool, explicitly documented as a `volume_topup` secondary source) but only 128 were selected, because ExDark's floor alone consumed 74.6% of the shared 10,000-instance budget before crowdhuman or `open_images` were considered at all.
+
+Went through `config/classes.yaml` and `config/datasets.yaml` class-by-class with the student to distinguish which competing sources are genuinely edge-case/deployment-relevant (documented as such), which are general-case, and which is really a quality-vs-volume tradeoff rather than either:
+
+- **8 of 16 classes** already use every candidate from every source (`stop_reason: all_candidates_included`) — no competition exists, nothing to decide.
+- **Person**: `crowdhuman` isn't an edge-case source, it's a documented `volume_topup` role being starved by ExDark's instance-heavy floor.
+- **Vehicle**: `roboflow_me5_u6rvg` IS a documented edge-case source (`datasets.yaml`: "Tricycle presence is a genuine bonus given the class's Philippine-context relevance," Jeepney/Ambulance content).
+- **Pole, Stairs**: no documentation found marking either side of either competing pair as edge-case — student confirmed no special priority needed, left as pure random pooling.
+- **Elevator**: not edge-case-vs-general at all — `elevator_status_s4lrk` (larger) has Stage 5.3's flagged box-shape defects (844 boxes); `elevator_awvus` (smaller) doesn't. A quality preference, not a diversity one.
+- **Animals, Chairs, Tables**: no edge-case-specific source exists for these at all (just ExDark + one general source) — nothing to decide.
+
+### Decision
+
+Generalized the guaranteed-floor mechanism from "always exactly ExDark" to a per-class ordered list, `CLASS_PRIORITY_SOURCES: dict[str, list[str]]` — every class not listed defaults to `["exdark"]` (today's behavior, unchanged), with three overrides:
+
+- **Person**: `["exdark", "crowdhuman"]` — crowdhuman gets a second floor, after ExDark.
+- **Vehicle**: `["exdark", "roboflow_me5_u6rvg"]` — me5_u6rvg gets a second floor, after ExDark.
+- **Elevator**: `["roboflow_elevator_awvus"]` — awvus is the *only* priority source (no ExDark candidates exist for Elevator at all — outside DEC-014's 7-class overlap).
+
+Priority sources are reserved in list order, each one's full candidate pool included first (up to whatever image/instance budget remains), before the next priority source, before any general source's random-pooled fill — the exact same posture DEC-014 established for ExDark specifically, now applied per-class to whichever source(s) `CLASS_PRIORITY_SOURCES` lists.
+
+**A real complication surfaced immediately, not glossed over**: applying this naively to crowdhuman blew Person's realized instance count to 49,664 (target: 10,000) — crowdhuman's 1,842-image uncapped floor alone contributed ~42,200 instances, because CrowdHuman is exceptionally dense (mean 22.7 Person-instances/image, some images over 300). The student explicitly wanted this bounded ("may contribute to the long tail problem"). Resolved with a second mechanism: `PRIORITY_SOURCE_INSTANCE_SUBBUDGET: dict[tuple[str, str], int]`, currently `{("Person", "crowdhuman"): 2500}` — a dedicated instance allowance for that one (class, source) pair, filled **least-dense-image-first** (not randomly) to maximize image/scene diversity per instance spent rather than risk exhausting a small sub-budget on a handful of extreme-crowd outlier images. Verified against real data before picking the number: least-dense-first at a 2,500-instance budget yields 729 images.
+
+### Rationale
+
+The mechanism (ordered priority list + optional per-source instance sub-budget) generalizes cleanly from DEC-014's original single-source special case without disturbing it — every class not explicitly listed in either dict behaves exactly as before. The sub-budget's least-dense-first fill order is a direct, data-verified response to CrowdHuman's specific density profile, not a general policy — it only activates when a sub-budget is actually configured for that (class, source) pair.
+
+### Consequences (real numbers, run for real 2026-08-15, `dataset/reports/cap_report.json` regenerated)
+
+| Class | Metric | Before | After |
+|---|---|---|---|
+| Person | crowdhuman images | 128 | **729** |
+| Person | total images / instances | 2,819 / 10,036 | 3,404 / 10,007 |
+| Vehicle | roboflow_me5_u6rvg images | 1,649 | **3,188** |
+| Vehicle | total images / instances | 4,500 / 8,289 | 4,500 / 6,756 |
+| Elevator | elevator_awvus images (favored) | 1,491 | **1,777 (all)** |
+| Elevator | elevator_status_s4lrk images (deprioritized) | 3,009 | 2,723 |
+
+Person's total instance count landed at 10,007 — essentially back at DEC-042's original ~10,000 target, not the 5x-over blowout an uncapped floor would have produced.
+
+**Not yet cascaded downstream.** `dataset/reports/cap_report.json` is regenerated and real, but `dataset/merged/` (and everything built from it — `dedup_report.json`, `final_merge_curation_report.json`, `dataset/final/`, `data.yaml`) still reflects the *previous* cap decision and is now stale relative to this one. Re-running `merge.py` (and, depending on scope, `dedup.py`/`split.py`/`generate_yaml.py`) is the explicit next step, deliberately held pending the student's go-ahead rather than run immediately — same "don't cascade a judgment call without confirmation" posture as every other student-decided threshold this session.
+
+Also unresolved, deliberately not touched by this decision: Trash Bins is still below its 1,500 floor (1,104 images) and the ratio invariant still fails (4.08 vs 3:1) — both remain `docs/OPEN_QUESTIONS.md` #1, unrelated to today's fix.
+
+---
+
+## DEC-068: `cap_per_class.py` — Configurable `--hard-cap` Preset (1500 / 4500 / 9000), Floor Derived as `hard_cap // 3`
+
+- **Date:** 2026-08-17
+- **Status:** Accepted
+- **Related:** DEC-042 (floor/hard_cap/instance_target/ratio-invariant policy this generalizes), DEC-067 (priority-source floors this interacts with), `docs/OPEN_QUESTIONS.md` (the still-open INSTANCE_TARGET-scaling and priority-source-starvation questions this decision does NOT resolve)
+
+### Context
+
+DEC-042 hardcoded a single hard_cap (4500, matched by every class's `cap` field in `config/classes.yaml`). Earlier this session, the student pushed back on the claim that "raising the cap to 9000 does nothing" — a claim that turned out to be true only *given* the crowdhuman instance sub-budget DEC-067 introduced, not true in general. The student wants to actually run the pipeline at different hard_cap values to see this tradeoff directly (default 4500, the real plan; 1500 and 9000 as comparison points) rather than reason about it hypothetically. This also matters for the still-open question of whether 4500's implied ratio (max/min = 4.08, see DEC-067) constitutes a meaningful class-imbalance problem — being able to run smaller/larger presets makes that an empirical question, not just a discussion.
+
+### Decision
+
+Added `--hard-cap {1500,4500,9000}` to `cap_per_class.py` (default 4500, `choices=`-restricted to the three presets rather than an arbitrary int — DEC-042 never established what an out-of-preset value would even mean). `FLOOR` is no longer a fixed module constant; it's derived every run as `hard_cap // 3`, directly applying DEC-042's own stated ratio invariant (hard_cap = 3× floor) rather than leaving floor pinned at 1500 regardless of hard_cap. At the 4500 default this derives floor=1500 — identical to before, a verified no-op. `INSTANCE_TARGET` (10000) is deliberately left unscaled — DEC-042 already establishes it as independently chosen, not formulaically tied to floor/cap, and no scaling rule was ever specified; inventing one now would be exactly the "guessing an undecided parameter" the script's own header already flags as out of scope. One consequence made explicit, not hidden: at `--hard-cap 9000`, `INSTANCE_TARGET` binds far more often (more classes hit the instance ceiling before the image ceiling), while at `--hard-cap 1500` it almost never binds (image ceiling arrives first for nearly every class) — a real behavioral shift, left as-is rather than "fixed."
+
+Output path handling, to avoid a repeat of DEC-066's `dedup_report.json` overwrite mistake: the 4500 default writes to the canonical `dataset/reports/cap_report.json` path `merge.py` reads unconditionally. The 1500/9000 presets write to separate `cap_report_hardcap<N>.json` files — nothing downstream reads these yet, they exist purely for comparison, and must never silently clobber the canonical report.
+
+**A real gap surfaced by testing this, not resolved by it**: at `--hard-cap 1500` (floor derived to 500), Person's ExDark priority source alone consumes the *entire* 1,500-image budget (2,658 ExDark candidates >> 1,500), leaving 0 images for crowdhuman — the exact "1500-preset starves second/third priority sources" risk flagged as an open question earlier this session, now concretely reproducible. Added detection (not a fix): each priority source's breakdown now carries `starved_next_priority_source: bool`, and `run()` prints an explicit `WARNING` when it fires. Verified via `--dry-run --hard-cap 1500`: fires correctly for Person (`exdark=1500, crowdhuman=0`), does not fire for Vehicle (`exdark=1312` doesn't exhaust the 1,500 budget, `roboflow_me5_u6rvg` still gets its remaining 188).
+
+### Rationale
+
+Deriving floor from hard_cap (rather than adding a second independent `--floor` flag) directly encodes DEC-042's own stated invariant instead of allowing a preset combination that violates it. Restricting to three named presets (not an arbitrary `type=int`) matches what was actually asked for and avoids inventing behavior for hard_cap/floor combinations nobody has reasoned about. Detecting-and-warning on priority-source starvation (rather than silently designing around it, e.g. giving every priority source its own dedicated sub-floor) was chosen because there is no established rule yet for how to fairly split a shrunken hard_cap across multiple priority sources — that is a real open question for the student to decide, same posture as every other undecided threshold this session, not something to resolve unilaterally.
+
+### Consequences (verified via `--dry-run` at all three presets, then a real run at the default)
+
+- `--hard-cap 4500` (default): real run executed, `dataset/reports/cap_report.json` regenerated — numbers reproduce DEC-067's run exactly (Person 3,404 img/10,007 inst, Vehicle 4,500 img/6,756 inst, ratio 4.08). Confirms the new code path is a true no-op at the default.
+- `--hard-cap 1500`: NOT run for real (student doesn't need this yet). `--dry-run` confirms floor derives to 500, every class collapses toward the 1,500 ceiling, and the starvation warning fires exactly for Person (the one class where a single priority source's candidate pool exceeds the shrunken cap).
+- `--hard-cap 9000`: NOT run for real. `--dry-run` confirms Vehicle grows to 7,373 images (up from 4,500) before `INSTANCE_TARGET` binds — directly reproducing the plateau-vs-growth tradeoff discussed earlier this session, now runnable rather than simulated.
+- Still unresolved, deliberately not touched here: whether `INSTANCE_TARGET` *should* scale with hard_cap (no formula exists to apply), and how to fairly allocate a shrunken hard_cap across multiple priority sources when the first one alone can exhaust it. Both remain open, tracked in `docs/OPEN_QUESTIONS.md`.
+- Cascade to `merge.py` and beyond is still explicitly gated on the student's go-ahead (DEC-067's posture, unchanged) — this decision only touches `cap_per_class.py` and its own report output.
+
+---
+
+## DEC-069: Batch Resolution of `docs/OPEN_QUESTIONS.md` — New Trash Bins Source, traffico_y1 Closed, Starvation Fix, Split Ratio, Ultralytics Compatibility Rule
+
+- **Date:** 2026-08-18
+- **Status:** Accepted
+- **Related:** DEC-039/051/058 (Trash Bins), DEC-032/037 (traffico_y1), DEC-067/068 (cap_per_class.py priority sources), DEC-063 (split.py)
+
+### Context
+
+Student answered all 8 `docs/OPEN_QUESTIONS.md` items in one message. Several required real work, not just recording an answer — each checked against real data/APIs before acting, not assumed.
+
+### Decision
+
+1. **Trash Bins secondary (OPEN_QUESTIONS #1)**: checked 2 candidate Roboflow projects via SDK before adding either.
+   - `eyecue/trashcan-detection-pihfn` — clean single class `Trashbin`, added to `config/datasets.yaml`, pulled (559 images), converted (0 dropped/clipped/invalid). Real result after a full `cap_per_class.py`+`merge.py` rerun: Trash Bins grew from 1,104 → **1,663 images**.
+   - `ronits-workspace-e52mh/nyb` — real class list (`bin_elevated`/`bin_caged`/`bin_ground` alongside `z_action`/`z_no_action`/`trap_object`, an apparent unrelated pest/wildlife camera-trap context) and non-monotonic version sizes made this a real judgment call, not a clean add — deliberately NOT included, documented in `datasets.yaml` for the student to decide after looking at real images themselves.
+   - License could not be verified for either (no SDK field, `WebFetch` 403 on both Universe pages, consistent with earlier blocks this project has hit) — flagged for the student to confirm directly.
+   - **New finding, not previously visible**: with Trash Bins healthier, **Doors (1,337 images) is now the actual ratio-invariant minimum**, not Trash Bins. Ratio improved from 4.08 to 3.37 but is still above the 3:1 target — the DEC-042 recompute question in OPEN_QUESTIONS #1 is now about Doors, not Trash Bins.
+2. **traffico_y1 (OPEN_QUESTIONS #2)**: formally closed. `audit_status: pending` → `benched` in `config/datasets.yaml`, same pattern as `jeep_hozhs`/DEC-037 — me5_u6rvg already covers what it would have added (DEC-053).
+3. **cap_per_class.py priority-source starvation (OPEN_QUESTIONS #6)**: root-caused and fixed, not just scaled. The earlier open question ("scale the subfloor to hard_cap") undersold the actual bug — crowdhuman's *instance* subbudget wasn't what caused Person's starvation at `--hard-cap 1500`; ExDark's own *image* floor, unbounded, was. Fixed with a general per-priority-source minimum image reservation (`per_source_floor = floor // len(priority_sources)`), so no earlier priority source can fully exhaust a later one's share. `PRIORITY_SOURCE_INSTANCE_SUBBUDGET` also renamed to `..._BASE` and now scales proportionally via `scaled_instance_subbudget()`, per the student's literal request. Verified as an exact no-op at the default `--hard-cap 4500` (Person/Vehicle's real priority-source selections unchanged) before trusting it; verified it actually fixes the `--hard-cap 1500` case (Person: exdark 1250/crowdhuman 250, was 1500/0; Vehicle: exdark 1250/me5_u6rvg 250, was 1312/188).
+4. **Split ratio (OPEN_QUESTIONS #8)**: changed from 75/12.5/12.5 to **70/15/15**, matching Ultralytics Academy's own documented baseline. Verified first (student explicitly asked) whether this even matters given Ultralytics might auto-split: confirmed via WebSearch that `ultralytics.data.utils.autosplit()` is optional/manual-invoke only — standard training requires pre-split directories, so `split.py` is necessary, not redundant.
+5. **Standing rule recorded** (student's explicit request, not itself a dataset decision): added a subsection to `AGENTS.md`'s existing "Deployment Pipeline Awareness" section requiring every pipeline claim about Ultralytics' training-loop behavior to be verified against real docs/source, not assumed — using the autosplit finding above as the concrete example.
+6. **`cap_per_class.py` + `merge.py` rerun** with all of the above combined (new eyecue source + starvation fix): `dataset/reports/cap_report.json` and `dataset/merged/` regenerated. **52,756 unique images merged** (up from 51,529). Per-class real counts: Person 4,152, Vehicle 4,645, Motorcycle 3,861, Pole 4,500, Animals 4,547, Stairs 4,500, Escalator 4,255, Doors 1,337, Chairs 3,442, Tables 4,662, Tricycle 3,495, Potholes 2,867, Trash Bins 1,663, Elevator 4,500, Pedestrian Lane 2,158, Bicycle 3,638.
+
+### Rationale
+
+Every item was checked against real data/APIs rather than answered from the question text alone — matching this project's dominant pattern all session. The starvation fix in particular needed root-causing rather than literal-instruction-following: scaling only the existing instance subbudget (as literally requested) would not have fixed the actual "crowdhuman=0" case, since that was an image-budget problem, not an instance-budget one.
+
+### Consequences
+
+- `docs/OPEN_QUESTIONS.md` updated: #1, #2, #6, #8 substantially resolved (details/verification above); #1 now centers on Doors, not Trash Bins.
+- `dataset/reports/merge_report.json`, `dataset/reports/cap_report.json` reflect this run — anything downstream (`dedup_report.json`, `dataset/final/`) built before this is now stale until re-run (see DEC-070).
+
+---
+
+## DEC-070: `fiftyone_review_processed.ipynb` Extended (merged/final + flagged-only view); Full-Scale Dedup Attempted, Found Impractical Locally
+
+- **Date:** 2026-08-18
+- **Status:** Accepted
+- **Related:** DEC-054 (notebook originally built), DEC-057 (box_audit.py flagged reports), DEC-062 (dedup.py, sampled near-duplicate check)
+
+### Context
+
+Two more `docs/OPEN_QUESTIONS.md` items needed real work: #3/#4 (the student didn't understand what Stage 5.3's flagged-box review actually required, and had no way to visually inspect it) and #7 (explicit request to run the near-duplicate dedup check at full scale locally, accepting "over an hour").
+
+### Decision
+
+- **Notebook extended** (`notebooks/fiftyone_review_processed.ipynb`): `source_key` now also accepts `"merged"` and `"final/<split>"` (via `merged_dir()`/`final_dir()`, both already in `file_utils.py`) alongside the original processed-source case. New `flagged_report_path` option loads a `box_audit.py`-style flagged-boxes report (list of `{label_path, class, cx, cy, w, h, reasons}`), restricts the loaded set to only images with ≥1 flagged box, and marks the *specific* flagged detection(s) with a `flagged` attribute (matched by rounded coordinates, not raw float equality) so they're distinguishable from an image's other, unflagged boxes — this is what actually answers "how do I review this," not just "how do I browse this."
+  - Verified for real, not just written: `elevator_status_s4lrk_flagged.json` (844 flagged entries across 750 distinct images) loads to exactly 750 images and exactly 844 `flagged == True` detections (checked via `count_values`, not a misused `count(field, expr)` call that initially and incorrectly suggested only 750 — caught before trusting it). Also verified plain-source, `merged`, and `final/train` modes load correctly.
+- **Full-scale dedup (`dedup.py --full-scale`, new flag)**: added and launched as a background run per the student's explicit instruction. **Result: projecting ~5 hours, not the "over an hour" the student anticipated** — running at 2-4 img/s versus the ~28 img/s clean benchmark and even the previously-documented partial-degradation case (~9-13 img/s) that motivated the original 6,000-image sample bound in the first place. Left running rather than killed (killing loses the fast, already-complete exact-duplicate results too — `dedup.py` only writes its report once, at the end, no incremental checkpointing) — **but this is flagged prominently to the student as a real finding, not left to silently run 5 hours unattended.** Matches the "worse comes to worse, RunPod" fallback the student themselves pre-authorized.
+
+### Rationale
+
+The flagged-report matching needed per-box, not per-image, granularity — a naive "does this image have a flag" check would have lost the distinction between an image's flagged and unflagged boxes, which is the entire point of the review. The dedup full-scale attempt was worth trying locally first exactly as asked, but the result itself is the useful information — better to surface a real 5-hour number than let a background job silently run far past what was actually agreed to.
+
+### Consequences
+
+- `notebooks/README.md` and the notebook's own top cell describe the new modes — not yet updated in this pass, worth a follow-up touch.
+- `scripts/build/split.py` and `scripts/build/generate_yaml.py` reruns (needed regardless, since DEC-069's fresh `merge.py` output makes their existing results stale) are **blocked on the dedup question being resolved** — `split.py` reads `dedup_report.json` for duplicate-group leakage prevention. Waiting on the student's call: let the 5-hour run finish, kill it and accept the original 6,000-sample result, or move to RunPod.
+
+---
+
+## DEC-071: Second Doors Source Added (`door_detection_zqt59`) — Bottleneck Likely Resolved; Dedup Confirmed Stalled Post-Sleep, Not Corrupted-Display
+
+- **Date:** 2026-08-18
+- **Status:** Accepted
+- **Related:** DEC-069 (Doors identified as the new post-eyecue bottleneck), DEC-070 (full-scale dedup launched)
+
+### Context
+
+The student found a second Doors candidate (`nathaly-espinoza/door-detection-zqt59`) directly addressing DEC-069's finding that Doors (1,337 images) is now the ratio-invariant bottleneck. Separately, the student's laptop slept mid-run during the background full-scale dedup from DEC-070; needed to confirm whether the process survived and re-assess the real ETA rather than trust the pre-sleep number.
+
+### Decision
+
+- **`door_detection_zqt59` added and pulled**: checked via Roboflow SDK before adding (same discipline as `trashcan_detection_pihfn`) — real class list is `door` (1908 instances), `knob` (376), `hinged` (1739), `lever` (1239). Only `door` is an unambiguous canonical match; `knob`/`lever` read as door-hardware sub-parts (same pattern as `cv_project_hovyc`'s Exit-signage classes, dropped). `hinged` is genuinely ambiguous from the class name alone — could be additional real door instances or another hardware sub-part — filtered out for this pull, flagged in `datasets.yaml` for the student's own visual check given its size (1,739 instances) is large enough to be worth revisiting.
+  - Pulled version 3 (5,173 images, latest). Converted with `native_class_filter: "door"`: **4,493 images, 4,888 boxes kept, 8,643 non-canonical (knob/hinged/lever) boxes correctly dropped, 0 clipped, 0 invalid.**
+  - Sits in `dataset/processed/door_detection_zqt59/` — **not yet folded into `dataset/merged/`**; requires a `cap_per_class.py` → `merge.py` rerun, deliberately not done yet (see Consequences).
+- **Dedup background process (PID 48994) confirmed alive, not dead**: `ps` shows it still running; progress advanced from 6% (pre-sleep) to 36% (18,999/52,756) by the time of this check. CPU time (~4h) trailing wall-clock elapsed (~5.2h) by a gap consistent with a genuine sleep-induced stall, not a display glitch. **Post-resume throughput has not recovered to the original benchmark**: sustained ~1.1 samples/s over multiple checks (vs. the original 3.1 samples/s), putting the live ETA at ~9h remaining — worse than DEC-070's already-bad ~5h estimate, not an artifact that resolves itself. No `caffeinate` or equivalent is currently protecting the process from a repeat stall.
+
+### Rationale
+
+Same SDK-verification discipline applied to every prior source candidate (eyecue, `nyb`, `cv_project_hovyc`) — check the real class list before trusting a URL. Re-checking the dedup process rather than assuming the student's "I think it stopped" impression was correct, or assuming the opposite (that it was fine) — `ps`/timestamps are ground truth, guesses aren't.
+
+### Consequences
+
+- **`cap_per_class.py`/`merge.py` must NOT be re-run while `dedup.py` is still reading `dataset/merged/`**: `merge.py` does `shutil.rmtree()` on `dataset/merged/images|labels/` before rewriting them (DEC-059's stale-output fix) — running it now would delete the directory out from under the in-flight dedup read, likely crashing it or silently corrupting its result. This is a hard ordering constraint, not just a nice-to-have.
+- Whatever happens to the current dedup run, **a follow-up merge+dedup cycle is needed regardless** once `door_detection_zqt59` (and any `elevator_status_s4lrk` label cleanup) are ready to fold in — the current run's ~52,756-image pool doesn't include the new Doors images at all. This weakens the case for treating "unblock split.py fast" as a reason to kill the current run: split.py can't be finalized until curation work (new Doors source + elevator review) is done and re-merged anyway, which was already going to require another pass.
+- Student decision on the dedup run's fate (let finish / kill for RunPod / kill and accept the stale Aug-14 sample) still pending — re-asked directly.
+
+---
+
+## DEC-072: Full-Scale Dedup Run Killed (Student Decision); Write-Back Script Built for `fiftyone_review_processed.ipynb`
+
+- **Date:** 2026-08-18
+- **Status:** Accepted
+- **Related:** DEC-070 (run launched), DEC-071 (found still stalled post-sleep, ~9h ETA)
+
+### Context
+
+Two things converged: (1) DEC-071 already established a follow-up merge+dedup cycle is needed regardless (new Doors source not yet merged), so continuing to burn hours validating an already-stale 52,756-image pool had diminishing return; (2) the student needs to restart their computer for resource reallocation, which would have killed the process anyway. Separately, the notebook's flagged-box review (Stage 5.3) had a real gap: FiftyOne's in-App annotation editor auto-saves to the session's live dataset, but nothing wrote those edits back to the actual `.txt` label files — a review session would produce nothing durable.
+
+### Decision
+
+- **Killed the dedup process** (`kill 48994`, confirmed dead, exit 143/SIGTERM as expected). Student's explicit call, made with full knowledge of the ~9h remaining estimate and the "another run is needed anyway" reasoning. Computer is safe to restart.
+- **Write-back mechanism built** in `notebooks/fiftyone_review_processed.ipynb` (new markdown + code cell after the App-launch cell): reads the live, possibly-App-edited `dataset` object, converts each sample's `ground_truth.detections` back to YOLO format (inverse of the load transform), and writes to a new `dataset/processed/<source>/labels_reviewed/` staging folder — **not** the original `labels/` — printing an added/removed/modified/unchanged summary per run. Promoting reviewed files over the originals is a deliberate, separate manual step, not automated, since this path hasn't been used for a real correction pass yet.
+  - The load cell (`p0review3build`) also now stashes `source_label_filename` on every sample (needed so write-back knows which file a sample's edits belong to) and attaches `flag_reasons` (the actual `box_audit.py` reason strings, e.g. `"large_area_outlier (>0.31)"`) as a visible detection attribute, not just the boolean `flagged`.
+- Verified for real, not just written: simulated App edits (deleted one detection, moved another's bounding box, added a new one) against the live 750-image flagged dataset, ran the write-back logic, confirmed `added=1 removed=1 modified=1 unchanged=747` exactly matching the simulated edits, and confirmed byte-for-byte that the original `labels/` files were never touched (re-read from disk post-write-back, line counts matched pre-edit state).
+
+### Rationale
+
+Killing now rather than "let it finish for the data point" was the student's own reasoning, not just accepted at face value: the current run's coverage is already known-incomplete (missing the new Doors images), so its exact/near-duplicate results would need re-validation in the next pass regardless of whether this one finished. A staging-folder write-back (vs. overwriting `labels/` directly) matches this project's general caution around first-use, unverified-in-production write paths touching the only copy of curated annotations.
+
+### Consequences
+
+- No dedup report currently reflects the post-eyecue, post-`door_detection_zqt59` merged pool. The Aug 14 sampled report is the only one on disk; it predates both additions.
+- `cap_per_class.py` → `merge.py` → `dedup.py` → `split.py` → `generate_yaml.py` all still need a final rerun, now explicitly deferred until curation (elevator review promotion, any further Doors work) is finished — not mid-flight, to avoid another wasted multi-hour pass.
+- RunPod-vs-local decision for that final dedup pass is still open — student asked for a grounded speed estimate, answered inline in conversation (not a doc-worthy number, no benchmark run yet to cite).
+- `labels_reviewed/` needs no new `.gitignore` entry — it's a subfolder of `dataset/processed/<source>/`, already wholesale-ignored (`.gitignore:36`).
+
+---
+
 ## Template for Future Decisions
 
 ```markdown

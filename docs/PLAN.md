@@ -96,66 +96,66 @@ This phase follows a 9-stage pipeline (Stage 5.0 eliminated by D-018r). Each sta
 
 | Task | Status |
 |------|--------|
-| Build `scripts/preprocess/box_audit.py` | ⬜ Todo |
-| Run box audit on all `native_unspecified` sources | ⬜ Todo |
-| Run box audit on all `project_dependent` sources | ⬜ Todo |
-| Resolve audit: `elevator-status-s4lrk` (detection vs classification) | ⬜ Todo |
-| Resolve audit: `traffico-y1` (full class list, cross-class overlap) | ⬜ Todo |
-| Resolve audit: `pedestrian-and-animal-crossing` (class names) | ⬜ Todo |
-| Near-exhaustive review for smaller Roboflow pools (D-018r) | ⬜ Todo |
-| Review and approve audit results | ⬜ Todo |
+| Build `scripts/preprocess/box_audit.py` | ✅ Done (DEC-057) — source-agnostic, one script covers every processed source regardless of bbox_mode |
+| Run box audit on all `native_unspecified` sources | ✅ Done (DEC-057) — see note above, one run covers both this row and the next |
+| Run box audit on all `project_dependent` sources | ✅ Done (DEC-057) |
+| Resolve audit: `elevator-status-s4lrk` (detection vs classification) | 🟡 Heuristic built + flagged list produced (844 boxes, DEC-057) — student visual review still needed |
+| Resolve audit: `traffico-y1` (full class list, cross-class overlap) | ⬜ N/A for now — no data on disk (never pulled, blocked on Roboflow's side) |
+| Resolve audit: `pedestrian-and-animal-crossing` (class names) | ✅ Already resolved DEC-053/055 |
+| Near-exhaustive review for smaller Roboflow pools (D-018r) | ⬜ Todo — student's visual-review time via `notebooks/fiftyone_review_processed.ipynb`, not a script gap |
+| Review and approve audit results | ⬜ Todo — student review pending (`dataset/reports/box_audit_report.json`, `elevator_status_s4lrk_flagged.json`) |
 
 ### Stage 5.4: Per-Class Capping
 
 | Task | Status |
 |------|--------|
-| Build `scripts/preprocess/cap_per_class.py` (3-tier fill logic) | ⬜ Todo |
-| Run capping — verify ExDark guaranteed floor applied | ⬜ Todo |
-| Review `dataset/reports/cap_report.json` | ⬜ Todo |
+| Build `scripts/preprocess/cap_per_class.py` (3-tier fill logic) | ✅ Done (DEC-058) — decision/report only, not wired into merge.py (see DEC-058) |
+| Run capping — verify ExDark guaranteed floor applied | ✅ Done (DEC-058) — verified, dense classes (Person, Chairs) correctly hit instance_target before image cap |
+| Review `dataset/reports/cap_report.json` | ⬜ Todo — student review pending; ratio invariant not met (4.08 vs 3:1), cap-recompute trigger fired but not applied, both tied to `docs/OPEN_QUESTIONS.md` #1 |
 
 ### Stage 5.5: Model-Assisted Curation — DEC-019
 
 | Task | Status |
 |------|--------|
-| Build `scripts/curate/run_mistakenness.py` (FiftyOne) | ⬜ Todo |
-| Build `scripts/curate/reimport_corrections.py` (CVAT/LS) | ⬜ Todo |
-| Run mistakenness on capped pools (all sources, including Roboflow) | ⬜ Todo |
-| Review and correct flagged samples in CVAT/Label Studio | ⬜ Todo |
-| Re-import corrections into `dataset/curated/` | ⬜ Todo |
+| Build `scripts/curate/run_mistakenness.py` (FiftyOne) | ✅ Done (DEC-060) — COCO-pretrained proxy model, 7/16 classes with a COCO analog |
+| Build `scripts/curate/reimport_corrections.py` (CVAT/LS) | ⬜ **Skipped** — genuinely blocked on CVAT-vs-Label-Studio choice, `docs/OPEN_QUESTIONS.md` #5 |
+| Run mistakenness on capped pools (all sources, including Roboflow) | ✅ Done (DEC-060) — 22,846 images scored and ranked |
+| Review and correct flagged samples in CVAT/Label Studio | ⬜ Todo — student review pending |
+| Re-import corrections into `dataset/curated/` | ⬜ Todo — blocked on above |
 
 ### Stage 5.6: Merge + Dedup
 
 | Task | Status |
 |------|--------|
-| Build `scripts/build/merge.py` | ⬜ Todo |
-| Build `scripts/preprocess/dedup.py` | ⬜ Todo |
-| Run merge with source-prefixed filenames | ⬜ Todo |
-| Run cross-source dedup (highest risk pairs flagged) | ⬜ Todo |
+| Build `scripts/build/merge.py` | ✅ Done (DEC-059) — merges Stage 5.4's capped selection (corrects DEC-058's original assumption; see DEC-059) |
+| Build `scripts/preprocess/dedup.py` | ✅ Done (DEC-062) |
+| Run merge with source-prefixed filenames | ✅ Done (DEC-061) — 51,529 images merged (post RNG fix), 0 missing, verified on disk |
+| Run cross-source dedup (highest risk pairs flagged) | ✅ Done (DEC-062) — exact: 1,893 groups/2,143 files (full pool). Near-dup: 520 groups/818 files (6,000-image stratified sample, threshold=0.2). Student review pending, `docs/OPEN_QUESTIONS.md` #7 |
 
 ### Stage 5.7: Final Pre-Split Curation Gate — DEC-020
 
 | Task | Status |
 |------|--------|
-| Build `scripts/curate/final_merge_curation.py` | ⬜ Todo |
-| Run final mistakenness pass on merged pool | ⬜ Todo |
-| Fix flagged samples in place | ⬜ Todo |
+| Build `scripts/curate/final_merge_curation.py` | ✅ Done (DEC-064) — reuses DEC-060's crosswalk directly |
+| Run final mistakenness pass on merged pool | ✅ Done (DEC-064) — 22,824 images scored, `dataset/reports/final_merge_curation_report.json` |
+| Fix flagged samples in place | ⬜ Todo — student review pending, blocked on `docs/OPEN_QUESTIONS.md` #5 |
 
 ### Stage 5.8: Split
 
 | Task | Status |
 |------|--------|
-| Build `scripts/build/split.py` (source-stratified) | ⬜ Todo |
-| Verify no cross-split data leakage | ⬜ Todo |
-| Verify class distribution across splits | ⬜ Todo |
-| Verify source representation across splits | ⬜ Todo |
+| Build `scripts/build/split.py` (source-stratified) | ✅ Done (DEC-063) — found + fixed a real union-find leakage bug along the way |
+| Verify no cross-split data leakage | ✅ Done (DEC-063) — 0 leakage after the union-find fix (56 groups initially straddled splits, now 0) |
+| Verify class distribution across splits | ✅ Done — all 16 classes proportionally represented, `dataset/reports/split_report.json` |
+| Verify source representation across splits | ✅ Done — source-stratified by construction, verified in `split_report.json`'s `per_split_source_counts` |
 
 ### Stage 5.9: YAML Generation
 
 | Task | Status |
 |------|--------|
-| Build `scripts/build/generate_yaml.py` | ⬜ Todo |
-| Generate final `data.yaml` for YOLOv8s | ⬜ Todo |
-| Verify generated YAML matches `config/classes.yaml` schema | ⬜ Todo |
+| Build `scripts/build/generate_yaml.py` | ✅ Done (DEC-065) |
+| Generate final `data.yaml` for YOLOv8s | ✅ Done (DEC-065) — `dataset/final/data.yaml`, points at real populated splits |
+| Verify generated YAML matches `config/classes.yaml` schema | ✅ Done (DEC-065) — verified against the authoritative `names:` field specifically, not the separately-ordered `classes:` metadata block |
 
 ### Split Strategy
 
