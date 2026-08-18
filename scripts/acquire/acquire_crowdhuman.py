@@ -174,6 +174,14 @@ def convert(
                     stats["boxes_invalid_dropped"] += 1
                     continue
                 cx, cy, nw, nh = clip_bbox(cx, cy, nw, nh)
+                # A vbox entirely outside the frame clips down to a
+                # degenerate zero-width/height box, not a usable one —
+                # re-check rather than trust clipping always fixes things
+                # (found via Stage 5.3 box_audit.py against real output,
+                # DEC-057).
+                if nw <= 0 or nh <= 0:
+                    stats["boxes_invalid_dropped"] += 1
+                    continue
                 stats["boxes_clipped"] += 1
             lines.append(f"{PERSON_CLASS_ID} {cx:.6f} {cy:.6f} {nw:.6f} {nh:.6f}")
 

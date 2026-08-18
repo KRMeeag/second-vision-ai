@@ -145,6 +145,11 @@ def convert_image(
                 tally["invalid_dropped"] += 1
                 continue
             cx, cy, nw, nh = clip_bbox(cx, cy, nw, nh)
+            # A box entirely outside the frame clips down to degenerate
+            # zero width/height, not a usable one — re-check (DEC-057).
+            if nw <= 0 or nh <= 0:
+                tally["invalid_dropped"] += 1
+                continue
             tally["clipped"] += 1
         class_id = class_id_map[canonical_class]
         lines.append(f"{class_id} {cx:.6f} {cy:.6f} {nw:.6f} {nh:.6f}")
