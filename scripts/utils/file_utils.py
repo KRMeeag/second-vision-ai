@@ -276,6 +276,58 @@ def list_images(directory: Path, recursive: bool = True) -> list[Path]:
     )
 
 
+def build_stem_index(source: str) -> dict[str, Path]:
+    """
+    {filename_stem: image_path} for one source's dataset/processed/<source>/images/.
+
+    A single directory listing, not a glob() call per file — resolving each of a
+    large batch of (source, filename) selections via `images_dir.glob(f"{filename}.*")`
+    is an O(N*M) trap against source directories this large (some processed sources
+    have 20k+ files); this is the fix, shared so it's fixed once, not re-discovered
+    per script (Stage 5.5/5.6's `run_mistakenness.py`/`merge.py` hit this
+    independently — see docs/DECISIONS.md DEC-059/060).
+
+    Filters to recognized image extensions (IMAGE_EXTENSIONS), same as list_images() —
+    a stray non-image file (.DS_Store, a leftover partial download, etc.) sharing a
+    stem with a real image must not silently win or lose the index entry.
+
+    Parameters
+    ----------
+    source : str
+        Source key, e.g. "open_images", "crowdhuman".
+
+    Returns
+    -------
+    dict[str, Path]
+        Maps each image's filename stem to its full path.
+    """
+    img_dir = processed_dir(source) / "images"
+    return {
+        p.stem: p for p in img_dir.iterdir()
+        if p.is_file() and p.suffix.lower() in IMAGE_EXTENSIONS
+    }
+
+
+def discover_processed_sources() -> list[str]:
+    """
+    Every dataset/processed/<name>/ with both an images/ and labels/ subdir —
+    every Stage 5.2 output source, auto-discovered rather than hardcoded so
+    Stage 5.3+ scripts don't need updating when a source is added or removed.
+
+    Returns
+    -------
+    list[str]
+        Source keys, sorted for reproducibility.
+    """
+    root = processed_dir()
+    if not root.is_dir():
+        return []
+    return sorted(
+        p.name for p in root.iterdir()
+        if p.is_dir() and (p / "images").is_dir() and (p / "labels").is_dir()
+    )
+
+
 # ---------------------------------------------------------------------------
 # Smoke-test entry point
 # ---------------------------------------------------------------------------

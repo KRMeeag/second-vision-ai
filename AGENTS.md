@@ -64,6 +64,8 @@ The AI must avoid recommendations that increase risk of:
 - Deployment instability
 - Unnecessary complexity in Hailo compilation
 
+**Ultralytics training-loop compatibility** (added 2026-08-18, student's explicit standing instruction): everything the dataset pipeline (Stage 5.1–5.9) produces must work with Ultralytics' actual YOLOv8 training loop as it really behaves — not an assumption about it. Verify against Ultralytics' own docs/source before relying on a claim about its behavior, the same way dataset-format claims get verified against real files elsewhere in this project. Concrete example already caught this way: confirmed (2026-08-18) that YOLOv8 does **not** auto-split an unsplit folder during training — `ultralytics.data.utils.autosplit()` exists but is optional/manual-invoke only, so `scripts/build/split.py`'s pre-split `dataset/final/{train,val,test}/` output is necessary, not redundant with anything Ultralytics does automatically.
+
 ---
 
 ## Hailo-Specific Rules

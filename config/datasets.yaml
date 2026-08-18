@@ -290,6 +290,30 @@ roboflow_projects:
       4 are navigational signage with no canonical class; dropped, same
       "drop what doesn't map" pattern as every other source (DEC-053).
 
+  door_detection_zqt59:
+    canonical_class: doors
+    original_url: "https://universe.roboflow.com/nathaly-espinoza/door-detection-zqt59"
+    pinned_version: 3  # latest, 5173 images (up from v2's 4747, v1's 1978)
+    download_format: yolov8
+    audit_status: pending
+    native_class_filter: "door"
+    audit_note: >
+      Identified 2026-08-18 (student-sourced) to address Doors being the
+      new post-eyecue bottleneck (1,337 images, DEC-069). Checked via
+      Roboflow SDK before adding: real class list is 4 classes — door
+      (1908 instances), knob (376), hinged (1739), lever (1239). Only
+      "door" is an unambiguous canonical match; knob/lever read as
+      door-hardware (handle) sub-parts, not full-door boxes, so dropped
+      same as cv_project_hovyc's Exit-signage classes. "hinged" is
+      genuinely ambiguous from class name alone (could be a door-type
+      label covering more real door instances, or a hardware sub-part
+      like the other two) — filtered out for this pull pending the
+      student's own visual check; a 1739-instance class is large enough
+      to be worth revisiting if "door" alone doesn't close the gap.
+      License could not be verified via SDK (no license field exposed,
+      WebFetch on the project page blocked) — student should confirm on
+      the project page directly, same caveat as trashcan_detection_pihfn.
+
   # --- Elevator (2 sources, 1 flagged for audit) ---
   elevator_awvus:
     canonical_class: elevator
@@ -363,7 +387,7 @@ roboflow_projects:
     original_url: "https://universe.roboflow.com/yoloffico/traffico-y1"
     pinned_version: null
     download_format: yolov8
-    audit_status: pending
+    audit_status: benched
     native_class_filter:
       vehicle: "Jeepney"
       motorcycle: "Motorcycle"
@@ -372,17 +396,22 @@ roboflow_projects:
       Full class list obtained 2026-08-08 (DEC-032): Jeepney,
       Motorcycle, null, Tricycle, tricycle. Mapped as above — the
       "Tricycle"/"tricycle" case-variant pair both map to the
-      canonical tricycle class. The "null" entry is left unresolved
-      for now (likely an empty/background class artifact, not a real
-      label). Dedup against Jeepney/tricycle-dedicated sources still
-      needed at Stage 5.6.
+      canonical tricycle class. The "null" entry was left unresolved
+      (likely an empty/background class artifact, not a real label).
 
       BLOCKED 2026-08-08: list_roboflow_versions.py returned zero
       generated versions for this project via the API, despite the
-      class list above having been obtained by browsing it directly.
-      Likely nobody has clicked "Generate" on Roboflow's side yet —
-      needs checking on the project page before a version can be
-      pinned.
+      class list above having been obtained by browsing it directly —
+      likely nobody had clicked "Generate" on Roboflow's side.
+
+      Formally benched 2026-08-17/18 (student's explicit call, same
+      pattern as jeep_hozhs/DEC-037): me5_u6rvg was already reactivated
+      to cover this gap and turned out to carry the same Jeepney/
+      Motorcycle/Tricycle content plus real Van/Truck/Ambulance data
+      too (DEC-053) — nothing traffico_y1 would add is missing.
+      Nothing wrong with the source itself, just redundant now. Not
+      deleted; reconsider only if Roboflow's side ever generates a
+      version AND me5_u6rvg's real yield proves insufficient.
 
   # --- Vehicle + Motorcycle secondary (Jeepney/Ambulance/Cars/Motorcycle) ---
   me5_u6rvg:
@@ -482,11 +511,33 @@ roboflow_projects:
       list not yet verified; confirm exact labels during Stage 5.3
       box audit (same multi-class pattern as escalator_stairs).
 
-  # --- Trash Bins secondary (TBD) ---
-  trash_bins_secondary:
+  # --- Trash Bins secondary ---
+  trashcan_detection_pihfn:
     canonical_class: trash_bins
-    original_url: "TBD"
-    pinned_version: null
-    download_format: null
-    audit_status: blocked
-    audit_note: "Secondary Roboflow project for Trash Bins not yet identified."
+    original_url: "https://universe.roboflow.com/eyecue/trashcan-detection-pihfn"
+    pinned_version: 2  # latest, 559 images (train 519/valid 22/test 21) vs. v1's 114 — normal growth, no anomaly
+    download_format: yolov8
+    audit_status: pending
+    audit_note: >
+      Identified 2026-08-17/18 to address Trash Bins' low Open Images
+      yield (DEC-051, 1,106 raw images). Checked via Roboflow SDK
+      before adding: real class list is a single class, "Trashbin"
+      (289 instances project-wide) — no filtering needed, unambiguous
+      match to the canonical class. License could not be verified
+      (Roboflow SDK exposes no license field on Project/Version, and
+      WebFetch on the project page returned HTTP 403 — same block seen
+      earlier this project for other Universe pages) — student should
+      confirm the license shown on the project page directly.
+
+  # --- Trash Bins secondary candidate, NOT added — real concerns found ---
+  # ronits-workspace-e52mh/nyb: real class list (via SDK) is bin_elevated(130)/
+  # bin_caged(76)/bin_ground(242) alongside z_action(87)/z_no_action(305)/
+  # trap_object(120) and an empty '0' placeholder — the non-bin classes look
+  # like an unrelated pest/wildlife camera-trap context, and even the bin_*
+  # classes aren't confirmed to mean trash/waste bins specifically (could be
+  # storage/mailbox bins). Versions are also non-monotonic in size (v9=2011
+  # images is largest, v13=522 despite the highest version number — same
+  # "latest isn't largest" pattern as escalator_stairs/pothole_vhmow).
+  # Needs the student to look at real images on the project page before
+  # deciding — not something resolvable from API metadata alone. Checked
+  # 2026-08-17/18, deliberately not added pending that.

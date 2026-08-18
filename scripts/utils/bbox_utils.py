@@ -67,7 +67,7 @@ def xywh_abs_to_yolo(
 # Validation & clipping
 # ---------------------------------------------------------------------------
 
-def validate_bbox(cx: float, cy: float, w: float, h: float) -> str | None:
+def validate_bbox(cx: float, cy: float, w: float, h: float, epsilon: float = 0.0) -> str | None:
     """
     Check whether a normalized YOLO box (cx, cy, w, h) is well-formed.
 
@@ -75,6 +75,17 @@ def validate_bbox(cx: float, cy: float, w: float, h: float) -> str | None:
     ----------
     cx, cy, w, h : float
         Normalized YOLO box, each expected in [0, 1].
+    epsilon : float, default 0.0
+        Bounds-violation tolerance. Converters call this on freshly-computed
+        floats (epsilon=0.0 is correct — a genuinely unclipped box should be
+        caught). box_audit.py instead re-validates already-written,
+        6-decimal-rounded label text, where reconstructing cx±w/2 reintroduces
+        ~5e-7 of floating-point round-trip noise per corner — enough at
+        epsilon=0.0 to flag well over 100,000 boxes across this project's real
+        output as "invalid" when none of them are (verified directly, DEC-057).
+        Pass a small epsilon (e.g. 1e-4 — three orders of magnitude above that
+        noise floor, orders of magnitude below any real defect seen) when
+        checking already-rounded text instead of pre-write floats.
 
     Returns
     -------
@@ -88,7 +99,8 @@ def validate_bbox(cx: float, cy: float, w: float, h: float) -> str | None:
         return f"non-positive width/height (w={w}, h={h})"
 
     x1, y1, x2, y2 = _yolo_to_xyxy(cx, cy, w, h)
-    if x1 < 0 or y1 < 0 or x2 > 1 or y2 > 1:
+    violation = max(-x1, -y1, x2 - 1, y2 - 1, 0.0)
+    if violation > epsilon:
         return (
             f"box extends outside image bounds "
             f"(x1={x1:.4f}, y1={y1:.4f}, x2={x2:.4f}, y2={y2:.4f})"
@@ -106,6 +118,17 @@ def clip_bbox(cx: float, cy: float, w: float, h: float) -> tuple[float, float, f
     outright. Boxes that are fundamentally invalid (non-positive width or
     height) aren't fixable by clipping — check validate_bbox() first.
 
+    Each corner is clamped into [0, 1] independently (not just the lower
+    corner to >=0 and the upper corner to <=1) — a box that sits entirely
+    outside the frame (e.g. x1=1.05, x2=1.30, both past the right edge)
+    needs both corners pulled back to the same boundary, or the naive
+    one-sided clamp leaves x1 > x2 and produces a *negative* width/height
+    instead of a degenerate zero-width one. Found via Stage 5.3's
+    box_audit.py against real CrowdHuman output (DEC-057) — 5 of 439,046
+    boxes had a vbox entirely outside the image, evading the pre-clip
+    validate_bbox() non-positive-width/height guard by only going negative
+    *after* this function's old asymmetric clamp.
+
     Parameters
     ----------
     cx, cy, w, h : float
@@ -114,11 +137,16 @@ def clip_bbox(cx: float, cy: float, w: float, h: float) -> tuple[float, float, f
     Returns
     -------
     tuple[float, float, float, float]
-        (cx, cy, w, h), clipped to fit within [0, 1].
+        (cx, cy, w, h), clipped to fit within [0, 1]. If the input box was
+        entirely outside the frame, this degenerates to a zero-width and/or
+        zero-height box at the boundary — callers should re-check with
+        validate_bbox() after clipping and drop it if so (clip_bbox() only
+        fits a box inside bounds; it can't invent visible content that
+        wasn't there).
     """
     x1, y1, x2, y2 = _yolo_to_xyxy(cx, cy, w, h)
-    x1, y1 = max(0.0, x1), max(0.0, y1)
-    x2, y2 = min(1.0, x2), min(1.0, y2)
+    x1, x2 = min(max(x1, 0.0), 1.0), min(max(x2, 0.0), 1.0)
+    y1, y2 = min(max(y1, 0.0), 1.0), min(max(y2, 0.0), 1.0)
     return xyxy_to_yolo(x1, y1, x2, y2)
 
 

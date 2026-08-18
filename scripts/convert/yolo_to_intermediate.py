@@ -183,6 +183,12 @@ def convert_project(project_key: str, entry: dict[str, Any], class_id_map: dict[
                         stats["boxes_invalid_dropped"] += 1
                         continue
                     cx, cy, w, h = clip_bbox(cx, cy, w, h)
+                    # A box entirely outside the frame clips down to
+                    # degenerate zero width/height, not a usable one —
+                    # re-check (DEC-057).
+                    if w <= 0 or h <= 0:
+                        stats["boxes_invalid_dropped"] += 1
+                        continue
                     stats["boxes_clipped"] += 1
 
                 lines_out.append(f"{class_id} {cx:.6f} {cy:.6f} {w:.6f} {h:.6f}")
