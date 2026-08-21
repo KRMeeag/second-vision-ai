@@ -34,7 +34,7 @@ names:
   3: Pole
   4: Animals
   5: Stairs
-  6: Escalator
+  6: Shelf
   7: Doors
   8: Chairs
   9: Tables
@@ -55,7 +55,7 @@ hailo_runtime_names:
   4: Pole
   5: Animals
   6: Stairs
-  7: Escalator
+  7: Shelf
   8: Doors
   9: Chairs
   10: Tables
@@ -118,6 +118,10 @@ classes:
           Multi-class source (see datasets.yaml for full mapping incl.
           motorcycle). Jeepney slice is a Philippine-specific edge
           case, same DEC-033 treatment as before (not volume-discounted).
+          Benched 2026-08-21 (DEC-087) — never went through full
+          `fiftyone_review_processed.ipynb` review (still `[x]`,
+          unreviewed, at review-checklist time); student's call to drop
+          it from Vehicle/Motorcycle/Tricycle rather than review it.
       - source: roboflow
         project: "lozanomartirezquimno-thesis/jeep-hozhs"
         note: "Benched 2026-08-08 (DEC-037) in favor of me5_u6rvg — see datasets.yaml."
@@ -129,6 +133,29 @@ classes:
           Philippine-specific vehicle type with no Open Images/COCO
           analogue — see DEC-033 for why its volume isn't discounted
           the way ordinary Vehicle imagery is.
+      - source: roboflow
+        project: "thesis-test-dataset/revised-pedestrian-obstacle"
+        native_class_filter: "vehicle"
+        role: diversity
+        note: >
+          Added 2026-08-20 (DEC-083) — "General Filipino Outside
+          Dataset." Its native "vehicle" label has motorcycles mixed
+          in with no sub-filter to split them. Student's 2026-08-21
+          instruction (DEC-087): these need active cleaning during the
+          `fiftyone_review_processed.ipynb` pass, not just flagging —
+          no automated sub-filter exists to separate them, this is a
+          visual-review task.
+      - source: roboflow
+        project: "dlsud-vehicle-classification-thesis/dlsu-d-vehicle-type-detection"
+        native_class_filter: ["Public Utility Jeepney", "Medium Goods Vehicle", "Light Goods Vehicle", "Large Bus", "Small Bus", "Van"]
+        role: diversity
+        note: >
+          Added 2026-08-20 (DEC-083) — "Filipino Related Road
+          Vehicles." Sedan/Sports Utility Vehicle explicitly excluded
+          per student instruction (covered by Open Images already);
+          Hatchback/Pickup Truck/Bicycle also excluded, extrapolated
+          from the same reasoning but not explicitly confirmed by the
+          student — flagged as such in DEC-083.
     secondary_role: diversity
     lowlight_augment:
       source: exdark
@@ -151,7 +178,7 @@ classes:
         project: "machine-exercise-5/me5-u6rvg"
         native_class_filter: "Motorcycle"
         role: diversity
-        note: "Active as of 2026-08-08 (DEC-037) — see datasets.yaml for the full multi-class mapping."
+        note: "Active as of 2026-08-08 (DEC-037). Benched 2026-08-21 (DEC-087) — see vehicle: block above for the full reasoning, same source."
       - source: roboflow
         project: "yoloffico/traffico-y1"
         native_class_filter: "Motorcycle"
@@ -161,6 +188,11 @@ classes:
           Currently blocked (zero generated versions, forking declined)
           — see datasets.yaml. Not the active Motorcycle secondary
           right now; me5_u6rvg is.
+      - source: roboflow
+        project: "dlsud-vehicle-classification-thesis/dlsu-d-vehicle-type-detection"
+        native_class_filter: "Motorcycle"
+        role: diversity
+        note: "Added 2026-08-20 (DEC-083) — see datasets.yaml for the full multi-class mapping (also contributes Tricycle and Vehicle)."
     lowlight_augment:
       source: exdark
       native_class: "Motorbike"
@@ -183,19 +215,19 @@ classes:
 
   pole:
     id: 3
-    primary_providers:
-      - source: roboflow
-        project: "test-j2maq/pole-detection-z76mb"
-        native_class_filter: "pole"
-        note: >
-          Native class in original project is
-          "Utility pole detection - v1 2023-05-17 3:44pm" —
-          remapped to "pole" during conversion (Stage 5.2).
-    secondary_providers:
-      - source: roboflow
-        project: "mahindra-university-ogyod/utility-poles-44tzx"
-        role: diversity
-        note: "Dual-purpose source, also contributes to Potholes. Added 2026-08-08, DEC-035."
+    primary:
+      source: open_images
+      native_class: "Street light"
+      note: >
+        Switched from Roboflow (pole_detection_z76mb + utility_poles_44tzx)
+        to Open Images 2026-08-20 (DEC-083) — student's call, both Roboflow
+        pole sources were unreviewed and this project already had multiple
+        real cases of Roboflow small-project label quality being
+        unreliable (DEC-082). Open Images' "Street light" class has
+        44,697 boxes / 11,226 images in the cached train split alone —
+        gold-standard annotation quality, zero Roboflow dependency,
+        conceptually the same "vertical street-level fixture" hazard Pole
+        was always meant to cover.
     cap: 4500
 
   animals:
@@ -211,9 +243,11 @@ classes:
 
   stairs:
     id: 5
-    # stairs_i2yia + escalator_stairs prioritized (still `pending` in
-    # datasets.yaml); stairs_lusiz + stairs_hsatv are `failed` pending
-    # possible relabel — see DEC-031 and docs/preprocessing.md.
+    # stairs_lusiz + stairs_hsatv are `failed` pending possible relabel
+    # — see DEC-031 and docs/preprocessing.md. stairs_i2yia +
+    # escalator_stairs failed direct visual review 2026-08-20 (DEC-082)
+    # — duplicate/near-duplicate images, boxes not on the annotated
+    # object; stair_gaptw is the current active replacement.
     primary_providers:
       - source: roboflow
         project: "stairs-n9kkx/stairs-lusiz"
@@ -221,17 +255,47 @@ classes:
         project: "abeera-munir-v9edc/stairs-hsatv"
       - source: roboflow
         project: "tom-lai-8bp7n/stairs-i2yia"
+        note: "Failed direct visual review 2026-08-20 (DEC-082) — see datasets.yaml audit_note."
       - source: roboflow
         project: "escalatorstairsdetection/escalator-stairs"
         native_class_filter: "stairs"
+        note: "Failed direct visual review 2026-08-20 (DEC-082) — see datasets.yaml audit_note."
+      - source: roboflow
+        project: "school-4awgw/stair-gaptw"
+        note: "Added 2026-08-20 (DEC-082) — the current active Stairs source, replacing the two above."
+    secondary_providers:
+      - source: roboflow
+        project: "thesis-test-dataset/revised-pedestrian-obstacle"
+        native_class_filter: "stairs"
+        role: volume_topup
+        note: >
+          Added 2026-08-20 (DEC-083) primarily as a Vehicle/Pedestrian
+          Lane source — its "stairs" class is an incidental Stairs
+          contribution.
     cap: 4500
 
-  escalator:
+  shelf:
     id: 6
-    primary_providers:
-      - source: roboflow
-        project: "escalatorstairsdetection/escalator-stairs"
-        native_class_filter: "escalator"
+    primary:
+      source: open_images
+      native_class: "Shelf"
+      note: >
+        Replaces Escalator 2026-08-20 (DEC-083) — escalator_stairs (the
+        only Escalator source) failed direct visual review (DEC-082) and
+        no replacement with adequate data could be found (public options
+        surveyed clustered around ~500 images). Escalator's id-6 slot is
+        reused rather than the schema renumbered to 15 classes, per the
+        student's explicit "reserve first, only renumber if nothing
+        suitable is found" call (DEC-082) — a suitable replacement was
+        found, so renumbering was never needed. Shelf chosen over Cart
+        (rejected — mostly horse-drawn carts on visual inspection, no
+        clean way to filter to shopping carts) and Countertop (rejected
+        — mostly residential kitchen countertops) after browsing all
+        three in fiftyone_preview.ipynb's new ad-hoc candidate section.
+        Open Images "Shelf": 22,899 boxes / 6,011 images in the cached
+        train split — genuinely common mall/retail/grocery obstacle
+        (aisle end-caps, protruding shelving) not covered by anything
+        else in the schema.
     cap: 4500
 
   doors:
@@ -239,6 +303,10 @@ classes:
     primary_providers:
       - source: roboflow
         project: "testspace-xwkgk/cv-project-hovyc"
+      - source: roboflow
+        project: "nathaly-espinoza/door-detection-zqt59"
+        native_class_filter: "door"
+        note: "Added 2026-08-18 — second Doors source, addressing the post-eyecue bottleneck (DEC-069/DEC-071/DEC-073)."
     cap: 4500
 
   chairs:
@@ -273,11 +341,20 @@ classes:
     primary_providers:
       - source: roboflow
         project: "traffico-augmented/augmented-tricycle"
+        note: "Benched 2026-08-21 (DEC-087) — never went through full fiftyone_review_processed.ipynb review (still `[x]`, unreviewed); student's call to drop it rather than review it."
       - source: roboflow
         project: "yoloffico/traffico-y1"
         native_class_filter: ["Tricycle", "tricycle"]
         role: volume_topup
         note: "Source has both case variants as separate labels (DEC-032) — both map here."
+      - source: roboflow
+        project: "roitrike/roitrikee"
+        note: "Added 2026-08-20 (DEC-083) — second Tricycle-only source, since the existing pool was thin (~1,307 images)."
+      - source: roboflow
+        project: "dlsud-vehicle-classification-thesis/dlsu-d-vehicle-type-detection"
+        native_class_filter: "Tricycle"
+        role: volume_topup
+        note: "Added 2026-08-20 (DEC-083) — see datasets.yaml for the full multi-class mapping (also contributes Motorcycle and Vehicle)."
     cap: 4500
 
   potholes:
@@ -285,6 +362,8 @@ classes:
     # Combined-source strategy per DEC-034: two co-primary "pure
     # pothole" sources, expected to stay under 3500 combined without
     # needing road-damage-detector's messier multi-class volume.
+    # pothole_vhmow benched 2026-08-20 (DEC-083) in favor of
+    # pothole_voxrl — see datasets.yaml.
     primary_providers:
       - source: dataset_ninja
         dataset_name: "pothole-detection"
@@ -292,16 +371,30 @@ classes:
         note: "Currently blocked — Dropbox link rate-limited 2026-08-08. Retry later."
       - source: roboflow
         project: "yeeun-kim-fyvoj/pothole-vhmow"
+        note: "Benched 2026-08-20 (DEC-083) — replaced by pothole_voxrl below."
+      - source: roboflow
+        project: "brad-dwyer/pothole-voxrl"
+        note: "Added 2026-08-20 (DEC-083) — the current active Roboflow Potholes source."
     secondary_providers:
       - source: dataset_ninja
         dataset_name: "road-damage-detector"
         native_class_filter: "pothole"
         role: volume_topup
-        note: "Deprioritized (DEC-034) — fallback only if combined primary volume is insufficient."
+        note: >
+          Originally deprioritized (DEC-034) as a fallback-only source.
+          Activated 2026-08-21 (DEC-086) — with pothole_vhmow benched
+          (DEC-083), the combined primary volume alone (1,330 images)
+          fell below the 1,500 floor; this source's real, already-
+          converted 1,331 images close the gap.
       - source: roboflow
         project: "mahindra-university-ogyod/utility-poles-44tzx"
         role: diversity
-        note: "Dual-purpose source, also contributes to Pole. Added 2026-08-08, DEC-035."
+        note: >
+          Dual-purpose source, also contributes to Pole. Added
+          2026-08-08, DEC-035. Benched 2026-08-20 (DEC-083) alongside
+          its Pole role (Pole switched to Open Images) — its real
+          Potholes contribution was already zero in the converted
+          output before the bench, per DEC-083.
     cap: 4500
 
   trash_bins:
@@ -337,6 +430,24 @@ classes:
           suspected. State-related labels collapse into a single
           "elevator" class. Same box-shape concern as Stairs. Full
           Stage 5.3 audit still needed to isolate the usable subset.
+        note: >
+          Failed direct visual review 2026-08-20 (DEC-082) — overturns
+          the DEC-031 "genuine usable subset" framing above. Large
+          corrupted black regions baked into the source images
+          themselves. Replaced by elevator-status-0iq4p below.
+      - source: roboflow
+        project: "elevator-0iq4p/elevator-status"
+        native_class_filter:
+          elevator: ["Open Elevator", "Closed Elevator", "-Nobody was in the elevator"]
+          person: "People are in the elevator."
+        note: >
+          Added 2026-08-20 (DEC-082) — a distinct Roboflow project
+          from elevator-status-s4lrk (different workspace, verified
+          not a duplicate/mirror). "People are in the elevator." is
+          re-mapped to canonical Person, not Elevator, per explicit
+          student instruction — geometrically verified post-conversion
+          (tight, individual per-person boxes, not one elevator-shaped
+          box). See datasets.yaml for the full audit_note.
     cap: 4500
 
   pedestrian_lane:
@@ -348,4 +459,21 @@ classes:
         audit_note: >
           Multi-class source, also contains animal-crossing.
           Confirm exact class label after download.
+        note: >
+          Benched 2026-08-20 (DEC-083) — replaced by wtf_dwvgm below.
+          (This project was separately forked into the student's own
+          workspace as kenth/pedestrian-and-animal-crossing-vcjuo with
+          a different native_class_filter — see datasets.yaml's
+          `pedestrian_and_animal_crossing` entry, DEC-053. That forked
+          entry is benched too, same DEC-083 change.)
+      - source: roboflow
+        project: "ajsh-yai1y/wtf-dwvgm"
+        native_class_filter: ["crosswalk", "Crosswalks"]
+        note: "Added 2026-08-20 (DEC-083) — 'Main Pedestrian Lane Dataset,' the current active primary source."
+    secondary_providers:
+      - source: roboflow
+        project: "thesis-test-dataset/revised-pedestrian-obstacle"
+        native_class_filter: "crosswalk"
+        role: volume_topup
+        note: "Added 2026-08-20 (DEC-083) — see datasets.yaml for the full multi-class mapping (also contributes Vehicle, Stairs, Person)."
     cap: 4500
