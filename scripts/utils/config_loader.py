@@ -73,7 +73,7 @@ CANONICAL_NAMES: list[str] = [
     "Pole",
     "Animals",
     "Stairs",
-    "Escalator",
+    "Shelf",
     "Doors",
     "Chairs",
     "Tables",
@@ -290,6 +290,62 @@ def get_roboflow_project(key: str) -> dict[str, Any]:
             f"Available keys: {sorted(projects.keys())}"
         )
     return projects[key]
+
+
+INACTIVE_AUDIT_STATUSES = {"failed", "benched", "blocked"}
+
+
+def get_inactive_processed_source_keys() -> set[str]:
+    """
+    Every dataset/processed/<key>/ source that should be excluded from
+    the training pool right now — audit_status is failed/benched/
+    blocked in datasets.yaml. Source keys use Stage 5.2's on-disk
+    naming: Roboflow projects are prefixed "roboflow_"; every other
+    source type's processed dir matches its datasets.yaml top-level
+    key exactly.
+
+    A source with no audit_status field at all (e.g. crowdhuman,
+    exdark, open_images, and — until DEC-086 — dataset_ninja_road_
+    damage_detector) is treated as active, not excluded. These sources
+    have no per-source review gate; absence of the field means "not
+    reviewed one-by-one," not "rejected."
+
+    Found needed 2026-08-21 (DEC-086): cap_per_class.py's
+    discover_processed_sources() + build_class_index() previously read
+    every dataset/processed/<source>/ directory unconditionally, with
+    no audit_status check anywhere in Stage 5.4 — meaning a source
+    marked failed/benched *after* being pulled and converted (e.g.
+    stairs_i2yia, escalator_stairs, elevator_status_s4lrk, DEC-082;
+    pole_detection_z76mb, utility_poles_44tzx, pothole_vhmow,
+    pedestrian_and_animal_crossing, DEC-083) would still have been
+    silently eligible for the next real cap/merge run, contradicting
+    every DEC entry that described those sources as "excluded from the
+    next merge." Sources whose audit_status was already failed/benched
+    *before* their first pull were never affected (Stage 5.1's
+    get_eligible_projects() already gates Roboflow acquisition itself)
+    — this only matters for sources that flip status after already
+    having processed data on disk.
+
+    Returns
+    -------
+    set[str]
+        Processed-dir-style source keys to exclude, e.g.
+        {"roboflow_stairs_i2yia", "roboflow_pole_detection_z76mb"}.
+    """
+    datasets = load_datasets()
+    inactive: set[str] = set()
+
+    for key, entry in datasets.get("roboflow_projects", {}).items():
+        if entry.get("audit_status") in INACTIVE_AUDIT_STATUSES:
+            inactive.add(f"roboflow_{key}")
+
+    for key, entry in datasets.items():
+        if key == "roboflow_projects" or not isinstance(entry, dict):
+            continue
+        if entry.get("audit_status") in INACTIVE_AUDIT_STATUSES:
+            inactive.add(key)
+
+    return inactive
 
 
 def get_source_config(source_key: str) -> dict[str, Any]:
