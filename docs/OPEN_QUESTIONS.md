@@ -1,6 +1,8 @@
 # OPEN_QUESTIONS.md — Second Vision AI
 
-> **Last updated:** 2026-08-18
+> **Last updated:** 2026-08-21
+>
+> **Concurrent-session note (2026-08-20):** this repo has a deliberate split-agent setup (see the architectural handoff doc), and two sessions editing `docs/DECISIONS.md` concurrently produced a real DEC-number collision this session (see DEC-083's Consequences) — a live example, not a hypothetical. If you're picking this file up fresh, don't assume you have the complete picture; check `docs/DECISIONS.md`'s actual latest entry and `git log` before trusting this file's own "newly surfaced" section as exhaustive.
 >
 > Every question here blocks something specific — either a script that can't be written correctly without the answer, or a stage that can't be marked done. When a question gets answered, record the answer as a new entry in `docs/DECISIONS.md` (it's a real decision) and delete or mark the entry here as resolved. Don't let this file and `DECISIONS.md` disagree — `DECISIONS.md` is the one that future sessions trust.
 >
@@ -38,6 +40,8 @@
 **Heuristic built and run 2026-08-13 (DEC-057)** — `scripts/preprocess/box_audit.py`, flagged list at `dataset/reports/elevator_status_s4lrk_flagged.json` (844 boxes).
 
 Correction to this entry's original framing: checked the real area-fraction distribution before picking a threshold, and there's no "near-full-frame" cluster to separate out — max area fraction across all 6,786 real boxes is 0.595, with no bimodal gap anywhere. A fixed area threshold would have flagged nothing. The actual defect is **shape**, not size: 842 of 844 flagged boxes are extreme-elongation outliers (several are literal hairline slivers along a frame edge, e.g. w=0.61, h=0.00003) — this matches DEC-031's original description of this source ("boxes cling to object shape rather than a clean axis-aligned rectangle") much better than the "state pseudo-label" framing did. `roboflow_stairs_i2yia` shows the same signature (232/233 flagged boxes are shape outliers) — worth reviewing alongside elevator.
+
+**Superseded 2026-08-20 (DEC-082).** The premise of this item ("isolate the usable subset") turned out too optimistic — direct visual review found the defect is worse than shape/elongation, and worse than the flagged-outlier rate suggested (Tukey's fences only catch statistical outliers *within a source's own distribution*, so a source that's uniformly bad across most images produces few flags, by construction). `elevator_status_s4lrk` and `stairs_i2yia` are both now `audit_status: failed`, fully excluded rather than partially salvaged. No "usable subset" extraction needed — moot.
 
 **Still needs you**: the flagged list is real and grounded, but deciding what to do with each flagged box (relabel, drop, or it's actually fine) is visual review — same as before, just with the correct heuristic behind it now.
 
@@ -106,6 +110,25 @@ Still an open checkbox in `TASKS.md` Phase 1 ("Verify CVAT/Label Studio integrat
 **Resolved 2026-08-18** — student chose **70/15/15** (was 75/12.5/12.5), matching Ultralytics Academy's own documented baseline ("Split the Dataset Correctly," docs.ultralytics.com). Also asked whether this whole stage even matters given Ultralytics might auto-split — checked: `ultralytics.data.utils.autosplit()` exists but is optional/manual-invoke only, standard training requires pre-split directories referenced in `data.yaml`. `split.py` is necessary, not redundant with anything automatic. Ratio constant updated in `scripts/build/split.py`; **not yet re-run** — blocked on item #7's dedup resolution (`split.py` needs a fresh `dedup_report.json`).
 
 **Previous real result (2026-08-14, DEC-063, now stale post-DEC-069's fresh merge)**: train=38,691, val=6,383, test=6,455 images at the old 75/12.5/12.5 ratio and the old 51,529-image merged pool. Zero cross-split duplicate leakage (a real union-find bug was caught and fixed in getting there — see DEC-063). Will be superseded once item #7 resolves and `split.py`/`generate_yaml.py` re-run.
+
+---
+
+## Newly surfaced (2026-08-20, DEC-082)
+
+### 9. Escalator — replacement class, or renumber to 15?
+**Resolved 2026-08-20 (DEC-083).** Escalator's slot (id 6) reused for **Shelf** (Open Images, "Shelf" — 22,899 boxes/6,011 images), chosen over Cart (rejected — mostly horse-drawn carts on visual inspection) and Countertop (rejected — mostly residential kitchen counters) after browsing all three in `fiftyone_preview.ipynb`'s new ad-hoc candidate section. A suitable replacement was found, so the renumber-to-15-classes fallback was never triggered — `classes.yaml`/`config_loader.py` still show `nc: 16`.
+
+### 10. Stairs — is `stair_gaptw` alone (1,564 images) enough?
+**Resolved 2026-08-20 (DEC-083), better than expected.** `revised_pedestrian_obstacle` (a new multi-class Roboflow source added for other reasons — see DEC-083) turned out to have a `stairs` native class too — real, unplanned bonus. Stairs' active total is now **2,294 images** (`stair_gaptw` 1,564 + `revised_pedestrian_obstacle` 730), comfortably clear of the 1,500 floor with real margin. No backup source search needed.
+
+---
+
+## Newly surfaced (2026-08-21, DEC-085)
+
+### 11. `dataset_ninja_road_damage_detector` — is it actually an active source, or a dormant fallback?
+**Resolved 2026-08-21 (DEC-086).** Student's call: "we need that fallback now" — option (a), made active. `audit_status: approved` set explicitly in `config/datasets.yaml`, matching its sibling `dataset_ninja_pothole_detection`.
+
+Implementing this surfaced a bigger, separate problem: `cap_per_class.py` had **no `audit_status` awareness at all** — every `dataset/processed/<source>/` directory was scanned unconditionally regardless of status, meaning any source benched/failed *after* its first pull (all 7 from DEC-082/083) would have silently stayed eligible for the next real cap/merge run, contradicting what those entries claimed. Found, fixed (`get_inactive_processed_source_keys()` in `config_loader.py`, wired into `cap_per_class.py`), and verified via `--dry-run`: Potholes now correctly shows 2,661 candidates (`pothole_vhmow` excluded, `dataset_ninja_road_damage_detector` included), matching the number this item was originally about. Full writeup in DEC-086 — confirmed the last *real* run (DEC-077, 2026-08-18) predates this risk and isn't affected.
 
 ---
 

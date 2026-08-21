@@ -2421,6 +2421,372 @@ Generalizing the existing mistakenness-section inference logic (rather than writ
 
 ---
 
+## DEC-080: Full-Pool Review Restricted to the Merged (Post-Cap) Pool by Default (`restrict_to_merged`)
+
+- **Date:** 2026-08-19
+- **Status:** Accepted
+- **Related:** DEC-075 (same fix, already applied to `box_audit.py`), DEC-076 (the full-pool review this corrects), DEC-078 (why an unselected image can't be backfilled)
+
+### Context
+
+Student caught a real discrepancy while actually using the notebook: `door_detection_zqt59` was described as contributing 3,460 images to the trained pool, but the full-pool review cell (`flagged_report_path=None`) reported loading 4,493 — the entire raw `dataset/processed/roboflow_door_detection_zqt59/` pool, not the 3,460 `cap_per_class.py` actually selected into `dataset/merged/`. Root cause: `source_key` browsing for a plain processed source always resolved to `processed_dir(source_key)/images` with no awareness of `cap_report.json`'s selection at all.
+
+This is the exact problem DEC-075 already fixed for `box_audit.py` (auditing the full pre-cap pool wastes effort on images that get discarded) — it just never got applied to the notebook's own full-pool browsing mode. The flagged-mode path (`flagged_report_path` set) was accidentally already correct, since `box_audit.py --pool merged` only ever scans `dataset/merged/` in the first place — the gap was specific to `flagged_report_path=None`, DEC-076's actual review mode.
+
+### Decision
+
+New `restrict_to_merged` toggle (default `True`) in the config cell. When on (the default) and browsing a plain processed source with `flagged_report_path=None`, the build cell filters to only images present in `dataset/merged/images/` under that source's prefix — i.e., exactly what `cap_per_class.py` selected, recovered via the same `<source>__<filename>` convention `box_audit.py --pool merged` (DEC-075) already uses. Prints a count of how many were skipped. Set to `False` to see the full raw pool anyway (e.g. deciding whether a source needs a manual cap bump).
+
+Verified for real: `door_detection_zqt59` — 4,493 in `dataset/processed/`, 1,033 correctly skipped, 3,460 reviewed. Exact match to the real `dataset/merged/` count.
+
+### Rationale
+
+An unselected candidate has no path to reaching the trained model under the current design — DEC-078 established that an excluded image's cap slot is not backfilled by re-running `cap_per_class.py`, so there was never a mechanism that would pull a currently-unselected image into the pool based on review outcome. Reviewing it costs real time for zero possible effect, identical in kind to the crowdhuman case DEC-075 already solved — this was a gap in applying that same principle consistently, not a new tradeoff.
+
+### Consequences
+
+- Every small-pool source's real full-pool review count is now smaller than `dataset/processed/<source>/`'s raw count, sometimes substantially (Doors: 4,493 → 3,460, a 23% cut). The DEC-076 risk ranking's flag-rate percentages don't change (already computed against the merged pool via DEC-075), but the number of images a full-pool pass actually has to look at drops for every source with unselected candidates.
+- If `cap_per_class.py`/`merge.py` are re-run later (e.g. after further source changes), `dataset/merged/` membership shifts and a source's "restricted" pool for review should be treated as current-as-of-last-merge, same caveat `box_audit.py --pool merged` already carries.
+
+---
+
+## DEC-081: `dataset.classes` Set on Every Review Dataset — Fixes the App's "Import Your Dataset Schema" Block on Drawing New Boxes
+
+- **Date:** 2026-08-19
+- **Status:** Accepted
+- **Related:** DEC-072/078/079 (the review notebook's editing mechanisms this unblocks)
+
+### Context
+
+Student hit a real wall moving to their second source (`roboflow_cv_project_hovyc`): existing box edits, `accept`/`exclude` tagging all worked fine, but clicking the App's "Annotate" tab to draw a brand-new box showed "Annotate faster than ever — Import your dataset schema..." instead of letting them draw. Student shared the dataset's field-schema JSON, which showed the real gap directly: every field's `default_label_schema` listed attributes (`confidence`, `id`, `index`, `mask_path`, `tags`) but **no `classes` list anywhere** for `ground_truth`/`predictions`.
+
+Checked via `docs.voxel51.com` before proposing a fix: FiftyOne's Annotate tab has required an explicit "Annotation Schema" per dataset since v1.16–1.18 — by default no fields are auto-included, and a field needs a defined class list to offer a class-selection dropdown for a *new* detection (existing-box geometry edits and sample/label tagging don't need one, which is exactly why those already worked). `dataset.classes` — a dict of `{field_name: [class, ...]}` — is confirmed as a real, long-standing, non-Enterprise SDK property (documented under core "FiftyOne Concepts," not the newer Ontology system), and was empty (`{}`) on the live dataset, confirming it as the actual gap.
+
+### Decision
+
+- Applied directly to the two datasets already live in the student's session (`review_roboflow_cv_project_hovyc`, `review_roboflow_door_detection_zqt59`) without requiring a rebuild — `dataset.classes = {"ground_truth": CANONICAL_NAMES, "predictions": CANONICAL_NAMES}` then `dataset.save()` (required for in-place property changes to persist, per FiftyOne's own docs). Verified for real: reloaded each dataset fresh from the backing DB in a separate process afterward and confirmed the 16-name list actually persisted, not just held in the mutated Python object.
+- Added the same two lines to the build cell (`p0review3build`) right after `dataset.add_samples(samples)`, so every source from here on gets this automatically — no more per-source manual patching needed.
+
+### Rationale
+
+Standard SDK mechanism over the newer Annotation Ontology system (`fo.AnnotationOntology`/`fo.apply_ontology()`), which surfaced during research but reads as built for reusable/versioned schemas shared across datasets — heavier than needed here, and not confirmed to even be available outside FiftyOne Enterprise. `dataset.classes` is the documented, minimal mechanism for exactly this need (declaring valid class strings per label field) and was directly confirmed as the missing piece by the student's own shared schema JSON.
+
+### Consequences
+
+- Every remaining source's review dataset will have its Annotate tab class dropdown pre-populated from `config/classes.yaml`'s 16 names — the "Import your dataset schema" prompt should no longer need any manual class configuration; whatever remains of that prompt should just reflect the classes that are now already declared.
+- Not fully verified end-to-end against the App's own UI (couldn't click through it directly) — confirmed the SDK-level fix (classes now populated, persisted) but the student still needs to confirm the Annotate tab itself now behaves correctly.
+
+---
+
+## DEC-084: `pothole_vhmow`'s 1302→871 Image Gap Investigated — Correct Version Downloaded, Gap Is Zero-Annotation Images Dropped by Design
+
+> Renumbered from DEC-082 to DEC-084 (2026-08-20) — a numbering collision from two concurrent sessions editing this file (this repo has a deliberate split-agent setup, see the architectural handoff doc). This entry had zero external cross-references at the time of the collision, unlike the other DEC-082 (`stairs_i2yia`/`escalator_stairs`/`elevator_status_s4lrk`), which was already referenced in 17+ places — renumbering this one instead was the lower-cost fix. Content below is unchanged.
+
+- **Date:** 2026-08-20
+- **Status:** Accepted
+- **Related:** DEC-034 (`pothole_vhmow` added as co-primary Potholes source); `datasets.yaml:492`'s `pinned_version: 18` comment
+
+### Context
+
+Student, reviewing `pothole_vhmow`'s box quality in FiftyOne, separately noticed a large fraction of exact/near-duplicate images in the same source, and asked whether the wrong Roboflow version might have been downloaded — recalling the project should have 1302 images, while only 871 are in `dataset/processed/roboflow_pothole_vhmow/`.
+
+Verified directly against Roboflow's own bundled export metadata rather than re-deriving from `datasets.yaml` alone: `dataset/raw/roboflow_projects/pothole_vhmow/README.roboflow.txt` states "pothole - v18 2024-06-11 7:34pm" and "The dataset includes 1302 images"; `data.yaml` confirms `version: 18` and `url: .../pothole-vhmow/dataset/18` — both an exact match to `datasets.yaml:492`'s `pinned_version: 18` and to the student's own memory of 1302. All 1302 images are present on disk under `train/images` (this version's project owner put 100% of images in the train split, 0 in valid/test — a project configuration choice on Roboflow's side, not a partial/broken download).
+
+Checked the 1302 raw label files directly: 431 are completely empty (0 annotated boxes), 871 contain at least one box (2,189 box lines total, 0 degenerate). `yolo_to_intermediate.py` (used by every Roboflow source, not just this one) drops any image whose label file yields zero valid boxes after conversion (`images_dropped_empty` stat) — exactly accounting for the 1302 → 871 gap, and matching the existing conversion log exactly ("`pothole_vhmow` 871/2,189" in the Stage 5.2 conversion run entry).
+
+### Decision
+
+No re-download needed — the correct version (v18, 1302 images) was pulled correctly. The 871-image processed count is correct, expected behavior given the existing (pipeline-wide, not source-specific) policy of dropping zero-annotation images during conversion. Not treated as a bug.
+
+### Rationale
+
+Cross-checked against Roboflow's own export metadata (`README.roboflow.txt`, `data.yaml`) rather than trusting `datasets.yaml`'s comment alone, since that comment could itself have been stale or wrong — it wasn't. The empty-label-file count (431) exactly closes the gap to 1302 with no unexplained remainder, and the drop behavior is a general converter policy already applied uniformly to every other Roboflow source, not something unique to `pothole_vhmow` that would suggest a source-specific error.
+
+### Alternatives Considered
+
+- **Re-download `pothole_vhmow` to rule out a corrupted/partial pull**: Rejected — the raw files' own embedded metadata (README/`data.yaml`, generated by Roboflow at export time, not by this project's tooling) already independently confirms version and count; a re-download would reproduce the identical 1302/431/871 split, since the 431 zero-box images are how the source project itself was annotated, not an artifact of this pipeline's download step.
+
+### Consequences
+
+- The duplicate-data finding from the same review session (22 exact-duplicate groups/44 files, plus a partial near-duplicate signal from `dedup_report.json`'s sampled check) is a separate, still-open, and still-real issue — unaffected by this investigation. Confirmed not to be an artifact of a wrong-version download either (same raw v18 pull verified); genuinely duplicate content within the correct version.
+- Open, not yet decided: whether zero-annotation images should be kept project-wide as explicit background/negative examples instead of always being dropped by `yolo_to_intermediate.py`. This is a pipeline-wide converter policy question (affects every Roboflow source with any zero-box images, not just `pothole_vhmow`) — flagged here, not decided, since it wasn't what the student asked about.
+
+---
+
+## DEC-082: `stairs_i2yia`/`escalator_stairs`/`elevator_status_s4lrk` Failed on Direct Visual Review; Two Replacement Sources Added and Pulled; Escalator's Schema Slot Reserved, Not Renumbered
+
+- **Date:** 2026-08-20
+- **Status:** Accepted
+- **Related:** DEC-031 (original box-shape finding this supersedes with a stronger read), DEC-057/DEC-075 (box_audit.py's flagged lists for these sources, now understood to undercount the real defect), DEC-042 (floor/ratio-invariant policy affected by losing two sources), `docs/OPEN_QUESTIONS.md` #4 (the DEC-076 full-pool review that surfaced this)
+
+### Context
+
+Partway through the DEC-076 risk-ranked full-pool review, the student's direct visual read on 3 sources diverged sharply from what the automated tooling had shown: `stairs_i2yia` and `escalator_stairs` had duplicate/near-duplicate images and boxes that don't land on the annotated object at all (not just imperfect shape), and `elevator_status_s4lrk` had large corrupted black regions baked into the source images themselves. The student's framing: "it would be like i annotated the images myself."
+
+Before accepting this over the existing `box_audit_report.json` flagged-rate numbers (which showed these sources in the same range as several others, not obvious outliers), independently sampled and rendered real image+box pairs — both flagged and random/unflagged — from all three sources plus `elevator_awvus` (the other Elevator source) for comparison. Also diffed one box's raw-export coordinates against its converted intermediate-schema coordinates to rule out a conversion-pipeline bug before concluding the defect was in the source data itself.
+
+### Decision
+
+- **All three marked `audit_status: failed`** in `config/datasets.yaml`, with real evidence recorded in each entry's `audit_note`:
+  - `stairs_i2yia`: 3/3 independently-sampled images showed boxes not on the staircase — one on a floor rug below the actual stairs, one a vertical sliver on the image's far-left edge nowhere near the staircase visible in the center of frame.
+  - `escalator_stairs`: checked its Stairs-labeled slice specifically (not just Escalator), since this source is dual-canonical (`canonical_classes: [stairs, escalator]`) and losing it affects Stairs' volume too. 2/3 Stairs-only samples were low-resolution (227×227), heavily grainy, monochrome; a third closely matched an already-checked full-size image (same stairwell, same rag-on-step, same shadow pattern) closely enough to read as a near-duplicate. Both native classes excluded, not just escalator content.
+  - `elevator_status_s4lrk`: 3/3 independently-sampled images (1 flagged, 2 random) showed a large corrupted black polygon void baked into the source image itself (not a rendering artifact), with the box sitting mostly on that void instead of the real door/panel. One sample visibly carries an "alamy" stock-photo watermark. This overturns DEC-031's original "genuine usable subset" framing for this source.
+  - Conversion-pipeline bug ruled out first: raw-export vs. converted-intermediate coordinates matched exactly (to float precision) on a real `escalator_stairs` box — whatever's wrong originates in the source's own export, not `yolo_to_intermediate.py`.
+  - `elevator_awvus` checked as a comparison point: 3/3 independently-sampled images showed correctly-placed, tight boxes on real elevator doors — confirmed clean, stays the sole active Elevator source pending the new addition below. (Also visibly stock-photo-watermarked in-frame, same as the failed source — a provenance note, not a quality one.)
+- **Two replacement sources found by the student, SDK-checked, pulled, and converted for real:**
+  - **`stair_gaptw`** (`school-4awgw/stair-gaptw`): single native class `stair`, 1,766 instances. Pulled 1,564 images (v1, only version). Converted: **1,564 images, 1,766 boxes kept, 0 dropped/clipped/invalid** — clean. License recovered from the real downloaded `data.yaml`'s `roboflow.license` field (not exposed via the SDK's `Project.license` attribute, which returned `None` for every source checked this way so far): **Public Domain**.
+  - **`elevator_status_0iq4p`** (`elevator-0iq4p/elevator-status` — a distinct Roboflow project from the failed `elevator_status_s4lrk`, different workspace, verified not a duplicate/mirror): 4 native classes, all elevator-*state* labels (`Open Elevator`, `Closed Elevator`, a label with a stray leading combining character that the SDK reported but the real downloaded `data.yaml` shows as a plain ASCII hyphen — `-Nobody was in the elevator` — an SDK-vs-real-export mismatch caught before trusting the convert run, same DEC-053 discipline; and `People are in the elevator.`). Explicit student decision: `Open Elevator`/`Closed Elevator`/`-Nobody was in the elevator` map to canonical **Elevator**, but `People are in the elevator.` maps to canonical **Person** instead — geometrically verified after conversion, not assumed: sampled 2 real "People are in the elevator."-labeled images post-convert and confirmed the boxes are tight, individual, per-person boxes (one image has 5 people, each with its own reasonably-tight box), not a single elevator-shaped box mislabeled as Person. Pulled 1,464 images (v2, latest — v1 identical size, no anomaly). Converted: **1,461 images, 2,868 boxes kept** (3 images dropped empty, 0 dropped non-canonical — every native class had a mapping), **1,687 clipped, 17 invalid**. The high clip rate was checked, not just accepted: visually confirmed on 4 real converted samples that boxes cluster at/past the frame edge because this source shoots tight, close-up elevator-door photos, not because of corrupt coordinates — `clip_bbox()` (DEC-057) is doing its documented job. License recovered the same way as `stair_gaptw`: **CC BY 4.0**, from the real `data.yaml`.
+  - Both sources' `license:` field in `config/datasets.yaml` set directly from the verified value — no "could not verify via SDK" caveat needed this time, since the real downloaded `data.yaml` carries a `roboflow.license` field the `Project`/`Version` SDK objects apparently don't expose. **Worth carrying forward as a process note**: check the downloaded `data.yaml` before writing "license unverified" for any future Roboflow source — the SDK-only check used for `trashcan_detection_pihfn`/`door_detection_zqt59` (DEC-069/071/073) may have given up too early.
+- **Escalator's schema slot (id 6) is reserved, not renumbered, for now.** `escalator_stairs' was Escalator's only source; no replacement has been found yet. Checked `config_loader.py` before deciding how to represent this: `EXPECTED_NC` (16) and `CANONICAL_NAMES` are hardcoded module constants, and `load_classes()` validates `classes.yaml` against them exactly — there is no existing status-driven exclusion mechanism (`Tricycle`'s `status: possible` is confirmed to be a documentation-only annotation; `config_loader.py` doesn't branch on `status` anywhere, Tricycle is fully counted as one of the 16 regardless). Two real mechanisms exist to actually drop a class: renumber (nc→15, nc 7-15 shift down, every already-converted label file referencing those ids needs remapping — this project already did an analogous migration once, DEC-038, though at a much earlier and cheaper point before most conversion had happened) or reserve the slot (nc stays 16, Escalator keeps id 6 with near-zero real data, zero file-touching cost). Student's explicit call: **reserve it for now** and brainstorm a possible replacement class first; **renumber only if no replacement with adequate data can be found.** Nothing in `classes.yaml`/`config_loader.py` changed by this entry — this is a documented holding pattern, not a code change.
+
+### Rationale
+
+The automated `box_audit.py` flagged-rate ranking (DEC-076) undercounts a defect that's uniform across most of a source's own images, by construction — Tukey's fences flag statistical outliers *relative to that source's own distribution*, so a source that's consistently bad in a similar way across the majority of its images produces few outliers, without that meaning the un-flagged majority is fine. This is why the student's direct visual read caught something the ranking didn't surface as urgent. Independently re-verifying with fresh samples (rather than taking either the automated numbers or the verbal description alone) follows this project's standing discipline of checking real data before trusting or repeating a claim — applied here to the student's own claim, not just to a script's output, which is exactly the same bar DEC-053/DEC-066 already held code changes to.
+
+Reserving Escalator's slot rather than immediately renumbering keeps today's change bounded (config + two source pulls, no mass label-file rewrite) while leaving the more consequential, harder-to-reverse schema surgery for a moment when it's actually known to be necessary — consistent with this project's repeated pattern of not resolving a consequential, discussion-worthy change unilaterally (DEC-042's cap-recompute trigger, DEC-078's tag-don't-delete choice) when a cheaper path might make it unnecessary.
+
+### Consequences
+
+- `dataset/processed/roboflow_stair_gaptw/` and `dataset/processed/roboflow_elevator_status_0iq4p/` now exist and are ready for the next `cap_per_class.py` → `merge.py` pass. `roboflow_stairs_i2yia/`, `roboflow_escalator_stairs/`, `roboflow_elevator_status_s4lrk/` remain on disk (not deleted) but are excluded from that pass by their `failed` status, same posture as `stairs_lusiz`/`stairs_hsatv`/`jeep_hozhs`.
+- **Stairs' realistic near-term pool shrinks substantially**: with both `stairs_i2yia` and `escalator_stairs` out, Stairs' active candidate pool is essentially `stair_gaptw` alone (1,564 images) plus whatever `stairs_lusiz`/`stairs_hsatv` could contribute if ever relabeled (currently inactive). That's barely above DEC-042's 1,500 floor, with no cushion for further box-audit/dedup attrition — worth tracking the real post-cap number closely, not assuming "solved."
+- **Escalator has zero active source** until either a replacement is found or the slot is formally renumbered away. `classes.yaml`'s `cap: 4500` for Escalator is now aspirational, not achievable, until one of those happens.
+- `cap_per_class.py` → `merge.py` → `dedup.py` → `split.py` → `generate_yaml.py` all need a rerun regardless (already true before this entry, per DEC-072/077) — this entry adds "reflects the failed/added source changes" to what that rerun needs to pick up.
+- `docs/OPEN_QUESTIONS.md` #4 (the DEC-076 full-pool review) should note this as a real finding from that review, not a side discussion.
+- Escalator replacement-class brainstorm is a separate, open thread — not resolved by this entry.
+
+---
+
+## DEC-083: Pole → Open Images "Street Light"; Escalator's Reserved Slot Filled with "Shelf"; Five New Roboflow Sources Added (Potholes, Pedestrian Lane, Vehicle/Motorcycle/Tricycle); Four Superseded Roboflow Sources Benched
+
+- **Date:** 2026-08-20
+- **Status:** Accepted
+- **Related:** DEC-082 (Escalator's slot reserved pending a replacement class or renumber — this entry fills it), DEC-053/DEC-069/DEC-071/DEC-073 (the SDK-verify-before-trusting discipline applied throughout), `docs/OPEN_QUESTIONS.md` #9/#10 (both closed by this entry)
+
+### Context
+
+Continuing from the Escalator-replacement brainstorm (DEC-082): the student browsed Street light/Cart/Shelf/Countertop candidates in `fiftyone_preview.ipynb`'s new ad-hoc section and picked Shelf, rejecting Cart (mostly horse-drawn carts on inspection, no clean shopping-cart filter) and Countertop (mostly residential kitchen counters). Separately, reviewing `fiftyone_review_processed.ipynb`'s per-source checklist (Notebook version 9 — a real, substantial review effort that happened directly in the App/notebook, not narrated in this conversation), the student decided to swap out several more unreviewed/lower-confidence Roboflow sources for ones they'd sourced themselves, and asked for the current per-class distribution before finalizing anything (delivered inline, not as a separate DEC entry — informational only).
+
+### Decision
+
+**Pole: switched from Roboflow to Open Images.** `pole_detection_z76mb` and `utility_poles_44tzx` (both unreviewed, neither confirmed defective) benched in favor of Open Images `"Street light"` — 44,697 boxes / 11,226 images in the cached train split alone, gold-standard annotation, zero Roboflow-quality risk. `classes.yaml`'s `pole:` block restructured from `primary_providers` (2 Roboflow entries) to a single `primary: {source: open_images, native_class: "Street light"}`, matching the Chairs/Tables/Animals pattern — picked up automatically by `acquire_openimages.py`'s `get_openimages_targets()` (confirmed by reading it: it iterates every `classes.yaml` entry whose `primary.source == "open_images"`, no hardcoded class list, no script change needed). Pulled and converted for real: **2,154 images / 8,311 instances** (2,159 raw pulled, 5 dropped empty). Spot-checked: a real street light correctly boxed on a real street scene.
+
+**Escalator's reserved slot (id 6) filled with Shelf**, not renumbered. `classes.yaml`'s `names`/`hailo_runtime_names` (id 6: Escalator → Shelf) and `scripts/utils/config_loader.py`'s hardcoded `CANONICAL_NAMES[6]` updated together, then re-verified via `python3 scripts/utils/config_loader.py` (its own validation checks `names` against `CANONICAL_NAMES` exactly — confirms both stayed in sync). Provider: Open Images `"Shelf"`. A suitable replacement was found, so the renumber-to-15-classes fallback (DEC-082's stated condition for when to actually renumber) was never triggered. Pulled and converted for real: **2,386 images / 9,471 instances** (2,756 raw pulled, 370 dropped empty). Spot-checked on 2 samples: one legitimate full-frame shot of a CD/media shelf (the shelf genuinely fills the frame, not a lazy annotation — same "real full-frame content, not a defect" case seen elsewhere this session), one a real storefront display with 3 individual shelf units correctly, tightly boxed — the more representative sample of the two.
+
+**Five new Roboflow sources added, SDK-checked, pulled, and converted for real:**
+
+| Source | Real native classes kept → canonical | Pulled | Converted |
+|---|---|---|---|
+| `pothole_voxrl` (replaces `pothole_vhmow`) | `pothole` → potholes | 665 img | 665 img / 1,739 boxes, 1 invalid |
+| `wtf_dwvgm` (replaces `pedestrian_and_animal_crossing`) | `crosswalk`, `Crosswalks` → pedestrian_lane (`object` dropped) | 1,332 img | 1,326 img / 1,592 boxes |
+| `revised_pedestrian_obstacle` ("General Filipino Outside Dataset") | `vehicle`→vehicle, `stairs`→stairs, `crosswalk`→pedestrian_lane, `person`→person (`animal`/`bike`/`hazard-sign` dropped) | 6,342 img | 4,323 img / 12,193 boxes |
+| `dlsu_d_vehicle_type_detection` ("Filipino Related Road Vehicles") | `Tricycle`→tricycle, `Motorcycle`→motorcycle, 6 named types→vehicle (`Sedan`/`Sports Utility Vehicle`/`Hatchback`/`Pickup Truck`/`Bicycle`/`Electric Bike` dropped) | 37,556 img | 21,142 img / 34,697 boxes |
+| `roitrikee` (Tricycle supplement) | `Tricycle` → tricycle | 665 img | 665 img / 860 boxes |
+
+Real bug caught and fixed during this pass: `wtf_dwvgm` was first configured with `native_class_filter` as a bare list (`["crosswalk", "Crosswalks"]`) — not one of `yolo_to_intermediate.py`'s 4 documented filter forms (dict, string, no-filter+singular, no-filter+plural). It silently fell through to the "no filter, blanket-map every native class" case, pulling in the junk `object` class too. Caught from the conversion report's own `"0 dropped non-canonical"` (should have been >0 with `object` present) before trusting the output — same "verify the report, don't just trust it ran" discipline as DEC-066's smoke-test-overwrite catch. Fixed to the documented dict form (`{pedestrian_lane: ["crosswalk", "Crosswalks"]}`) and reconverted; corrected result above.
+
+Two deliberate, flagged judgment calls, not script defaults:
+- `revised_pedestrian_obstacle`'s `vehicle` class has motorcycles mixed in under one label with no sub-filter to split them — **explicitly asked the student rather than guessing**; answer was to include it as-is and catch individual bad boxes during the same visual-review pass every other source goes through (DEC-078's exclude-tag workflow), not to exclude the class outright.
+- `revised_pedestrian_obstacle`'s `person` class (3,933 instances) wasn't on the student's explicit keep or drop list — defaulted to keep, flagged clearly rather than silently decided either way.
+- `dlsu_d_vehicle_type_detection`'s `Hatchback`/`Pickup Truck`/`Bicycle` (not explicitly mentioned by the student, unlike the explicitly-dropped `Sedan`/`Sports Utility Vehicle`) were dropped on the assumption they follow the same "already covered by Open Images" logic — flagged as an extrapolation, not a confirmed instruction.
+
+Spot-checked post-conversion, not just trusted from the numbers: `revised_pedestrian_obstacle`'s `vehicle` boxes (2 real samples) landed correctly on vans/cars with no visible motorcycle contamination in the sampled images (doesn't rule it out elsewhere in the pool — still flagged for the planned review pass); `dlsu_d_vehicle_type_detection`'s `vehicle` and `tricycle` boxes (1 sample each) landed correctly on a goods truck and a real Philippine sidecar tricycle respectively.
+
+**Four superseded Roboflow sources marked `audit_status: benched`** (not `failed` — none independently confirmed defective this session, same DEC-037 benched-vs-failed distinction): `pole_detection_z76mb`, `utility_poles_44tzx` (Pole → Street light), `pothole_vhmow` (→ `pothole_voxrl`), `pedestrian_and_animal_crossing` (→ `wtf_dwvgm` + `revised_pedestrian_obstacle`). Note: `utility_poles_44tzx` is dual-purpose (`canonical_classes: [pole, potholes]`) but its real Potholes contribution was already zero in the converted output before this change — benching it has no Potholes-side effect.
+
+**Reinstate-if-insufficient conditional resolved for all three affected classes — none needed reinstating.** Real post-add active totals, computed directly from `dataset/processed/`:
+- Potholes: 2,661 images (down slightly from 2,867, still comfortably above the 1,500 floor)
+- Pedestrian Lane: 2,745 images (up from 2,158)
+- Stairs: 2,294 images (up from DEC-082's thin 1,564 — `revised_pedestrian_obstacle`'s `stairs` class turned out to be a real, unplanned bonus here)
+
+Also real, incidental gains from the new sources' multi-class content: Vehicle 12,953 → 29,778 images, Motorcycle 3,861 → 8,990, Tricycle 3,495 → 7,293, Person 27,006 → 29,156.
+
+### Rationale
+
+Same SDK-verify-before-trusting discipline this project has held all session (DEC-053/069/071/073) — every native class name was checked against the real downloaded `data.yaml`, not assumed from the SDK's `project.classes` dict or the student's own memory of a project's labels, and it paid off immediately (the `wtf_dwvgm` list-vs-dict bug would have silently shipped 4 junk boxes as Pedestrian Lane otherwise). Asking the student directly on the one genuinely ambiguous, previously-unresolved call (`vehicle`'s motorcycle contamination) rather than guessing matches this project's standing pattern of surfacing real judgment calls instead of silently resolving them (DEC-042's cap-recompute trigger, DEC-078's tag-don't-infer choice).
+
+### Consequences
+
+- `cap_per_class.py` → `merge.py` → `dedup.py` → `split.py` → `generate_yaml.py` still need a rerun (unchanged from DEC-082) — this entry adds more source changes to what that rerun picks up, doesn't change the fact that it's still pending.
+- `docs/OPEN_QUESTIONS.md` #9 (Escalator replacement) and #10 (Stairs volume) both close — #9 resolved (Shelf), #10 resolved (2,294 active images, comfortably clear of the floor).
+- A real numbering collision was found and fixed while writing this entry: another concurrent session (this repo's deliberate split-agent setup) had independently added its own DEC-082 (a `pothole_vhmow` image-count investigation, unrelated to this one) — renumbered to DEC-084 since it had zero external cross-references, versus this conversation's DEC-082 already being referenced in 17+ places. Worth the student's awareness that two sessions have been editing this repo's docs concurrently — re-read `docs/OPEN_QUESTIONS.md` and `TASKS.md` fresh next session rather than assuming either agent's view is complete.
+- `dataset/processed/roboflow_pole_detection_z76mb/`, `roboflow_utility_poles_44tzx/`, `roboflow_pothole_vhmow/`, `roboflow_pedestrian_and_animal_crossing/` remain on disk (not deleted) but excluded from the next merge, same posture as every other benched/failed source.
+- Not yet done: real per-class re-audit of box quality for the 5 new sources via `box_audit.py` (will happen naturally on the next `--pool merged` run) — SDK/conversion-level verification was done here, not a full Stage 5.3 pass.
+
+---
+
+## DEC-085: Post-DEC-083 Verification Pass — Real `wtf_dwvgm` Stale-File Bug Found and Fixed, `classes.yaml` Documentation Resynced Across 7 Classes, One Pre-Existing Floor-Compliance Risk Flagged
+
+- **Date:** 2026-08-21
+- **Status:** Accepted
+- **Related:** DEC-082, DEC-083, DEC-084 (the entries being verified), DEC-042 (floor policy relevant to the Potholes finding), DEC-057 (`yolo_to_intermediate.py`'s conversion mechanics)
+
+### Context
+
+Student asked for a direct verification of the DEC-082/083/084 work after the prior session ended on a context-limit compaction, rather than taking the prior session's own summary on trust. Re-derived every headline claim from real on-disk data instead of re-reading the prior session's written account: re-ran `config_loader.py`, recounted every new/changed source's converted images/boxes directly from `dataset/processed/`, and cross-checked `classes.yaml`'s per-class documentation against `datasets.yaml`'s actual `audit_status` values.
+
+### Decision
+
+**Verified correct, no changes needed:** `classes.yaml`/`config_loader.py`'s Escalator→Shelf rename (`nc: 16`, `CANONICAL_NAMES[6]`, `hailo_runtime_names` all in sync, validation passes). Real converted counts for Pole (2,154 img/8,311 inst), Shelf (2,386 img/9,471 inst), `stair_gaptw` (1,564/1,766), `elevator_status_0iq4p` (1,461/2,868), `pothole_voxrl` (665/1,739), `revised_pedestrian_obstacle` (4,323/12,193), `dlsu_d_vehicle_type_detection` (21,142/34,697), and `roitrikee` (665/860) all match DEC-082/083's documented numbers exactly. No duplicate/colliding `DEC-08x` headers remain in this file. Final active-source totals for Stairs (2,294), Vehicle (29,778), Motorcycle (8,990), Tricycle (7,293), and Person (29,156) all reproduce exactly from a fresh, independent recount.
+
+**Real bug found and fixed: `wtf_dwvgm` had 4 stale, contaminated files on disk.** `convert_project()` in `yolo_to_intermediate.py` writes output files for every image that currently qualifies under the mapping, but never deletes previously-written output files that no longer qualify after the mapping changes. DEC-083's own bare-list-filter bug (`native_class_filter` as a list instead of the required dict form) caused a first, buggy conversion run that blanket-mapped every native class — including the junk `object` class — into Pedestrian Lane; 4 images whose only raw box was `object` were written to disk under that run. Fixing the filter and reconverting produced the correct stats (1,326 images/1,592 boxes, recorded accurately in DEC-083's text and in `yolo_to_intermediate_report.json`), but the second run's file-writing loop only writes images that currently qualify — it never swept the 4 stale files left behind by the first run. Confirmed via raw-label cross-reference (exactly the 4 images whose raw label file contains only native index 2 / `object`, content: single thin slivers at frame edges, not real crosswalk boxes) and mtime (the 4 stale files timestamped a minute before the other 1,326 — consistent with a first, since-superseded run). Deleted the 4 stale image+label pairs; `dataset/processed/roboflow_wtf_dwvgm/` now holds exactly 1,326 images/1,592 boxes, matching the report. Confirmed this hadn't propagated to `dataset/merged/` or `dataset/final/` (the cap/merge/dedup/split cascade rerun is still pending, per DEC-083's own Consequences) — contamination was fully contained to `dataset/processed/`. Checked the other two sources with a similar "wrong value caught, then corrected" history this session (`elevator_status_0iq4p`'s SDK-vs-real garbled string, `stair_gaptw`) — neither has a stale-file mismatch, since in both cases the correct value was used before the converter was ever run, not after.
+
+**`classes.yaml`'s per-class `primary_providers`/`secondary_providers` documentation was stale for 7 of the 9 classes DEC-082/083 touched.** Only the `pole:`/`shelf:` blocks (clean single-source swaps) were updated during the original work; `stairs:`, `potholes:`, `vehicle:`, `motorcycle:`, `tricycle:`, `pedestrian_lane:`, and `elevator:` still listed only pre-DEC-082/083 sources — newly-added sources (`stair_gaptw`, `elevator_status_0iq4p`, `pothole_voxrl`, `wtf_dwvgm`, `roitrikee`, plus `dlsu_d_vehicle_type_detection`'s and `revised_pedestrian_obstacle`'s multi-class contributions) were absent, and `elevator:`'s entry for `elevator_status_s4lrk` still carried DEC-031's original "partially usable" verdict with no note that DEC-082 overturned it. Checked `get_eligible_projects()` (`scripts/acquire/acquire_roboflow.py:53`) before treating this as more than cosmetic: confirmed both acquisition and conversion are driven entirely by `datasets.yaml`'s `audit_status`/`pinned_version` fields, so the staleness never affected pipeline behavior — but `classes.yaml`'s own header claims it is "the AUTHORITATIVE class list and source mapping," and it gave a wrong picture of current sourcing for 7 classes. Resynced all 7 blocks in place, following the file's existing convention of keeping benched/failed entries listed with an inline `note:` rather than deleting them (matching the pattern already used for `jeep_hozhs`). Also resynced `doors:` for `door_detection_zqt59` — a gap from DEC-071/073 (an earlier session, predating DEC-082/083), found incidentally while auditing the same class of staleness.
+
+**Pedestrian Lane's active total corrected from DEC-083's stated 2,745 to 2,741** — a direct consequence of the `wtf_dwvgm` fix above (1,330 stale → 1,326 correct, a delta of 4 images matching exactly).
+
+**Flagged, not resolved: Potholes' active total (2,661, matching DEC-083 exactly) depends on `dataset_ninja_road_damage_detector` counting as an active source, and that's genuinely ambiguous.** That source has no `audit_status` field at all in `datasets.yaml` (unlike its sibling `dataset_ninja_pothole_detection`, which explicitly has `audit_status: approved`), and its own config `notes` field describes it as DEC-034's deprioritized fallback — "kept as a fallback if the combined volume proves insufficient... if ever activated" — language that reads as *not currently active*. Its processed output (1,331 images) has existed on disk since 2026-08-13, predating DEC-082/083 entirely, so this wasn't introduced by this session's changes, and DEC-083's own arithmetic (2,867 before → 2,661 after) is internally consistent with treating it as active, same as it was apparently already being treated before DEC-083. The consequence is real either way: **without** `road_damage_detector`, Potholes' active total is 665 (`pothole_voxrl`) + 665 (`dataset_ninja_pothole_detection`) = **1,330 — below DEC-042's 1,500 floor.** Not resolved here since it's a pre-existing ambiguity, not something DEC-082/083 changed — flagged in `docs/OPEN_QUESTIONS.md` (item #11) for the student to decide: either make the "active" status explicit (`audit_status: approved`, matching its sibling) since it's apparently load-bearing, or take "fallback only" literally and find Potholes another real source.
+
+### Rationale
+
+Re-deriving every number from raw files rather than re-trusting the prior session's own JSON reports or written summary follows this project's own standing discipline (DEC-053/066/069/071/073/083) — applied here to the prior session's own output, the same bar already held for source data and script output. The `wtf_dwvgm` finding shows exactly why that bar matters: the *stats* were computed correctly after the filter fix, and would have looked clean to a report-only check — only a direct disk recount caught that the *files* didn't match the *report*.
+
+### Alternatives Considered
+
+- **Trust DEC-082/083's own numbers without re-deriving them**: Rejected — that's exactly the "trust a report without checking the underlying files" gap that produced the `wtf_dwvgm` bug in the first place; re-verifying a prior session's claims deserves the same scrutiny as any other unverified claim.
+- **Silently resolve the `dataset_ninja_road_damage_detector` ambiguity** (either bench it or mark it approved): Rejected — it's a genuine judgment call (literal reading of its own "fallback only" note vs. its apparent load-bearing role in clearing the Potholes floor) that the student should make with the tradeoff visible, not have decided for them.
+
+### Consequences
+
+- `dataset/reports/yolo_to_intermediate_report.json`'s `wtf_dwvgm` entry (1,326/1,592) now matches disk again.
+- `docs/OPEN_QUESTIONS.md` gets a new item (#11) for the `dataset_ninja_road_damage_detector` active-status ambiguity and its floor-compliance implication for Potholes.
+- `cap_per_class.py` → `merge.py` → `dedup.py` → `split.py` → `generate_yaml.py` rerun is still pending (unchanged from DEC-082/083) — this entry's file deletion means that future rerun picks up 4 fewer (correct, not stale) `wtf_dwvgm` images than it would have yesterday.
+- No prior decision or number the student already approved needed to change — this entry is a verification/correction pass, not a new sourcing decision.
+
+---
+
+## DEC-086: `dataset_ninja_road_damage_detector` Activated for Potholes; Real Stage-5.4 Gating Bug Found and Fixed — `cap_per_class.py` Had No `audit_status` Awareness At All
+
+- **Date:** 2026-08-21
+- **Status:** Accepted
+- **Related:** DEC-085 (flagged the `road_damage_detector` ambiguity), DEC-034 (original deprioritization), DEC-042 (floor policy), DEC-082/083 (the 7 sources this bug would have silently reincluded), DEC-077 (last real cap/merge run, confirmed unaffected)
+
+### Context
+
+Student's direct answer to DEC-085's flagged open question (`docs/OPEN_QUESTIONS.md` #11): "lets use the dataset_ninja_road_damage_detector, it is indeed the case that we need that fallback now." Implementing this — setting an explicit `audit_status` and verifying it would actually change Potholes' candidate pool — required tracing exactly how `cap_per_class.py` decides which processed sources feed each class's candidate pool. That trace surfaced a bug substantially bigger than the setting being flipped.
+
+### Decision
+
+**`dataset_ninja_road_damage_detector` activated.** `config/datasets.yaml` gets an explicit `audit_status: approved` (previously had no `audit_status` field at all), matching its sibling `dataset_ninja_pothole_detection`. Corrected a second, separate stale claim found in the same entry while doing this: its `notes` field said conversion was "unverified... not attempted yet" — false; `scripts/acquire/acquire_datasetninja.py`'s `SOURCES` dict has processed this project unconditionally since DEC-041/049, and its real converted output (1,331 images/1,331 labels, `dataset/processed/dataset_ninja_road_damage_detector/`) was directly re-verified: every box is canonical `pothole`, alligator/lateral/longitudinal crack correctly dropped. `classes.yaml`'s `potholes:` block's matching entry updated with the same activation note.
+
+**Real bug found and fixed: `cap_per_class.py` (Stage 5.4) had no `audit_status` awareness anywhere.** Traced the full path a source takes from `dataset/processed/` into the training pool: `run()` calls `discover_processed_sources()` (globs every `dataset/processed/<name>/` with an `images/`+`labels/` pair, no status check) and passes the result straight into `build_class_index()` (indexes every label file's class ids, again no status check) and then `cap_class()` (pools every non-priority candidate via pure random selection — read in full, confirmed no `audit_status`/`datasets.yaml`/`classes.yaml` reference anywhere in the function). **This means a source marked `failed`/`benched` *after* it was already pulled and converted would still have been silently eligible for the next real cap/merge run** — directly contradicting what DEC-082 and DEC-083 both explicitly claimed ("excluded from the next merge, same posture as every other benched/failed source"). Concretely, the 7 sources benched/failed today (`stairs_i2yia`, `escalator_stairs`, `elevator_status_s4lrk`, `pole_detection_z76mb`, `utility_poles_44tzx`, `pothole_vhmow`, `pedestrian_and_animal_crossing`) all still have real processed data on disk and would all have silently re-entered Stairs/Elevator/Pole/Potholes/Pedestrian Lane's candidate pools on the next run.
+
+Added `get_inactive_processed_source_keys()` to `scripts/utils/config_loader.py` — returns the set of processed-dir-style source keys (`roboflow_<key>` for Roboflow projects, bare top-level key for everything else) whose `audit_status` is `failed`/`benched`/`blocked`; a source with no `audit_status` field at all (crowdhuman, exdark, open_images, and — until this entry — `dataset_ninja_road_damage_detector`) is treated as active, matching the "not in {failed,benched,blocked}" convention DEC-085's own recount script already used. Wired into `cap_per_class.py`'s `run()`, filtering `sources` right after `discover_processed_sources()`, before any candidate-index building. Deliberately scoped to `cap_per_class.py` only, not `discover_processed_sources()` itself — `box_audit.py`'s non-`--pool merged` mode also calls `discover_processed_sources()`, and legitimately wants visibility into failed sources too (that's literally how DEC-082's review found the defects that got `stairs_i2yia`/`escalator_stairs`/`elevator_status_s4lrk` failed in the first place — auditing them before they were excluded). Changing that shared function's meaning would have silently narrowed a diagnostic tool's scope as a side effect of fixing a training-pool-eligibility bug — two different questions ("what exists on disk" vs. "what should train the model") that deserve two different answers, not one.
+
+Also fixed a second, smaller stale-doc issue found in the same file while in there: `cap_per_class.py`'s own module docstring claimed "`merge.py`... mechanically pools every `dataset/processed/<source>/`... it does not consult this report" — false, and contradicted by `merge.py`'s own docstring, which documents a scope correction where it was fixed to read `cap_report.json`'s selected union. The report-only design conclusion this paragraph was arguing for is still correct (kept as-is); only the stated reason was wrong.
+
+**Verified via `--dry-run` that the fix produces exactly the numbers everyone has been assuming were already true:**
+
+| Class | Candidates (fixed) | Sources correctly excluded |
+|---|---|---|
+| Potholes | 2,661 | `pothole_vhmow` |
+| Stairs | 2,294 | `stairs_i2yia`, `escalator_stairs` |
+| Pedestrian Lane | 2,741 | `pedestrian_and_animal_crossing` |
+| Pole | 2,154 (unchanged — pure Open Images already) | `pole_detection_z76mb`, `utility_poles_44tzx` |
+
+Every one of these matches DEC-083/085's already-documented totals exactly — the fix makes the code finally do what the documentation already (prematurely) claimed. Ratio invariant still holds post-fix: max=Vehicle(4,500)/min=Trash Bins(1,663) = 2.71 (≤3.0).
+
+**Confirmed the last real cap/merge run (DEC-077, 2026-08-18) was NOT affected by this bug** — checked the existing `cap_report.json` on disk directly: it legitimately includes `pothole_vhmow` (871), `stairs_i2yia` (1,559), `escalator_stairs` (4,429), `pole_detection_z76mb` (3,100), `utility_poles_44tzx` (5,089) as candidates, all of which were genuinely still-active sources on 2026-08-18, before any of today's bench/fail decisions existed. `dataset/merged/`'s current physical contents (if any) derive from that same, still-valid-for-its-time report. This bug only matters prospectively, for the still-pending next real run — nothing already trained on or physically merged is contaminated.
+
+### Rationale
+
+The bug was found by not stopping at "does the requested field change do what's asked" — tracing the field's actual functional effect (not just setting it and assuming it works) is the same discipline this project has applied to source data all session (DEC-053/066/069/071/073/083/085), applied here to the pipeline's own code path instead. Scoping the fix to `cap_per_class.py` rather than the shared `discover_processed_sources()` utility follows DEC-082's own reasoning pattern (prefer the smaller, more targeted change when a narrower one satisfies the actual need) — `box_audit.py`'s diagnostic use case and `cap_per_class.py`'s training-pool-eligibility use case are genuinely different questions that happened to share a utility function by coincidence, not by design.
+
+### Alternatives Considered
+
+- **Change `discover_processed_sources()` itself to filter by `audit_status`**: Rejected — would silently narrow `box_audit.py`'s diagnostic visibility into failed sources as a side effect, and that visibility has real, demonstrated value (DEC-082's review process).
+- **Leave the Stage 5.4 gating bug for a separate future entry, only do the requested activation**: Rejected — activating `dataset_ninja_road_damage_detector` while `cap_per_class.py` still had no `audit_status` awareness at all would have been a documentation-only change with no verified functional effect; the whole point of tracing the fix through was to confirm the activation actually does something, which required finding and fixing this bug in the same pass.
+
+### Consequences
+
+- `docs/OPEN_QUESTIONS.md` #11 closes.
+- `cap_per_class.py` → `merge.py` → `dedup.py` → `split.py` → `generate_yaml.py` rerun is still pending (unchanged) — but the next real run will now correctly exclude all 7 benched/failed sources with stale processed data, something no prior run in this project's history needed to rely on (none of them had this specific "benched/failed after first pull" situation until DEC-082/083).
+- Worth a forward note for future bench/fail decisions on already-pulled sources: this gate is now real, so marking something `failed`/`benched` in `datasets.yaml` going forward will actually take effect on the next `cap_per_class.py` run, not just in documentation.
+
+---
+
+## DEC-087: Person/Vehicle/Motorcycle Priority-Source Reordering; `me5_u6rvg`/`augmented_tricycle` Benched Per Review-Checklist Policy; `cv_project_hovyc`/`trashcan_detection_pihfn` Cleaned Labels Promoted — Revealing Real Multi-Class Enrichment From the Review Pass
+
+- **Date:** 2026-08-21
+- **Status:** Accepted
+- **Related:** DEC-067/069 (original `CLASS_PRIORITY_SOURCES` design), DEC-076 (review checklist), DEC-078/079 (exclude/accept-tag write-back mechanisms), DEC-082/083 (sources this reorders around), DEC-086 (the `audit_status` gating fix this builds on directly)
+
+### Context
+
+Student gave a consolidated set of instructions covering: (1) revised per-class source priority for Person/Vehicle/Motorcycle, (2) a standing policy that any Roboflow source still marked `[x]` (not `[/]`, i.e. never completed a full `fiftyone_review_processed.ipynb` write-back review) should be deactivated rather than reviewed — explicitly naming `me5_u6rvg` and `augmented_tricycle` — with a note this had been said before, (3) confirmation that `revised_pedestrian_obstacle`'s known motorcycle-in-vehicle contamination (flagged, not acted on, in DEC-083) needs active cleaning, not just flagging, and (4) that `cv_project_hovyc` and `trashcan_detection_pihfn`'s already-reviewed, cleaned labels (`labels_reviewed/`, DEC-078/079's write-back staging area) should be what the next merge actually uses.
+
+Re-read `fiftyone_review_processed.ipynb`'s checklist cell (`b748ccf6`) fresh rather than trust a summarized memory of it — its own legend text described `[x]` as "not yet reviewed," which reads differently from the student's "failed the audit check" framing from earlier in this project. Resolved by checking each `[x]` row's actual evidence individually rather than picking one global reading: most `[x]`-marked, still-processed-on-disk sources genuinely were later confirmed defective via independent visual review (DEC-082) or superseded by an explicit replacement decision (DEC-083) — but `elevator_awvus` is also `[x]`-marked and was *not* one of those; DEC-082 directly visually confirmed it clean and kept it active. Surfacing this tension explicitly rather than silently applying "x means deactivate" universally is what caught it.
+
+### Decision
+
+**Priority-source order revised for Person, Vehicle, and (newly) Motorcycle** in `scripts/preprocess/cap_per_class.py`'s `CLASS_PRIORITY_SOURCES`:
+- Person: `["exdark", "roboflow_revised_pedestrian_obstacle", "crowdhuman", "open_images"]` (was `["exdark", "crowdhuman"]`)
+- Vehicle: `["roboflow_dlsu_d_vehicle_type_detection", "exdark", "roboflow_revised_pedestrian_obstacle", "open_images"]` (was `["exdark", "roboflow_me5_u6rvg"]`)
+- Motorcycle: `["roboflow_dlsu_d_vehicle_type_detection", "exdark", "open_images"]` (new — previously used the plain `["exdark"]` default)
+
+**Real consequence caught before finalizing, not assumed:** a first pass left `open_images` off all three lists (matching the student's initial framing of it as a "control group"/leftover pool), and a `--dry-run` showed this squeezed Open Images to **0 selected images** for both Person and Vehicle — the higher-priority sources' per-source floors alone already filled the entire 4,500 cap. This directly contradicted the student's stated intent (Open Images as the real source of sedan/SUV imagery for Vehicle, general diversity for Person). Flagged via `AskUserQuestion` rather than silently picking a side; student chose to give Open Images its own explicit floor too, added as the last tier in all three lists. Re-verified via `--dry-run`: Open Images now gets a real, non-zero guaranteed share (375 for Person, 375 for Vehicle, 500 for Motorcycle) instead of 0/thin leftovers.
+
+`elevator_status_0iq4p`'s small Person contribution (~300 images, the "People are in the elevator." remap, DEC-082) deliberately stays un-prioritized, unlike Open Images — student's explicit framing: "somewhat negligible... if it appears... so be it."
+
+**`me5_u6rvg` and `augmented_tricycle` benched** (`config/datasets.yaml`, `config/classes.yaml`) — both still `[x]` on the review checklist (never completed a full write-back review), student's explicit call to deactivate rather than review. Neither has specific evidence of a defect (unlike `stairs_i2yia`/`escalator_stairs`/`elevator_status_s4lrk`'s DEC-082 findings) — marked `benched`, not `failed`, consistent with the project's established distinction. `get_inactive_processed_source_keys()` (DEC-086) picks both up automatically; `--dry-run` confirms them correctly excluded and Vehicle/Motorcycle/Tricycle's candidate pools now driven by `dlsu_d_vehicle_type_detection` + the sources above instead.
+
+**`elevator_awvus` kept active despite its `[x]` mark** — its row in the review checklist still cited DEC-031's original box-shape concern, which DEC-082 already independently overturned for this specific source (3/3 sampled images confirmed correctly-boxed). Applying "x means deactivate" here would have dropped Elevator's only confirmed-clean source, leaving just `elevator_status_0iq4p` (1,414 images). Checklist row corrected to state the DEC-082 finding plainly instead of the stale DEC-031-only framing; `config/datasets.yaml`/`classes.yaml` unchanged (already correct).
+
+**`revised_pedestrian_obstacle`'s Vehicle-class motorcycle contamination**: `classes.yaml`'s note strengthened from "flag for review, not exclude" (DEC-083's original framing) to explicitly requiring active cleaning during the `fiftyone_review_processed.ipynb` pass — no automated sub-filter exists to separate motorcycles from its native `vehicle` label, so this remains a visual-review task, not something resolved by this entry. Flagged, not fixed.
+
+**`cv_project_hovyc` and `trashcan_detection_pihfn`'s reviewed labels promoted** — `labels_reviewed/` copied over the real `labels/` for both (1,040 of 1,337 files for `cv_project_hovyc`, matching its `restrict_to_merged`-scoped review; all 559 for `trashcan_detection_pihfn`). Backed up originals first to `dataset/backups/pre_promotion_<source>_labels_<timestamp>/` (`dataset/processed/` is fully gitignored, no git-level safety net) since this is a real, non-trivially-reversible file overwrite. Sanity-checked before promoting: 484/1,040 and 95/559 files actually differed from the originals; total box counts increased (1,269→2,296 and 762→1,322 respectively), consistent with DEC-079's accept-tag prediction-promotion plus manual additions, not a corruption or mass-deletion.
+
+**Real, unplanned finding surfaced by the promotion, investigated fully before trusting it:** a `cap_per_class.py --dry-run` immediately after the promotion showed Pole/Stairs/Trash Bins/Pedestrian Lane candidate counts increased by amounts unexplained by anything else changed this session. Independently re-verified the raw files hadn't been touched by a concurrent session (checked mtimes on `open_images`/`stair_gaptw`/`revised_pedestrian_obstacle` — all untouched; searched for any file modified in the last 3 hours outside the two promoted sources — none found) before concluding the promotion itself was the cause. Confirmed directly: `cv_project_hovyc` and `trashcan_detection_pihfn` are **no longer single-class sources** — the review process added real, visually verified boxes for other canonical classes visible in the same photos (a door photo naturally also shows the entrance's steps, a nearby pole, the sidewalk's pedestrian lane, etc.). Full breakdown:
+- `cv_project_hovyc` (was Doors-only): doors 1,326, person 103, stairs 77, chairs 38, vehicle 37, pole 32, trash_bins 20, bicycle 17, tables 11, animals 5, pedestrian_lane 4, motorcycle 4.
+- `trashcan_detection_pihfn` (was Trash-Bins-only): trash_bins 559, person 73, vehicle 20, chairs 9.
+
+Spot-checked 2 real `cv_project_hovyc` samples (a Pole+Pedestrian Lane image — a street-corner photo with two correctly-boxed poles and a correctly-boxed crosswalk; a Stairs image — a townhouse door with its entrance steps correctly boxed) — both legitimate, tightly-boxed, real content, not review mistakes. `config/datasets.yaml`'s entries for both sources updated with this finding; their `canonical_class` field is now understood to reflect only their original Stage 5.2 conversion mapping, not current full content — functionally harmless, since `cap_per_class.py` reads actual box content, not that field, but worth knowing when reading the config.
+
+Notebook (`fiftyone_review_processed.ipynb`) checklist cell rewritten (version 9→10): corrected `elevator_awvus`'s stale note, added the operating-policy statement reconciling the `[x]`-means-what tension, annotated every already-actioned row with its real disposition and DEC citation, and listed the 7 sources added since DEC-076's original ranking that have no review status on this list yet.
+
+### Rationale
+
+Tracing the actual numeric consequence of a configuration change before finalizing it (the open_images-squeezed-to-0 finding) rather than trusting the request's literal wording to "just work" follows the same discipline DEC-086 just established for the `audit_status` gating bug — a config/priority change is only as good as its verified real effect, not its stated intent. Investigating the unexplained candidate-count shift before writing it off as "probably fine" (rather than either alarm-firing about a hypothetical concurrent-session collision or silently accepting stale numbers) matches this project's standing bar: re-derive from real files, spot-check with real images, only then trust a number enough to document it.
+
+### Consequences
+
+- `dataset/processed/roboflow_cv_project_hovyc/labels/` and `roboflow_trashcan_detection_pihfn/labels/` now hold the reviewed, cleaned versions — the next `cap_per_class.py`/`merge.py` run will use these, not the pre-review originals. Backups of the originals exist under `dataset/backups/` if this ever needs reverting.
+- `cap_per_class.py` → `merge.py` → `dedup.py` → `split.py` → `generate_yaml.py` rerun is still pending (unchanged) — now also picks up the priority reordering, the 2 newly-benched sources, and the promoted labels' multi-class enrichment.
+- `revised_pedestrian_obstacle`'s Vehicle motorcycle-contamination cleanup remains a real, not-yet-done visual-review task — worth tracking explicitly rather than assuming DEC-083's original "flag for later" note covers it.
+- The other 7 sources added in DEC-082/083 (`stair_gaptw`, `elevator_status_0iq4p`, `pothole_voxrl`, `wtf_dwvgm`, `revised_pedestrian_obstacle`, `dlsu_d_vehicle_type_detection`, `roitrikee`) still have no `fiftyone_review_processed.ipynb` review status at all — flagged on the notebook checklist, not resolved here.
+- Final verified `--dry-run` state (all floors met, ratio invariant 2.67 ≤ 3.0): Person 4,500, Vehicle 4,500, Motorcycle 4,500, Pole 2,186, Animals 4,500, Stairs 2,371, Shelf 2,386, Doors 4,500, Chairs 2,984, Tables 4,500, Tricycle 3,798, Potholes 2,661, Trash Bins 1,683, Elevator 3,191, Pedestrian Lane 2,745, Bicycle 3,655.
+
+---
+
+## DEC-088: `hide_duplicates` Added to `fiftyone_review_processed.ipynb` for the Post-Dedup Review Pass; Confirmed `dedup.py` Checks Across Sources, Not Just Within One
+
+- **Date:** 2026-08-21
+- **Status:** Accepted
+- **Related:** DEC-062 (dedup.py's original design), DEC-080 (`restrict_to_merged`, the pattern this follows), DEC-078 (exclude-tag mechanism, a different "remove from consideration" tool this complements)
+
+### Context
+
+Student described their actual working sequence, which deliberately reorders the documented pipeline: visual inspection of easily-checked sources first (done: `cv_project_hovyc`, `trashcan_detection_pihfn`) → merge → dedup → a **second** visual inspection pass, post-dedup → final merge curation → split. Rationale, student's own: doing dedup before the second inspection avoids spending review time re-drawing boxes on images that turn out to be duplicates of each other. Two follow-up requirements: (1) duplicate images must be **hidden entirely** from that second review pass, not just tagged/flagged for the student to notice and skip themselves; (2) confirm whether `dedup.py` actually checks across different source datasets, not just within one, since two different Roboflow projects could plausibly contain the same underlying photo.
+
+### Decision
+
+**Confirmed empirically: `dedup.py` checks across all sources simultaneously, and cross-source duplicates are real and common, not a hypothetical.** `dedup.py` builds one FiftyOne dataset from the *entire* `dataset/merged/images/` pool (all sources pooled together, not iterated per-source) before running both duplicate checks — cross-source detection was never a special case, it falls out of the pool being unified. Verified against the real (if stale) `dataset/reports/dedup_report.json`: **474 of 1,893 exact-duplicate groups (25%) and 78 of 520 near-duplicate groups (15%) span more than one source.** Most striking example: `roboflow_augmented_tricycle` and `roboflow_me5_u6rvg` (both benched this session, DEC-087, for unrelated reasons — never having gone through a full review) share dozens of byte-identical images under matching base filenames (e.g. `11_JPG_jpg...` appears in both) — strong evidence the two Roboflow projects were sourced from the same original dataset. Other real cross-source pairs found: `exdark`↔`open_images`, `open_images`↔`roboflow_escalator_stairs`, `roboflow_elevator_status_s4lrk`↔`exdark`.
+
+**`hide_duplicates` added to `fiftyone_review_processed.ipynb`** (version 9→11, this entry plus DEC-087's checklist rewrite): a new per-source review toggle, following the exact pattern `restrict_to_merged` (DEC-080) already established. When `True`, for the currently-reviewed `source_key`: every image that appears as a `"duplicates"` member of any `dataset/reports/dedup_report.json` group (exact *or* near) is skipped entirely during the FiftyOne dataset build — never added as a sample, not shown with a badge, genuinely absent — per the student's explicit "hidden, not tagged" requirement. Each group's `"kept"` representative is deliberately *not* hidden, so exactly one reviewable copy survives per duplicate cluster. Refuses to run (raises, not a silent under-hide) if `dedup_report.json`'s `images_checked` doesn't match `dataset/merged/`'s current real image count — the same staleness guard `split.py`'s own `load_duplicate_groups()` already uses, applied here for the same reason: hiding based on a stale report (e.g. one computed before this session's new sources merged in) could hide the wrong images or miss real ones.
+
+**Deliberately scoped to hiding from review, not physically removing anything.** No change to `merge.py`, `dedup.py`, or `split.py` — duplicates still physically exist in `dataset/processed/`/`dataset/merged/`/`dataset/final/` exactly as before; `split.py`'s existing union-find duplicate-grouping (keeping a whole cluster in one split) is unaffected and still needed regardless. This entry only changes what one review notebook *displays*, matching the student's own framing ("in fiftyone").
+
+### Rationale
+
+Verifying the cross-source claim against real report data rather than reasoning abstractly about whether it's *possible* follows this project's standing discipline — and it mattered here, since the answer (25% of exact-duplicate groups cross sources) is large enough to materially change how seriously the student should treat per-source-only review as insufficient. Scoping the fix to the review notebook's display logic (not the physical pipeline) keeps this change small and reversible, consistent with not pre-empting the larger "should duplicates be physically pruned somewhere" question the student hasn't decided yet — flagged as open, not resolved here.
+
+### Consequences
+
+- `hide_duplicates` has no usable effect yet — the only `dedup_report.json` on disk is the stale 2026-08-14 6,000-sample result, predating this week's changes entirely. It will raise (staleness guard) if turned on today. Real use requires a fresh `dedup.py` run against the current merged pool first (see DEC-089 for RunPod planning toward that).
+- Whether duplicates should ever be *physically* removed from the pipeline (not just hidden during manual review) remains an open, undecided question — `split.py`'s current design keeps every image, just groups duplicates to the same split. Not changed by this entry.
+- Syntax-verified (`ast.parse` on every code cell) since it couldn't be run for real against live data this session — no `dedup_report.json` exists yet that matches the current pool.
+
+---
+
 ## Template for Future Decisions
 
 ```markdown

@@ -91,7 +91,7 @@ The detection model provides **semantic object identification** that complements
 | 3 | Pole | Static obstacle | Utility poles as common street-level collision hazard |
 | 4 | Animals | Dynamic hazard | Unpredictable, low-level living obstacles |
 | 5 | Stairs | Elevation | 84% struggle with elevation changes |
-| 6 | Escalator | Elevation | Moving tread requires distinct interaction |
+| 6 | Shelf | Obstacle | Common mall/retail/grocery obstacle (aisle end-caps, protruding shelving) — replaces Escalator, DEC-083 |
 | 7 | Doors | Navigation | 84% struggle to locate exact doors |
 | 8 | Chairs | Waypoint | 84% struggle finding empty seating |
 | 9 | Tables | Obstacle + Navigation | 100% cite tables as path blockers |
