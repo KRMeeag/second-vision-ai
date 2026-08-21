@@ -37,6 +37,7 @@ dataset/processed/
 dataset/curated/
 dataset/merged/
 dataset/final/
+dataset/backups/
 
 # Keep folder structure
 !dataset/raw/.gitkeep

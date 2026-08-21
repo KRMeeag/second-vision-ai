@@ -58,7 +58,7 @@ The following **16 classes** (15 confirmed + 1 possible) define the canonical la
 | 3 | Pole | Utility poles as common street-level collision obstacles |
 | 4 | Animals | Unpredictable low-level living obstacles (dogs, cats) |
 | 5 | Stairs | Elevation change requiring rhythmic stepping preparation |
-| 6 | Escalator | Moving tread requiring timing and handrail location |
+| 6 | Shelf | Common mall/retail/grocery obstacle (aisle end-caps, protruding shelving) — replaces Escalator, DEC-083 |
 | 7 | Doors | Primary navigational anchor for room/building transitions |
 | 8 | Chairs | Targeted waypoint — finding empty seating |
 | 9 | Tables | Major routing obstacle and transaction counter locator |
