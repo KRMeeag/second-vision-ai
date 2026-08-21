@@ -43,6 +43,11 @@ cap_report.json's pre-merge estimates.
 Usage:
     python3 scripts/build/merge.py
     python3 scripts/build/merge.py --dry-run
+    python3 scripts/build/merge.py --cap-report dataset/reports/cap_report_hardcap9000.json
+
+--cap-report overrides which report gets merged (default: dataset/reports/cap_report.json,
+the canonical path). Used for merging a non-default --hard-cap preset, or a
+scripts/preprocess/combine_cap_reports.py union/intersect output -- see docs/RUNPOD_DEDUP_PLAN.md.
 """
 
 from __future__ import annotations
@@ -64,26 +69,109 @@ from scripts.utils.file_utils import (  # noqa: E402
 )
 
 
-def load_selected_union(cap_report_path: Path) -> set[tuple[str, str]]:
-    """Union of (source, filename) across every one of the 16 classes' capped selections."""
-    cap_report = json.loads(cap_report_path.read_text(encoding="utf-8"))
+def load_selected_union(cap_report: dict[str, Any]) -> set[tuple[str, str]]:
+    """
+    Union of (source, filename) across every one of the 16 classes' capped selections.
+    Takes an already-parsed report dict (not a path) so callers can validate/inspect
+    it once before this reads it -- used with cap_per_class.py's own output, or with
+    scripts/preprocess/combine_cap_reports.py's union/intersect output, which shares
+    the same {"classes": {<class>: {"selected": [...]}}} shape.
+    """
+    if "classes" not in cap_report:
+        raise ValueError(
+            "cap report has no top-level 'classes' key -- not a valid cap report (expected "
+            "cap_per_class.py's or combine_cap_reports.py's output shape)."
+        )
     union: set[tuple[str, str]] = set()
-    for entry in cap_report["classes"].values():
+    for class_name, entry in cap_report["classes"].items():
         for item in entry["selected"]:
+            if "/" not in item:
+                raise ValueError(
+                    f"class {class_name!r}'s 'selected' entry {item!r} has no '/' separator -- "
+                    f"expected '<source>/<filename>'."
+                )
             source, filename = item.split("/", 1)
             union.add((source, filename))
     return union
 
 
-def run(dry_run: bool = False) -> dict[str, Any]:
-    cap_report_path = reports_dir() / "cap_report.json"
+def load_excluded_pairs() -> set[tuple[str, str]]:
+    """
+    (source, filename) pairs the student tagged 'exclude' during review in
+    notebooks/fiftyone_review_processed.ipynb, read from every
+    dataset/reports/<source>_excluded.json (one per reviewed source, written
+    by that notebook's write-back cell). Each file carries its own "source"
+    field rather than being parsed from the filename, so naming stays
+    decoupled from this reader.
+
+    These images were already selected by cap_per_class.py's decision --
+    excluding them here does NOT reopen or re-run that selection (no
+    backfill of a replacement candidate for the class that loses a slot).
+    Simpler and safer than cascading a re-run of the seeded-random cap
+    selection just because one image got excluded; the affected class ends
+    up very slightly under its cap_report.json figure instead.
+
+    Bug fixed here (RunPod dedup plan, 2026-08-21): excluded_filenames entries
+    are label FILENAMES with the .txt extension (the notebook stores
+    sample["source_label_filename"], which includes it), but
+    load_selected_union()'s (source, filename) pairs are extension-less label
+    STEMS (cap_per_class.py builds "selected" from label_path.stem). Comparing
+    the two sets directly (as this function used to) meant the subtraction in
+    run() never matched anything -- every review-tagged exclusion was
+    silently ignored, for every source, always. Stripping the extension here
+    is what actually makes exclusions take effect.
+    """
+    excluded: set[tuple[str, str]] = set()
+    for path in reports_dir().glob("*_excluded.json"):
+        data = json.loads(path.read_text(encoding="utf-8"))
+        source = data["source"]
+        for filename in data["excluded_filenames"]:
+            excluded.add((source, Path(filename).stem))
+    return excluded
+
+
+def run(dry_run: bool = False, cap_report_path: Path | None = None) -> dict[str, Any]:
+    # Resolved relative to CWD, not silently reinterpreted against reports_dir() --
+    # an alternate report (e.g. cap_report_hardcap9000.json, or a
+    # combine_cap_reports.py union/intersect output) must resolve unambiguously,
+    # since this plan points merge.py at several different reports in sequence.
+    cap_report_path = (cap_report_path or reports_dir() / "cap_report.json").resolve()
+    print(f"Reading cap report from: {cap_report_path}")
     if not cap_report_path.is_file():
         raise FileNotFoundError(
-            f"{cap_report_path} not found — run scripts/preprocess/cap_per_class.py (Stage 5.4) first."
+            f"{cap_report_path} not found — run scripts/preprocess/cap_per_class.py (Stage 5.4) first, "
+            f"or check the path passed to --cap-report."
+        )
+    try:
+        cap_report = json.loads(cap_report_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as e:
+        raise ValueError(f"{cap_report_path} is not valid JSON: {e}") from e
+
+    cap_report_hard_cap_preset = cap_report.get("hard_cap_preset")
+    cap_report_combine_op = cap_report.get("combine_op")
+    if (
+        cap_report_path.name == "cap_report.json"
+        and cap_report_hard_cap_preset is not None
+        and cap_report_hard_cap_preset != 4500
+    ):
+        print(
+            f"  WARNING: {cap_report_path} has hard_cap_preset={cap_report_hard_cap_preset}, not the "
+            f"4500 its canonical filename implies -- was this file renamed/overwritten by hand?"
+        )
+    if cap_report_combine_op:
+        print(
+            f"  This is a combine_cap_reports.py {cap_report_combine_op!r} report, not a direct "
+            f"cap_per_class.py output."
         )
 
-    union = load_selected_union(cap_report_path)
+    union = load_selected_union(cap_report)
     print(f"{len(union)} unique (source, filename) pairs selected by Stage 5.4's cap decision.")
+
+    excluded = load_excluded_pairs() & union
+    if excluded:
+        union -= excluded
+        print(f"{len(excluded)} of those excluded via review (tagged 'exclude' in the notebook) -- "
+              f"{len(union)} remain.")
 
     per_source_counts: dict[str, int] = {}
     missing_images: list[str] = []
@@ -143,7 +231,11 @@ def run(dry_run: bool = False) -> dict[str, Any]:
         print(f"  WARNING: {len(missing_labels)} selected entries had no label file on disk (sample: {missing_labels[:5]})")
 
     stats: dict[str, Any] = {
+        "cap_report_path": str(cap_report_path),
+        "cap_report_hard_cap_preset": cap_report_hard_cap_preset,
+        "cap_report_combine_op": cap_report_combine_op,
         "selected_total": len(union),
+        "excluded_count": len(excluded),
         "merged_count": merged_count,
         "missing_images": missing_images,
         "missing_labels": missing_labels,
@@ -199,13 +291,19 @@ def run(dry_run: bool = False) -> dict[str, Any]:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dry-run", action="store_true", help="Tally without copying any files.")
+    parser.add_argument(
+        "--cap-report", type=Path, default=None, metavar="PATH", dest="cap_report",
+        help="Alternate cap report to merge (default: dataset/reports/cap_report.json). Must have "
+             "cap_per_class.py's {'classes': {<class>: {'selected': ['<source>/<stem>', ...]}}} "
+             "shape -- e.g. a --hard-cap 9000 preset report, or a combine_cap_reports.py output.",
+    )
     args = parser.parse_args()
 
     print("=" * 60)
     print("merge.py — Stage 5.6")
     print("=" * 60)
 
-    run(dry_run=args.dry_run)
+    run(dry_run=args.dry_run, cap_report_path=args.cap_report)
 
     if args.dry_run:
         print("\n--dry-run: no files copied.")

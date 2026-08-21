@@ -63,7 +63,7 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from scripts.utils.config_loader import get_canonical_names  # noqa: E402
-from scripts.utils.file_utils import ensure_dir, final_dir, merged_dir, reports_dir, safe_copy  # noqa: E402
+from scripts.utils.file_utils import ensure_dir, final_dir, list_images, merged_dir, reports_dir, safe_copy  # noqa: E402
 
 TRAIN_RATIO = 0.70
 VAL_RATIO = 0.15
@@ -71,22 +71,32 @@ TEST_RATIO = 0.15  # remainder, not independently applied — see assign_splits(
 SEED = 42
 
 
-def load_duplicate_groups(merged_image_count: int) -> list[list[str]] | None:
+def load_duplicate_groups(merged_image_count: int) -> tuple[list[list[str]], bool] | None:
     """
     Near/exact-duplicate groups (as merged-pool filenames) from dedup_report.json,
-    if it exists and its exact-duplicate check (the only one required to be
-    exhaustive) covers the full merged pool. Returns None if unavailable or only
-    a partial (smoke-test) run.
+    plus whether the near-duplicate check was a --full-scale run (True) or a
+    stratified sample (False) -- if the report exists and its exact-duplicate
+    check (the only one required to be exhaustive) covers the full merged pool.
+    Returns None if unavailable or only a partial (smoke-test) run.
 
     Coverage is NOT uniform between the two checks dedup.py (DEC-062) runs:
     exact-duplicates (filehash, no threshold) always covers the full pool, but
     near-duplicates (embedding-based) only covers a seeded stratified SAMPLE
-    (near_duplicate_sample_size, e.g. 6,000 of 51,529 images) — a measured,
-    documented scope bound, not an oversight (see dedup.py's module docstring
-    and docs/OPEN_QUESTIONS.md #7). The groups returned here still include both:
-    every near-duplicate group actually found is real and worth keeping intact,
-    even though the sample doesn't claim to have found every near-duplicate pair
-    that exists in the full pool.
+    (near_duplicate_sample_size, e.g. 6,000 of 51,529 images) UNLESS dedup.py was
+    run with --full-scale, in which case near_duplicate_sample_size equals
+    images_checked — a measured, documented scope bound, not an oversight (see
+    dedup.py's module docstring and docs/OPEN_QUESTIONS.md #7). The groups
+    returned here still include both: every near-duplicate group actually found
+    is real and worth keeping intact, even when the sample doesn't claim to have
+    found every near-duplicate pair that exists in the full pool.
+
+    images_checked > merged_image_count is a DELIBERATE, supported case (not just
+    tolerated) as of the RunPod union-coverage plan (docs/RUNPOD_DEDUP_PLAN.md):
+    dedup.py can be run once against a larger pool (e.g. the union of two
+    --hard-cap presets' selections) and the resulting report reused against a
+    smaller, currently-live pool -- every group member not present in the current
+    pool is filtered out below (assign_splits()'s `present = [f for f in group if
+    f in source_of]`), safely, no different from a group with zero absent members.
     """
     report_path = reports_dir() / "dedup_report.json"
     if not report_path.is_file():
@@ -102,19 +112,37 @@ def load_duplicate_groups(merged_image_count: int) -> list[list[str]] | None:
         )
         return None
 
+    if images_checked > merged_image_count:
+        print(
+            f"  NOTE: dedup_report.json covers {images_checked} images, a SUPERSET of the current "
+            f"{merged_image_count}-image merged pool ({images_checked - merged_image_count} report "
+            f"entries not present on disk will be filtered out below). Expected when reusing a dedup "
+            f"run made against a larger pool (docs/RUNPOD_DEDUP_PLAN.md) — not a bug."
+        )
+
     groups = []
     for g in report.get("exact_duplicates", []):
         groups.append([g["kept"]] + g["duplicates"])
     for g in report.get("near_duplicates", []):
         groups.append([g["kept"]] + [d["filename"] for d in g["duplicates"]])
     near_dup_sample_size = report.get("near_duplicate_sample_size", images_checked)
+    near_dup_full_scale = near_dup_sample_size >= images_checked
+    coverage_desc = (
+        f"covers the full pool ({images_checked}/{merged_image_count} images)"
+        if images_checked == merged_image_count
+        else f"covers {images_checked} images (a superset of the current {merged_image_count}-image pool)"
+    )
+    near_dup_desc = (
+        "its near-duplicate check covers the full pool too (--full-scale run)"
+        if near_dup_full_scale
+        else f"its near-duplicate check covers a {near_dup_sample_size}-image sample only "
+             f"(docs/OPEN_QUESTIONS.md #7)"
+    )
     print(
-        f"  dedup_report.json's exact-duplicate check covers the full pool "
-        f"({images_checked}/{merged_image_count} images); its near-duplicate check covers a "
-        f"{near_dup_sample_size}-image sample only (docs/OPEN_QUESTIONS.md #7) — "
+        f"  dedup_report.json's exact-duplicate check {coverage_desc}; {near_dup_desc} — "
         f"{len(groups)} duplicate groups found across both will be kept intact."
     )
-    return groups
+    return groups, near_dup_full_scale
 
 
 def assign_splits(filenames: list[str], duplicate_groups: list[list[str]] | None) -> dict[str, str]:
@@ -192,11 +220,18 @@ def run(dry_run: bool = False) -> dict[str, Any]:
     if not img_dir.is_dir():
         raise FileNotFoundError(f"{img_dir} not found — run scripts/build/merge.py (Stage 5.6) first.")
 
-    filenames = sorted(p.name for p in img_dir.iterdir() if p.is_file())
+    # list_images() (extension-filtered), not a bare iterdir() -- must match dedup.py's
+    # own counting method (list_images(..., recursive=False), same helper) exactly, or a
+    # single stray non-image file (e.g. .DS_Store, which already exists elsewhere under
+    # dataset/ on this machine) desyncs the two counts and silently flips the staleness
+    # gate below. See load_duplicate_groups()'s docstring for why that gate can have zero
+    # margin at some pool sizes.
+    filenames = sorted(p.name for p in list_images(img_dir, recursive=False))
     print(f"{len(filenames)} images in dataset/merged/images/ to split.")
 
     print("Checking for duplicate-group leakage prevention...")
-    duplicate_groups = load_duplicate_groups(len(filenames))
+    duplicate_result = load_duplicate_groups(len(filenames))
+    duplicate_groups, near_dup_full_scale = duplicate_result if duplicate_result is not None else (None, False)
 
     assignment = assign_splits(filenames, duplicate_groups)
 
@@ -237,9 +272,14 @@ def run(dry_run: bool = False) -> dict[str, Any]:
         "seed": SEED,
         "duplicate_aware": duplicate_groups is not None,
         "duplicate_group_coverage_note": (
-            "exact-duplicate groups cover the full merged pool; near-duplicate groups only "
-            "cover dedup_report.json's stratified sample (see docs/OPEN_QUESTIONS.md #7) — "
-            "groups outside the sample were never checked, not confirmed absent"
+            (
+                "exact-duplicate AND near-duplicate groups both cover the full merged pool "
+                "(dedup.py --full-scale run) — no sampling gap"
+            ) if near_dup_full_scale else (
+                "exact-duplicate groups cover the full merged pool; near-duplicate groups only "
+                "cover dedup_report.json's stratified sample (see docs/OPEN_QUESTIONS.md #7) — "
+                "groups outside the sample were never checked, not confirmed absent"
+            )
         ) if duplicate_groups is not None else None,
         "split_counts": split_counts,
         "cross_split_duplicate_leakage": leakage,
