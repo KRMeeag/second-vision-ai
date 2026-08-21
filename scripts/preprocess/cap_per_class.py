@@ -19,11 +19,13 @@ it's a real judgment call, not an obvious default:
      researched decision) — committing it to a physical file selection
      before the student has seen it would bake an unreviewed guess into
      the dataset layout.
-  2. scripts/build/merge.py (Stage 5.6), per this session's own build
-     scope, mechanically pools every dataset/processed/<source>/ into
-     dataset/merged/ — it does not consult this report. Stages 5.5 and
-     5.7 (mistakenness / final curation) are *also* report-only, flag-
-     for-human-review stages by explicit design (handoff §1: "no script
+  2. Stale as of a later scope correction (see merge.py's own module
+     docstring) — merge.py (Stage 5.6) DOES read dataset/reports/
+     cap_report.json and merges only its selected union, not a blind
+     pool of every dataset/processed/<source>/. The report-only design
+     here still stands on its own merits though: Stages 5.5 and 5.7
+     (mistakenness / final curation) are *also* report-only, flag-for-
+     human-review stages by explicit design (handoff §1: "no script
      eliminates" the human review step). Making 5.4 the one stage that
      silently, automatically applies its own decision to the physical
      file layout would break that symmetry and pre-empt review the other
@@ -42,23 +44,40 @@ Usage:
     python3 scripts/preprocess/cap_per_class.py --dry-run
     python3 scripts/preprocess/cap_per_class.py --hard-cap 1500
     python3 scripts/preprocess/cap_per_class.py --hard-cap 9000
+    python3 scripts/preprocess/cap_per_class.py --hard-cap 10000
 
---hard-cap selects one of three presets (default 4500, matching classes.yaml
-and every prior real run). floor is DERIVED from it as hard_cap // 3, per
-DEC-042's own stated ratio invariant (hard_cap = 3x floor) — there is no
-separate "floor preset" to pick independently. INSTANCE_TARGET is NOT scaled
-by this flag: DEC-042 already establishes it as an independently-chosen
-number, not formulaically tied to floor/cap (see the INSTANCE_TARGET comment
-below), so scaling it here would mean inventing a formula DEC-042 never
-specified. This is a real, currently-open gap (docs/OPEN_QUESTIONS.md) —
-flagged, not silently resolved.
+--hard-cap accepts any positive integer (default 4500, matching classes.yaml
+and every prior real run) — it is not restricted to a fixed preset list.
+HARD_CAP_PRESETS (1500, 4500, 9000) remain DEC-042's own policy-grounded
+floor/cap/instance-target reference points, kept below as documentation of
+those specific values, not as a validation whitelist. Any other value is a
+student-chosen operational target for a purpose outside DEC-042's own
+reasoning — e.g. 10000 (RunPod dedup plan, 2026-08-21: this round's single
+dedup-pool-sizing investment, 9000 cap + 1000 slack, see
+docs/RUNPOD_DEDUP_PLAN.md) or a future reviewed-subset size. NOTE: 10000 is
+also, separately and coincidentally, INSTANCE_TARGET's own value below — the
+two are unrelated concepts (this flag's per-class image ceiling vs. a fixed
+per-class instance ceiling) that just happen to share a number for this
+particular plan; verified directly against cap_class() that this causes no
+special-case behavior — remaining_image_budget and remaining_instance_budget
+are independent counters that diverge immediately once any candidate is
+selected, regardless of what they started at. floor is DERIVED from
+--hard-cap as hard_cap // 3, per DEC-042's own stated ratio invariant
+(hard_cap = 3x floor) — there is no separate "floor preset" to pick
+independently. INSTANCE_TARGET is NOT scaled by this flag: DEC-042 already
+establishes it as an independently-chosen number, not formulaically tied to
+floor/cap (see the INSTANCE_TARGET comment below), so scaling it here would
+mean inventing a formula DEC-042 never specified. This is a real, currently-
+open gap (docs/OPEN_QUESTIONS.md) — flagged, not silently resolved.
 
-The 4500 preset writes to the canonical dataset/reports/cap_report.json path
-that merge.py (Stage 5.6) reads unconditionally — running it reproduces the
-exact same file merge.py already expects. The 1500/9000 presets write to
-separate, non-clobbering report files (cap_report_hardcap<N>.json) since
-nothing downstream reads them yet; they exist for comparison/exploration,
-not for feeding the pipeline.
+The 4500 default writes to the canonical dataset/reports/cap_report.json
+path that merge.py (Stage 5.6) reads unconditionally — running it reproduces
+the exact same file merge.py already expects. Every other value, preset or
+not, writes to its own separate, non-clobbering report file
+(cap_report_hardcap<N>.json) since nothing downstream reads any of them
+unconditionally; they exist for comparison/exploration, or to be passed
+explicitly via merge.py --cap-report PATH, not for silently feeding the
+default pipeline.
 
 RESOLVED 2026-08-18 (was open in docs/OPEN_QUESTIONS.md #6): a class's first
 priority source could previously exhaust an entire shrunken hard_cap on its
@@ -87,10 +106,11 @@ from typing import Any
 # sys.path to import sibling utils regardless of how it's invoked.
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from scripts.utils.config_loader import get_canonical_names, load_classes  # noqa: E402
+from scripts.utils.config_loader import get_canonical_names, get_inactive_processed_source_keys, load_classes  # noqa: E402
 from scripts.utils.file_utils import discover_processed_sources, ensure_dir, processed_dir, reports_dir  # noqa: E402
 
-HARD_CAP_PRESETS = (1500, 4500, 9000)
+HARD_CAP_PRESETS = (1500, 4500, 9000)  # DEC-042's reference points only — documentation, not an
+# argparse whitelist; --hard-cap accepts any positive int (see module docstring).
 DEFAULT_HARD_CAP = 4500  # DEC-042's chosen value, matches classes.yaml's per-class `cap` field
 
 INSTANCE_TARGET = 10000  # DEC-042's "general" case. The "6000 for small/hard classes" refinement
@@ -110,26 +130,45 @@ SEED = 42  # documented default (docs/OPEN_QUESTIONS.md #6) — matches every ot
 # DEC-014's original guaranteed-floor rule, applied uniformly since it's a universal
 # low-light-diversity concern, not a per-class judgment call.
 #
-# The three overrides below (decided with the student, 2026-08-15, see docs/DECISIONS.md
-# DEC-067) each have a DIFFERENT reason for priority status — worth keeping straight:
-#   - Person: crowdhuman added as a SECOND floor, after exdark. Not an edge-case source —
-#     classes.yaml documents its role as "volume_topup" — but under pure random pooling it
-#     was being crowded out to 128 of 19,370 candidates once ExDark's floor (dense,
-#     low-light crowd scenes) ate 74.6% of the shared instance budget. Two floors, filled
-#     in order: exdark first (condition diversity, DEC-014's original priority), then
-#     crowdhuman (volume), then open_images fills whatever's left.
-#   - Vehicle: roboflow_me5_u6rvg added as a second floor, after exdark. This one IS an
-#     edge-case source — datasets.yaml explicitly notes its Jeepney/Tricycle/Ambulance
-#     content as "Philippine-context relevance." Same two-floors-in-order pattern.
-#   - Elevator: roboflow_elevator_awvus is the ONLY priority source (no exdark candidates
-#     exist for Elevator at all — outside ExDark's 7-class overlap, DEC-014). This is
-#     neither low-light nor edge-case: awvus has no Stage 5.3 flagged box-shape defects,
-#     elevator_status_s4lrk does (844 flagged boxes) — a quality preference, not a
-#     diversity or deployment-relevance one. Prioritizing the cleaner, smaller source
-#     over the larger, defect-flagged one.
+# Person/Vehicle/Motorcycle revised 2026-08-21 (DEC-087) — see docs/DECISIONS.md for the
+# full reasoning behind each; summary of what's current as of that entry:
+#   - Person: exdark (condition diversity, DEC-014's original priority) first, then
+#     roboflow_revised_pedestrian_obstacle (Philippine-context diversity — DEC-083 source),
+#     then crowdhuman (volume — kept on its own instance sub-budget below, position in
+#     this list doesn't affect that, it's a separate (class, source)-keyed lookup), then
+#     open_images LAST. open_images was initially left off this list as a pure-leftover
+#     "control group" pool per the student's framing, but real math showed the first 3
+#     sources alone already fill the 4,500 cap, squeezing it to 0 selected images —
+#     confirmed with the student this was unwanted, added explicitly instead so it gets
+#     a real equal-share floor (~375 images) rather than disappearing.
+#     elevator_status_0iq4p's small Person contribution (~300 images, the "People are in
+#     the elevator." remap, DEC-082) is deliberately NOT prioritized — student: "somewhat
+#     negligible... if it appears... so be it," unlike open_images this one really is
+#     meant to be pure leftover.
+#   - Vehicle: roboflow_dlsu_d_vehicle_type_detection first (the new largest, most
+#     Philippine-relevant source), then exdark, then roboflow_revised_pedestrian_obstacle,
+#     then open_images LAST — same "would otherwise be squeezed to 0" fix as Person, here
+#     particularly important since the student specifically wants open_images as the real
+#     source of sedan/SUV imagery (dlsu_d_vehicle_type_detection's native classes
+#     explicitly exclude those, DEC-083) — 0 images would have defeated that entirely.
+#     roboflow_me5_u6rvg REMOVED (benched, DEC-087 — never went through full
+#     fiftyone_review_processed.ipynb review, was still `[x]`/unreviewed on the review
+#     checklist; student's call to drop rather than review it).
+#   - Motorcycle: newly added as an explicit override (previously used the plain
+#     ["exdark"] default). roboflow_dlsu_d_vehicle_type_detection first, then exdark,
+#     then open_images LAST (same explicit-floor treatment, consistent with Person/
+#     Vehicle — the student's own phrasing named open_images as a third explicit step
+#     here too, not just leftover). Same me5_u6rvg removal as Vehicle (single global
+#     bench, not a per-class one — see datasets.yaml).
+#   - Elevator: unchanged from DEC-067 — roboflow_elevator_awvus is the ONLY priority
+#     source (no exdark candidates exist for Elevator at all — outside ExDark's 7-class
+#     overlap, DEC-014). Confirmed clean via direct visual sampling (DEC-082) despite an
+#     outdated `[x]` mark still sitting in the review checklist as of DEC-087 — see that
+#     entry for why it's being kept active despite the stale mark.
 CLASS_PRIORITY_SOURCES: dict[str, list[str]] = {
-    "Person": ["exdark", "crowdhuman"],
-    "Vehicle": ["exdark", "roboflow_me5_u6rvg"],
+    "Person": ["exdark", "roboflow_revised_pedestrian_obstacle", "crowdhuman", "open_images"],
+    "Vehicle": ["roboflow_dlsu_d_vehicle_type_detection", "exdark", "roboflow_revised_pedestrian_obstacle", "open_images"],
+    "Motorcycle": ["roboflow_dlsu_d_vehicle_type_detection", "exdark", "open_images"],
     "Elevator": ["roboflow_elevator_awvus"],
 }
 
@@ -354,6 +393,18 @@ def run(dry_run: bool = False, hard_cap_preset: int = DEFAULT_HARD_CAP) -> dict[
     id_to_cap = {entry["id"]: entry["cap"] for entry in load_classes()["classes"].values()}
     sources = discover_processed_sources()
 
+    # DEC-086: exclude sources marked failed/benched/blocked *after* they were
+    # already pulled and converted — discover_processed_sources() alone has no
+    # audit_status awareness, so without this a benched/failed source's stale
+    # dataset/processed/ data would silently re-enter the candidate pool.
+    inactive = get_inactive_processed_source_keys()
+    excluded_present = sorted(s for s in sources if s in inactive)
+    if excluded_present:
+        print(f"Excluding {len(excluded_present)} benched/failed/blocked source(s) with existing processed data:")
+        for s in excluded_present:
+            print(f"    {s}")
+        sources = [s for s in sources if s not in inactive]
+
     floor = hard_cap_preset // 3  # DEC-042's ratio invariant: hard_cap = 3x floor
     print(f"Scanning {len(sources)} processed sources for per-class candidate pools...")
     print(f"hard_cap preset: {hard_cap_preset}  (derived floor: {floor})")
@@ -443,11 +494,14 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dry-run", action="store_true", help="Print without writing the report.")
     parser.add_argument(
-        "--hard-cap", type=int, default=DEFAULT_HARD_CAP, choices=HARD_CAP_PRESETS,
-        help=f"Per-class image hard cap preset (default {DEFAULT_HARD_CAP}, matches classes.yaml). "
-             f"floor is derived as hard_cap // 3 per DEC-042's ratio invariant.",
+        "--hard-cap", type=int, default=DEFAULT_HARD_CAP,
+        help=f"Per-class image hard cap (default {DEFAULT_HARD_CAP}, matches classes.yaml). "
+             f"Any positive integer is accepted, not just {HARD_CAP_PRESETS} — see module "
+             f"docstring. floor is derived as hard_cap // 3 per DEC-042's ratio invariant.",
     )
     args = parser.parse_args()
+    if args.hard_cap <= 0:
+        parser.error("--hard-cap must be a positive integer")
 
     print("=" * 60)
     print("cap_per_class.py — Stage 5.4")

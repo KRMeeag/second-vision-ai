@@ -58,12 +58,18 @@ embedding-based check is sampled.
 Usage:
     python3 scripts/preprocess/dedup.py
     python3 scripts/preprocess/dedup.py --dry-run
-    python3 scripts/preprocess/dedup.py --limit 500   # smoke test (both checks)
+    python3 scripts/preprocess/dedup.py --limit 500   # smoke test (both checks) -- writes
+                                                        # dedup_report_limit500.json, NOT the
+                                                        # canonical path, so a smoke test can
+                                                        # never be mistaken for a real run.
     python3 scripts/preprocess/dedup.py --full-scale  # near-duplicate check over the WHOLE
-                                                        # merged pool, not the 6000-sample —
-                                                        # student's explicit call (2026-08-18):
-                                                        # run it locally, accept 1hr+, don't
-                                                        # defer to RunPod for this one.
+                                                        # merged pool, not the 6000-sample.
+    python3 scripts/preprocess/dedup.py --full-scale --num-workers 16  # RunPod-style run;
+                                                        # EMBEDDING_NUM_WORKERS=4 is tuned for
+                                                        # this machine's MPS device specifically,
+                                                        # sweep --num-workers on a CUDA host
+                                                        # instead of assuming it's still optimal
+                                                        # (see docs/RUNPOD_DEDUP_PLAN.md).
 """
 
 from __future__ import annotations
@@ -85,7 +91,10 @@ from scripts.utils.file_utils import ensure_dir, list_images, merged_dir, report
 NEAR_DUPLICATE_THRESHOLD = 0.2  # FiftyOne Brain's own default — see module docstring
 NEAR_DUP_SAMPLE_SIZE = 6000  # practical bound — see module docstring
 NEAR_DUP_SEED = 42
-EMBEDDING_NUM_WORKERS = 4  # pinned — FiftyOne's own default over-subscribes this machine's MPS device
+EMBEDDING_NUM_WORKERS = 4  # default -- FiftyOne's own default over-subscribes this machine's MPS
+# device (see module docstring). CUDA-irrelevant tuning; override via --num-workers on a
+# different host rather than editing this constant, so the value actually used is recorded
+# in the report (embedding_num_workers) instead of silently drifting from what's on disk.
 
 
 def stratified_sample(images: list[Path], sample_size: int) -> list[Path]:
@@ -107,7 +116,12 @@ def stratified_sample(images: list[Path], sample_size: int) -> list[Path]:
     return sampled
 
 
-def run(dry_run: bool = False, limit: int | None = None, full_scale: bool = False) -> dict[str, Any]:
+def run(
+    dry_run: bool = False,
+    limit: int | None = None,
+    full_scale: bool = False,
+    num_workers: int = EMBEDDING_NUM_WORKERS,
+) -> dict[str, Any]:
     img_dir = merged_dir() / "images"
     if not img_dir.is_dir():
         raise FileNotFoundError(f"{img_dir} not found — run scripts/build/merge.py (Stage 5.6) first.")
@@ -154,8 +168,9 @@ def run(dry_run: bool = False, limit: int | None = None, full_scale: bool = Fals
         sample_ids = dataset.add_samples([fo.Sample(filepath=str(p)) for p in images])
         id_to_name = dict(zip(sample_ids, (p.name for p in images)))
 
-        print("Running compute_exact_duplicates (filehash, no threshold, full pool)...")
-        exact_groups = fob.compute_exact_duplicates(dataset)
+        print(f"Running compute_exact_duplicates (filehash, no threshold, full pool, "
+              f"num_workers={num_workers})...")
+        exact_groups = fob.compute_exact_duplicates(dataset, num_workers=num_workers)
         # .get(id, id) fallback, not a bare [id] lookup — matches the near-duplicate
         # report below; both should degrade the same way if FiftyOne ever returns an
         # id outside id_to_name, rather than one path crashing and the other not.
@@ -174,11 +189,11 @@ def run(dry_run: bool = False, limit: int | None = None, full_scale: bool = Fals
         embedding_model = foz.load_zoo_model("mobilenet-v2-imagenet-torch", device=device)
         print(f"Running compute_near_duplicates on the {len(near_dup_images)}-image sample "
               f"(threshold={NEAR_DUPLICATE_THRESHOLD}, FiftyOne Brain default threshold; "
-              f"mobilenet-v2-imagenet-torch embeddings on {device}, num_workers={EMBEDDING_NUM_WORKERS} — "
+              f"mobilenet-v2-imagenet-torch embeddings on {device}, num_workers={num_workers} — "
               f"see module docstring)...")
         near_results = fob.compute_near_duplicates(
             near_dataset, threshold=NEAR_DUPLICATE_THRESHOLD, model=embedding_model,
-            num_workers=EMBEDDING_NUM_WORKERS,
+            num_workers=num_workers,
         )
         neighbors_map = near_results.neighbors_map
         near_report = []
@@ -229,10 +244,17 @@ def run(dry_run: bool = False, limit: int | None = None, full_scale: bool = Fals
         "near_duplicate_files": near_duplicate_count,
         "near_duplicate_groups": len(near_report),
         "near_duplicates": near_report,
+        "embedding_num_workers": num_workers,
     }
 
     ensure_dir(reports_dir())
-    report_path = reports_dir() / "dedup_report.json"
+    # --limit runs never overwrite the canonical report -- same non-clobbering pattern
+    # cap_per_class.py already uses for its non-default --hard-cap presets (DEC-068,
+    # itself avoiding a repeat of DEC-066's dedup_report.json overwrite mistake). Matters
+    # most for RunPod smoke-testing (docs/RUNPOD_DEDUP_PLAN.md): repeated --limit sweeps
+    # on a box that will otherwise have no record of which report is "real."
+    report_filename = "dedup_report.json" if limit is None else f"dedup_report_limit{limit}.json"
+    report_path = reports_dir() / report_filename
     with report_path.open("w", encoding="utf-8") as fh:
         json.dump(report, fh, indent=2)
     print(f"\nReport written to {report_path}")
@@ -249,13 +271,19 @@ def main() -> None:
         help="Run the near-duplicate embedding check over the whole merged pool instead of the "
              f"{NEAR_DUP_SAMPLE_SIZE}-image sample. Slower (1hr+ plausible locally) — deliberate, not a default.",
     )
+    parser.add_argument(
+        "--num-workers", type=int, default=EMBEDDING_NUM_WORKERS, dest="num_workers",
+        help=f"DataLoader worker processes for the embedding pass (default {EMBEDDING_NUM_WORKERS}, "
+             f"tuned for this machine's MPS device — likely worth raising on a CUDA host; sweep it "
+             f"during a RunPod smoke test rather than assuming, see docs/RUNPOD_DEDUP_PLAN.md).",
+    )
     args = parser.parse_args()
 
     print("=" * 60)
     print("dedup.py — Stage 5.6")
     print("=" * 60)
 
-    run(dry_run=args.dry_run, limit=args.limit, full_scale=args.full_scale)
+    run(dry_run=args.dry_run, limit=args.limit, full_scale=args.full_scale, num_workers=args.num_workers)
 
     if args.dry_run:
         print("\n--dry-run: no dedup computation run, no report written.")
