@@ -567,6 +567,41 @@ roboflow_projects:
       source already goes through (exclude-tag workflow, DEC-078), not
       silently trusted as pure car/truck content.
 
+  crosswalk_detector_lz3hc:
+    canonical_class: pedestrian_lane
+    original_url: "https://universe.roboflow.com/kenth/crosswalk-detector-lz3hc"
+    forked_from_url: "https://universe.roboflow.com/insu-park/crosswalk-detector"
+    pinned_version: 1  # only version -- student-forked and generated with
+    # augmentation/preprocessing both explicitly empty (SDK generate_version()),
+    # verified 202 images post-generation, matching the forked-from project's
+    # real (non-augmented) base count exactly -- not one of that project's own
+    # v2 (1,081 img, ~5.35x) / v3 (484 img, ~2.4x) augmented exports.
+    download_format: yolov8
+    audit_status: pending
+    license: "CC BY 4.0"  # from the real downloaded data.yaml's roboflow.license field, 2026-08-24
+    native_class_filter:
+      pedestrian_lane: "crosswalk"
+    audit_note: >
+      Student-sourced 2026-08-24, added specifically to close Pedestrian
+      Lane's post-dedup shortfall (DEC-089's real full-scale dedup run
+      left Pedestrian Lane at 1,362 images, below the project's 1,500
+      floor). SDK-checked: single native class "crosswalk" (269
+      instances across 202 images), public project.
+
+      DELIBERATE, ACCEPTED COVERAGE GAP: this source has NOT been
+      checked for near-duplicates against the existing 66,907-image
+      deduped pool -- that would require re-running the GPU embedding
+      check dedup.py did on RunPod (DEC-089), which the student
+      explicitly does not want to repeat for one small addition. It
+      WILL be checked for exact (byte-identical) duplicates via a
+      cheap, GPU-free filehash extension before merging, and the
+      student is manually reviewing all 202 images by hand as the real
+      safeguard against near-duplicates specifically. See DEC-089's
+      `near_duplicate_covered_source_keys` field in
+      dataset/reports/dedup_report.json for the exact source list that
+      DOES have real near-duplicate coverage -- this source is
+      intentionally not in it.
+
   # --- Tricycle (2 sources) ---
   augmented_tricycle:
     canonical_class: tricycle
