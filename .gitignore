@@ -99,3 +99,9 @@ models/archived/
 # ==========================
 
 content/
+
+# ==========================
+# Ephemeral local scripts
+# ==========================
+
+runpod_dedup_wizard.sh
