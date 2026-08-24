@@ -2787,6 +2787,87 @@ Verifying the cross-source claim against real report data rather than reasoning 
 
 ---
 
+## DEC-089: RunPod Full-Scale Dedup Executed for Real — 66,907-Image Pool, Real Results, and the Operational Lessons From Actually Running It
+
+- **Date:** 2026-08-22
+- **Status:** Accepted
+- **Related:** DEC-062 (dedup.py's original design), DEC-068/069 (`--hard-cap` presets), DEC-072 (killed local full-scale attempt, the reason this moved to RunPod), DEC-088 (`hide_duplicates`, which this unblocks), `docs/RUNPOD_DEDUP_PLAN.md` ("RunPod execution specifics" section — reference for upload/smoke-test approach; its Phase 1-3 union-of-4500/9000 sequence was superseded before this run by a single flat `hard_cap=10000` selection, already reflected in that doc)
+
+### Context
+
+The 66,907-image `dataset/merged/` pool (built from `cap_report_hardcap10000.json`, hard_cap=10000 = 9000 real cap + 1000 slack, per the student's "one dedup investment, ever" design) needed a real GPU dedup run — the only report on disk was a stale 2026-08-14, 6,000-image local sample predating this week's fixes entirely. This entry records the run actually happening, plus the real operational friction hitting nearly every step, since several of these are non-obvious and worth not rediscovering next time a pod gets provisioned for this project.
+
+### Decision
+
+**Ran to completion.** `dedup.py --full-scale --num-workers 16` on a RunPod pod, executed via a purpose-built local wizard script (`runpod_dedup_wizard.sh`, gitignored, not committed — ephemeral by design per the mattpocock wizard skill). Real results, verified against the live pool before trusting them:
+
+- `images_checked: 66907`, `near_duplicate_sample_size: 66907` — true full-scale, zero sampling on either check, confirmed equal to the real merged-pool count before download.
+- `exact_duplicate_groups: 22`, `exact_duplicate_files: 23` — small, as expected for filehash-exact matches across independently-sourced data.
+- `near_duplicate_groups: 5868`, `near_duplicate_files: 12692` (~19% of the pool) — high but plausible given several sources are video-frame-derived or augmented; full coverage was confirmed, so this reflects the data's actual near-duplicate density, not an under-thorough run.
+- `near_duplicate_threshold: 0.2` — unchanged from FiftyOne Brain's own default. **Left explicitly uncalibrated for this run**: the report's own `near_duplicate_threshold_source` field notes the `[0.1, 0.25]` guidance may be tuned for FiftyOne's default embedding model, not `mobilenet-v2-imagenet-torch` (used here for ~9x measured speed). Not resolved by this run — a local, GPU-free visual spot-check of a few groups is the recommended next step before treating 0.2 as validated.
+- GPU: **RTX A6000** substituted for the originally-planned RTX 3090 — 3090 stock disappeared from the marketplace between planning and deployment (normal churn, not scarcity specific to this project). A6000 met the same sizing bar (8 vCPU / 50GB RAM / 48GB VRAM) at a comparable $0.53/hr.
+- `--num-workers`: swept empirically (8/16/32/48/64 at `--limit 2000`) rather than assumed from vCPU count (pod had 96 vCPUs, misleadingly suggesting "higher is better"). **16 won clearly** (22.7 samples/s on the embeddings pass, the peak of the sweep) — throughput *degraded* monotonically past that point (32→16.8, 48→12.5, 64→8.5 samples/s). This reproduces, on CUDA, the same DataLoader-worker-oversubscription regression `dedup.py`'s own docstring already documented for MPS — confirms it's structural (single-GPU-bound embedding pass, workers only prefetch) rather than an MPS-specific quirk.
+- **Region**: the plan's original EU-only constraint (driven by 3090 stock at the time) was explicitly dropped mid-session in favor of "whatever datacenter has both storage capacity and a suitable GPU right now" — repeated capacity/storage-cluster errors made strict region-pinning counterproductive given no correctness dependency on region, only upload latency.
+- **Network Volume: considered and rejected for this run.** ~$3.50 upfront for 50GB, and volume-compatible datacenters had materially worse/pricier GPU selection (mostly no 3090, cheaper options limited). Dedup is explicitly one-time (student's standing "no intentions to rerun" position); a volume's value is surviving Stop across *many* sessions, which doesn't apply here. Deferred to the training phase instead, which genuinely will span multiple sessions.
+
+**Real incidents hit during execution, and the fixes now baked into the wizard** (useful precedent for the next RunPod session, training or otherwise):
+- SSH key auth failed (`password:` prompt) because the account's SSH public key was added to RunPod Settings *after* the first pod was already deployed — RunPod bakes account keys in at pod boot, not retroactively. Fix: register the key before deploying, or redeploy after registering.
+- `tar`-over-SSH from macOS to the pod produced per-file `Cannot change ownership to uid 501, gid 50: Operation not permitted` plus AppleDouble (`._*`) sidecar-file warnings — cosmetic but overwhelming at 66,907 files, and the `._*` files are real files on the pod that `list_images()`'s `Path.glob()` does **not** skip (verified directly: unlike shell globbing, `pathlib.Path.glob("*")` matches dot-prefixed names), so they'd have polluted `dedup.py`'s pool count if left in place.
+- **Upload mechanism switched from `tar` to `rsync`** (`-a --no-owner --no-group --partial`) mid-session specifically for resumability, after a Stop-triggered GPU reclaim (below) made "redo the whole multi-GB upload" a real, repeated cost rather than a hypothetical. `rsync` also sidesteps the AppleDouble problem entirely (doesn't create sidecar files). One sharp edge: `rsync`'s receiver does **not** create multiple missing parent directory levels the way `tar` extraction implicitly does — the wizard now runs `mkdir -p` on the full destination path before invoking `rsync`, after hitting exactly this failure once.
+- Pod's Python was PEP 668 "externally-managed-environment" (Debian/Ubuntu 3.12) — bare `pip install fiftyone` refused; fixed with `--break-system-packages`, judged safe/appropriate for a disposable single-purpose container rather than setting up a venv (which would've meant threading activation through every later remote command).
+- `time python3 ...` failed remotely (`bash: line 1: time: command not found`) because a preceding `VAR=value` prefix on the same command strips `time`'s bash-reserved-word status, making bash search for a literal `/usr/bin/time` binary that doesn't exist on a minimal pod image. Fixed by wrapping `time` around the *local* `ssh` invocation instead of embedding it in the remote command string — measures the same wall-clock duration without depending on anything installed on the pod.
+- **A Stopped pod's GPU got reclaimed overnight** ("Your Pod's GPUs are no longer available" — Community Cloud doesn't guarantee a Stopped pod's physical GPU stays reserved). RunPod's "Automatically migrate" option reported no instances available even though the Deploy tab showed 3090 stock elsewhere — migrate is scoped to the pod's existing storage cluster/datacenter, not the general marketplace. No data was actually lost (the pod was still mid-upload; the source images live locally regardless), but recovering cost close to a full calendar day. **Operating rule adopted for the rest of this run**: keep the pod *Running* continuously through upload → smoke tests → real run → download rather than Stopping between steps — Stop is what exposes the reclaim risk, a Running (even idle) pod keeps its GPU allocated.
+- Post-run, the pod was deliberately **kept Running (not Stopped, not Terminated)** as time-boxed insurance against needing a fast re-run (e.g. if the threshold spot-check above finds 0.2 is miscalibrated) without repaying the multi-hour upload cost — explicit tradeoff given the real ~8-hour cost of this run (dominated by upload, not GPU compute) against the ~$0.53/hr idle cost of leaving it up. To be terminated once the threshold spot-check is done and the report is judged satisfactory, not left open-ended.
+
+### Rationale
+
+Recording the operational incidents alongside the results, not just the final numbers, matches this project's standing discipline of writing down *why*, not just *what* — several of these (the `Path.glob()` dotfile behavior, `rsync`'s parent-directory requirement, `time`'s reserved-word interaction with `VAR=value` prefixes, Stop-vs-Terminate's real reclaim risk) are non-obvious enough that re-deriving them from scratch next time would cost real hours again. The GPU/region substitutions were driven by live marketplace conditions, not a change in the underlying sizing logic (`docs/RUNPOD_DEDUP_PLAN.md`'s vCPU/RAM-over-GPU-tier reasoning held throughout and picked correct replacements both times).
+
+### Consequences
+
+- `dataset/reports/dedup_report.json` is now real and current — `hide_duplicates` in `fiftyone_review_processed.ipynb` (DEC-088) is unblocked; its staleness guard will pass.
+- The near-duplicate threshold (0.2) remains an open, unverified calibration question — flagged, not resolved. A local visual spot-check (no GPU needed) is the recommended next action before the next session treats this report as fully validated.
+- `runpod_dedup_wizard.sh` is gitignored and not part of the repo's tracked history by design (ephemeral per its originating skill) — the operational lessons above are captured here specifically so they aren't lost along with the script.
+- Per the original session scope, this entry closes out "get a verified real dedup report" — capping back to 5,500, the post-dedup review pass, and designing "exclude then trim" remain explicitly next-session work.
+
+---
+
+## DEC-090: Near-Duplicate Threshold Reviewed and Accepted; Pedestrian Lane's Post-Dedup Floor Shortfall Closed With a New Source, Added Without Re-Running GPU Dedup
+
+- **Date:** 2026-08-24
+- **Status:** Accepted
+- **Related:** DEC-089 (the real dedup run this reviews/extends), DEC-062 (dedup.py's original exact/near coverage asymmetry design, which is what made this possible without new guard code), DEC-082 (the exclude-tag precedent for defective-box sources, applied again here)
+
+### Context
+
+DEC-089 flagged the 0.2 near-duplicate threshold as unverified for the `mobilenet-v2-imagenet-torch` embedding space, and left Pedestrian Lane's real post-dedup count at risk relative to the student's floor policy. Both needed resolving before the next session's cap-to-5,500 work could proceed on solid ground.
+
+### Decision
+
+**Near-duplicate threshold: reviewed and accepted, not retuned.** Built `notebooks/fiftyone_near_dup_inspection.ipynb` (split out from `fiftyone_review_processed.ipynb` to keep concerns separate) — loads every near-duplicate group, supports individual and bulk-by-source `false_positive` tagging, exports findings to `dataset/reports/near_duplicate_false_positives.json`. Confirmed a real FiftyOne Brain caveat concretely (not just from documentation): exported `distance` values can be up to 8.10, far past the 0.2 cutoff, because `neighbors_map` reports distance to a different surviving neighbor than the one that triggered the original flag — group membership stays trustworthy, the distance number doesn't. Student tagged 2,852 false positives (individual + bulk-by-source, notably all of `exdark`/`open_images`'s flagged duplicates). **Student's own empirical finding, worth preserving**: false-positive-ness consolidates cleanly by source — a source's flagged near-duplicates are either mostly genuine or mostly false positives, rarely a real mix — which is what made a 2,852-image review tractable by hand. Student is satisfied with this as the final word on the threshold for this dedup pool; not revisiting further.
+
+**Potholes' 68.9% dedup impact (DEC-089) resolved as expected via this review**: concentrated almost entirely in `roboflow_pothole_voxrl` (94.7% flagged, likely embedding-collision from narrow subject matter — pothole photos are visually similar as a category, not necessarily near-duplicates of each other). Post-correction: Potholes recovered to 1,684 images (safely above the 1,500 floor). Doors/Elevator/Stairs remained heavily impacted after the same review effort — treated as more likely genuine duplication (video-frame-derived sources), not pursued further since all three sit above 1,500 regardless (student's explicit policy: "as long as its above 1500 images it doesn't matter if even 90% of the images are cut").
+
+**Pedestrian Lane did not clear the floor from review alone** (1,362 post-correction) — closed by adding a new source, `roboflow_crosswalk_detector_lz3hc` (202 images, single `crosswalk`→Pedestrian Lane class, CC BY 4.0, student-forked from `insu-park/crosswalk-detector` and regenerated with augmentation explicitly disabled — the original project's only two versions were 2.4x/5.35x augmented, would have reintroduced exactly the duplication problem being solved). Added via `config/datasets.yaml`, acquired, converted (269 boxes, 0 dropped).
+
+**Added without re-running GPU dedup**, by design, not by skipping the check: built `scripts/preprocess/dedup_extend_exact.py`, which extends only exact-duplicate coverage (cheap, filehash-based, CPU-only, idempotent) for a newly-added source against the live merged pool — run for real, 0 matches found. `images_checked` grew honestly to 67,109; `near_duplicate_sample_size` and the new `near_duplicate_covered_source_keys` field (the 16 sources with real GPU near-dup coverage, captured from the live pool before this addition, while still knowable) were deliberately left untouched, so the new source's lack of near-duplicate coverage stays an honest, visible gap rather than an implicit assumption. **Verified directly, not just reasoned about**: `split.py`'s and `hide_duplicates`' existing staleness guards (DEC-062/088) both pass cleanly against the new 67,109-image state with zero code changes — both guards only ever gated on `images_checked` vs. live pool size, an asymmetry the pipeline was already designed to tolerate for the unrelated original reason of local-run near-dup sampling. `cap_per_class.py --hard-cap 10000` and `merge.py` re-run for real; `dataset/merged/` now 67,109 images, verified on disk.
+
+**Real defect found during the new source's manual review, not yet fully resolved**: some of the 202 images are portrait content stored as a landscape pixel grid with no EXIF orientation data, so their boxes (correct for the intended orientation) land in the wrong place relative to the raw file as exported. Confirmed concretely for one sample (visual inspection + box-position cross-check). An automated detection heuristic (boxes anchored at the left edge) was tried and rejected — too many false positives from legitimate edge-touching compositions in web-sourced photos; this needs human eyes, same as the false-positive review did. Resolution: handle via the same `exclude` tag workflow already established for defective-box sources (DEC-082), not a geometric fix. **Review deliberately left unfinished** — student is doing it by hand, and is intentionally deferring full completion until after the next session's cap-to-5,500 step narrows down what actually needs reviewing (same review-efficiency logic as DEC-088).
+
+**Reversibility**: full backup of everything this changed sits at `dataset/backups/pre_crosswalk_add_20260824_190458/` (`cap_report_hardcap10000.json`, `dedup_report.json`, `config/datasets.yaml`, `config/classes.yaml`). `dataset/merged/` itself was not separately backed up — `merge.py`'s destructive-rebuild design means it's already fully reproducible from the backed-up cap report.
+
+### Rationale
+
+Both problems (threshold calibration, floor shortfall) were solved without touching the RunPod GPU investment DEC-089 was built to be one-time — the threshold via human review with tooling, the floor via a source addition whose duplicate-coverage gap is tracked honestly rather than assumed away. Verifying the staleness guards actually passed (not just arguing they should) matches this project's standing discipline of confirming against real execution before trusting a design.
+
+### Consequences
+
+- `roboflow_crosswalk_detector_lz3hc`'s box-orientation cleanup is real, open, unfinished work — not to be assumed done by a future session reading only this entry.
+- `near_duplicate_covered_source_keys` in `dataset/reports/dedup_report.json` is now the authoritative record of which sources have real GPU near-dup coverage; any future source added the same way (`dedup_extend_exact.py`) should leave it untouched, same pattern.
+- Next session's cap-to-5,500 work picks up the new 67,109-image pool automatically — no special-casing needed, `crosswalk_detector_lz3hc` is just another eligible candidate in `cap_per_class.py`'s pool now.
+
+---
+
 ## Template for Future Decisions
 
 ```markdown
