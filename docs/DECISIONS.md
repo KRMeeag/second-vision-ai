@@ -46,6 +46,16 @@ Maintain **two separate repositories**:
 - **Monorepo**: Rejected — dependency conflicts and unclear responsibility boundaries
 - **Three repos** (data, training, production): Rejected — over-segmentation for a thesis project
 
+**A composite object gets boxed by its PARTS, and no IoU threshold can see that.** A Philippine tricycle is a motorcycle plus a sidecar cabin, so `yolov8n` boxes one half of it — a strict subset of the `Tricycle` box, scoring low IoU and passing untouched.
+
+Three successive attempts to threshold this all failed, and the failure is instructive. IoU >= 0.5 left 685 of `roitrikee`'s 1,207 alias-eligible predictions overlapping a tricycle. Adding an 80%-containment test caught 241 more and still left 190. Measured across every band, the survivors were spread **26 / 36 / 20 / 23 / 12 / 19 / 18** from containment 0.1 to 0.8 — flat, no valley anywhere, unlike the clean bimodal split same-class matching enjoys. Every candidate cutoff both left overlaps behind and started eating real objects.
+
+The clean question is not *how much* they overlap but *whether* they do: **190** of the 444 survivors touched a Tricycle box, **254** touched none. On a source labelling only `Tricycle`, an alias-class box overlapping a tricycle is a mis-parse of that tricycle; one touching no tricycle is a separate object. That split needs no threshold and leaves nothing behind — verified at 0 remaining overlaps, with all 867 `Person` predictions untouched.
+
+Note this made the containment helper dead code: **containment > 0 and IoU > 0 are the same predicate**, since both reduce to a non-empty intersection. The implementation is one `_iou` call, not two metrics.
+
+**Which sources aliases may run on is computed, not configured.** Aliases are enabled for a composite class only when the dataset's own `ground_truth` contains none of its alias classes. `dlsu_d_vehicle_type_detection` labels `Motorcycle` (426) and `Vehicle` (426) alongside `Tricycle`, with **112 + 30** of those real boxes inside a Tricycle box — an any-overlap rule there would be actively destructive, and it switches itself off. `roitrikee` and `augmented_tricycle` label only `Tricycle`, so it switches on. A hand-kept source list would have had to be right about this and would go stale as sources are reviewed.
+
 ### Consequences
 
 - The handoff artifact between repos is clearly defined: ONNX model files
@@ -2865,6 +2875,544 @@ Both problems (threshold calibration, floor shortfall) were solved without touch
 - `roboflow_crosswalk_detector_lz3hc`'s box-orientation cleanup is real, open, unfinished work — not to be assumed done by a future session reading only this entry.
 - `near_duplicate_covered_source_keys` in `dataset/reports/dedup_report.json` is now the authoritative record of which sources have real GPU near-dup coverage; any future source added the same way (`dedup_extend_exact.py`) should leave it untouched, same pattern.
 - Next session's cap-to-5,500 work picks up the new 67,109-image pool automatically — no special-casing needed, `crosswalk_detector_lz3hc` is just another eligible candidate in `cap_per_class.py`'s pool now.
+
+---
+
+## DEC-091: Fresh 5,500-Cap Selection Run and Verified as a True Subset of the 10,000 Selection
+
+- **Date:** 2026-08-24
+- **Status:** Accepted
+- **Related:** DEC-090 (the 67,109-image pool this reads from), DEC-042 (hard_cap/floor/ratio-invariant policy this run reports against)
+
+### Context
+
+DEC-090 left the fresh `cap_per_class.py --hard-cap 5500` run and its subset-verification as explicitly next-session work — the review slice can't safely be treated as a prefix of the 10,000 selection without re-running the actual selection logic, since a raw slice could disregard `CLASS_PRIORITY_SOURCES` and starve later-priority sources.
+
+### Decision
+
+Ran `python3 scripts/preprocess/cap_per_class.py --hard-cap 5500` against the current 67,109-image `dataset/processed/` pool (9 benched/failed sources correctly excluded via `get_inactive_processed_source_keys()`, DEC-086). Wrote `dataset/reports/cap_report_hardcap5500.json`. **Verified directly** (not assumed): for every one of the 16 classes, every `(source, filename)` pair in the 5,500 selection is also present in `dataset/reports/cap_report_hardcap10000.json`'s selection — the true-subset property holds under the current config, same as the earlier (now-stale) verification found for an older config.
+
+All 202 `roboflow_crosswalk_detector_lz3hc` images made it into Pedestrian Lane's 5,500 selection (source pool small enough to be fully claimed) — the upcoming review pass will see the complete crosswalk source, not a partial slice, so finishing its exclude-tagging (deferred from DEC-090) covers everything relevant.
+
+Two things this run surfaces, not new problems but worth recording as visible at this cap level:
+- **Trash Bins** (1,683 images) sits just under the 5,500-cap's derived floor (1,833 = 5500 // 3) — `floor_met=False`. It was already known to be a small class; this is the same shortfall pattern as Pedestrian Lane's pre-DEC-090 state, just not (yet) large enough to warrant its own new-source fix.
+- **Ratio invariant misses 3:1** (max=Person 5,500 / min=Trash Bins 1,683 = 3.27) — `recompute_hard_cap_trigger` fired (would suggest recomputing hard_cap as 3×1683=5049), **not applied**, same standing student-owned call as DEC-042's ratio invariant and `docs/OPEN_QUESTIONS.md` #1.
+
+### Rationale
+
+Re-verifying the subset property rather than reusing the earlier (pre-crosswalk-source, pre-DEC-090) confirmation matches this project's standing discipline of not trusting a check performed against a since-changed config — `CLASS_PRIORITY_SOURCES`, the source pool, and the benched-source list have all changed since the original verification.
+
+### Consequences
+
+- `dataset/reports/cap_report_hardcap5500.json` is now the real input for the next step: reviewing this slice in `fiftyone_review_processed.ipynb`.
+- Trash Bins' floor shortfall and the ratio-invariant miss are flagged for visibility, not resolved here — they existed at the 10,000-cap level too (in less visible form) and are the student's call per `docs/OPEN_QUESTIONS.md` #1, same as before.
+- "Exclude then trim to 4,500" (the next real step) still has no implementation — `merge.py` already has an exclude-subtraction mechanism (`load_excluded_pairs()`), but nothing trims the post-exclusion counts back down to a true 4,500 per class; confirmed by direct code reading, not assumption.
+
+**Same day, follow-up:** re-ran `box_audit.py --pool merged` fresh against the current `dataset/merged/` (still the 10,000-cap pool at time of running — the merge hasn't been rebuilt at 5,500 yet) to get current per-source flag rates, since the existing `merged_box_audit_report.json` predated dedup/DEC-090's crosswalk-source addition/9 benched sources and was no longer trustworthy for ranking. Built a "review #2" checklist (`notebooks/fiftyone_review_processed.ipynb`, new bottom cell, notebook version bumped to 20) covering all 17 active sources for the first time — the original DEC-076 checklist only ever covered Roboflow sources. Roboflow sources ranked first (by flag rate, high to low), non-Roboflow sources (crowdhuman, exdark, open_images, both Dataset Ninja sources) ranked the same way but placed as a lower-priority block at the bottom, per the student's explicit instruction. Confirmed via `docs/DECISIONS.md` history that none of the 5 non-Roboflow sources have ever gone through a full write-back review in this notebook — all start unchecked. `cv_project_hovyc`/`trashcan_detection_pihfn` carried forward as already-reviewed (DEC-087 promotion) rather than reset to unreviewed.
+
+**Same day, second follow-up — two student questions, both checked directly, not assumed:**
+
+1. *"Are the datasets only scoped to what's in dedup — mark unused Roboflow sources as failed."* Checked `config/datasets.yaml` in full (parsed via PyYAML, not grepped by eye): all 25 Roboflow project entries already carry an explicit `audit_status` — 12 `pending` (the current active set, exactly matching the 12 active Roboflow sources counted above) and 13 already `failed`/`benched`, every one with a documented reason already in its `audit_note`. Four of the 13 (`stairs_lusiz`, `stairs_hsatv`, `traffico_y1`, `jeep_hozhs`) were never even pulled (no `dataset/processed/` directory), so they were never candidates for dedup or anything downstream in the first place. No config change was needed — the ask was already satisfied by existing bookkeeping, confirmed rather than assumed.
+
+2. *"Does the review notebook show only non-duplicate images?"* Yes — `hide_duplicates` (DEC-088) already exists in the build cell (`p0review3build`), default `False`. **Found and fixed a real bug while checking it**: the mechanism read `dataset/reports/dedup_report.json`'s duplicate groups directly, with no awareness of `dataset/reports/near_duplicate_false_positives.json` (DEC-090's 1,568-pair — 2,852-image — threshold review) at all. Turning `hide_duplicates = True` as-is would have silently re-hidden every image the student already spent real review time confirming was NOT a duplicate. Fixed: the build cell now loads `near_duplicate_false_positives.json` (when present) and excludes any `"duplicate"` filename it lists from the near-duplicate hide-set before applying it — exact-duplicates are left untouched, since that review never covered them (byte-identical, no ambiguity to false-positive-check). Notebook version bumped to 21.
+
+**2026-08-25: `roboflow_pothole_voxrl` traced to 35/665 visible under `hide_duplicates`, and a second real tag-loss incident found and fixed.** Diagnosing why only 35 of 665 images stayed visible led to computing the source's true near-duplicate flag rate directly: 630/665 = 94.7%, exact match to DEC-090's own already-documented number for this source. But `pothole_voxrl` had **zero** entries in `near_duplicate_false_positives.json`, contradicting the student's memory of having bulk-tagged it (along with `roboflow_cv_project_hovyc`, `crowdhuman`, `dataset_ninja_pothole_detection`, `dataset_ninja_road_damage_detector`, `roboflow_trashcan_detection_pihfn`) false-positive in `fiftyone_near_dup_inspection.ipynb`, with a remembered console output of "Tagged 2852 duplicate-role samples." Root cause, confirmed directly with the student: the bulk-tag cell ran (2,852 real tags applied live), but the write-back/export cell was never run afterward, and the kernel has since been restarted — the 2,852 tags are gone, unrecoverable, need to be redone.
+
+**Underlying gap, now fixed**: unlike `fiftyone_review_processed.ipynb`'s build cell, `fiftyone_near_dup_inspection.ipynb`'s build cell (`aaf4b3fc`) had no rebuild guard and never set `persistent = True` — any re-run (including an innocuous kernel-restart + rerun-from-top) would `fo.delete_dataset()` and silently wipe every tag with no warning. This is the exact same class of bug DEC-087's session already found and guarded against in the *other* notebook (the `cv_project_hovyc`/`door_detection_zqt59` tag-loss incidents) — just never ported over here. Fixed three ways: (1) added the same guard pattern (refuses to rebuild a persistent dataset unless `FORCE_REBUILD = True`), (2) added `spotcheck_dataset.persistent = True` after the build, (3) inserted a new "resume without rebuilding" cell (`resume_no_rebuild`) mirroring the review notebook's own, so a restart no longer requires touching the guarded build cell at all. Also fixed a real, separate bug caught in the same pass: `BULK_FALSE_POSITIVE_SOURCES` had `"dataset_ninja_road_damage"` (no such source key) instead of the real `"dataset_ninja_road_damage_detector"` — that entry would have silently matched 0 samples even on a successful run. Notebook version bumped to 2.
+
+**Not yet done**: the 2,852-tag bulk-tag pass itself needs to be redone from scratch (now with the typo fixed and the guard in place) and, critically, followed immediately by the write-back cell in the same sitting — the guard/persistence fixes prevent a *silent* loss on rebuild, they don't replace actually running write-back.
+
+---
+
+## DEC-092: `fiftyone_review_processed.ipynb`'s Live Session Confirmed to Silently Drop Tags Between Checkpoints — Root Cause Not Found, Recovery Method and New Operating Rule Established Instead
+
+> **RESOLVED 2026-08-26 by DEC-097.** The mechanism was FiftyOne's in-process `Sample` cache, not data loss: the kernel was serving cached objects from before the tags were applied, while MongoDB held them the whole time. That is why every hypothesis below came back clean — they were all searching for a deletion that never occurred. Fix: `dataset.reload()` before reading the live dataset. The backup-before-write-back rule this entry established still stands.
+
+- **Date:** 2026-08-26
+- **Status:** Accepted
+- **Related:** DEC-091 (the 5,500-cap review pass this bug was hit during, reviewing `roboflow_pothole_voxrl`), the mentor-mode memory's existing multi-escalation record of tag/edit loss in this same notebook (`cv_project_hovyc`, `door_detection_zqt59`, the "App-reverts-to-hovyc" saga) — this is a new incident in that same family, not a repeat of a previously-solved one.
+
+### Context
+
+While reviewing `roboflow_pothole_voxrl` (665 images), a `dataset.export(..., dataset_type=fo.types.FiftyOneDataset, export_media=False)` backup taken at 02:46 showed 449 predictions tagged `accept` (246 of them manually tagged below the 0.7 auto-accept confidence threshold) and 1,995 `ground_truth` boxes (including boxes manually copied from predictions into `ground_truth` directly, to reassign them to a canonical class outside the COCO-crosswalk predictions schema). Running write-back at 03:01 — 15 minutes later, no kernel restart, no rebuild — printed "Promoted 208", not 449. A live pre-check run immediately before write-back (`sum(... "accept" in det.tags ...)`) independently confirmed 208 live, at that moment, before write-back touched anything — proving write-back itself was reporting real, correctly-read live state, not a code bug in the promotion logic.
+
+### Decision
+
+**Root cause not found, and stopped actively chasing it** — several concrete hypotheses were raised and each was directly disproven with real evidence, not assumption:
+- *Wrong-field mis-tagging* (found 3 `ground_truth` detections tagged `accept` in an earlier backup) — real, but the student confirmed some of the missing boxes were legitimate class-reassignment copies into `ground_truth`, not just misclicks, and the 02:46 backup showed 0 such mis-tags, so this doesn't explain the 449→208 drop.
+- *`FORCE_REBUILD` used to fix an earlier 35-image bug* (real, confirmed by the student) — ruled out by hard evidence: the 21:42 backup, taken *after* that rebuild, already showed the correct 665 images, so the rebuild predates the 449→208 window by hours, not the cause.
+- *A duplicate/zombie Jupyter kernel silently holding the same dataset* (the exact confirmed root cause of a prior incident in this same notebook family) — **directly checked this time, not assumed**: `lsof -nP -iTCP:5151`/`5152` showed exactly one kernel, one browser tab, one App server for each port; connecting directly to the two other live kernels on the machine (via `jupyter_client.BlockingKernelClient` against their connection files) confirmed neither had a `dataset`, `session`, or `source_key` variable at all. Cleanly ruled out.
+- *Fresh predictions regenerated mid-session* (would explain both the loss of manual low-confidence accepts and the near-but-not-exact match between 208 and the backup's 203 auto-only count, via MPS inference non-determinism) — the student directly confirmed they ran nothing that would regenerate predictions.
+
+With every concrete lead disproven and the student explicitly redirecting effort away from further diagnosis, the session pivoted to recovery instead: **all three checked hypotheses being cleanly ruled out, rather than one landing, is itself the honest state of this investigation — the actual mechanism remains unknown.**
+
+**Recovery method used, real and verified**: rather than trusting the live session's write-back again, a standalone script (`writeback_from_backup.py`, scratch — not committed to the repo, one-off) read the 02:46 backup's `samples.json` directly and reproduced the write-back cell's exact logic (promotion, YOLO coordinate conversion, per-file diff classification, `*_excluded.json` update) against that static export, entirely bypassing the live kernel/MongoDB session. Result verified independently by recounting boxes straight from the written files: 2,444 total, matching 1,995 (backup's `ground_truth`) + 449 (promoted) exactly. The previous, incomplete 208-based `labels_reviewed/` output was moved aside (not deleted) to `labels_reviewed_208promoted_bak_20260826_031001/` before being overwritten.
+
+**New standing operating rule for this notebook, going forward**: take a backup (the existing cell 9 mechanism) *immediately* before considering a review session done, then either (a) run write-back in the very same sitting, no gap, or (b) if anything about the live session seems off, do **not** trust write-back's live output — recover from the backup file directly the same way this incident was resolved, rather than assuming the live dataset still matches what was last confirmed. The live session has now demonstrated, twice in this project (this incident and the earlier `cv_project_hovyc`/`door_detection_zqt59` ones), that it can silently diverge from what a human just confirmed was there, without an explanation either investigation was able to pin down.
+
+### Rationale
+
+Continuing to chase an increasingly-expensive, evidence-resistant root cause stopped being the right use of time once every concrete, checkable hypothesis had been individually disproven — the student's redirect to "make what we have durable" over "find out exactly why" was the correct call given the actual goal (a usable, correct `labels_reviewed/`) didn't require the explanation. Recording the ruled-out hypotheses in full, not just the outcome, matters because a future recurrence shouldn't re-spend effort re-disproving the same three theories.
+
+### Consequences
+
+- `roboflow_pothole_voxrl`'s `labels_reviewed/` is now correct and verified (2,444 boxes) — still not promoted over the real `labels/`, that step remains manual and separate, per the notebook's existing design.
+- **Every future review session in this notebook should follow the new operating rule above** — this is now a standing practice, not a one-off workaround, until (if ever) the actual mechanism is found.
+- The mentor-mode memory has been updated with this same rule so it persists across sessions without needing to be rediscovered from this entry.
+- If this recurs, the three ruled-out hypotheses above don't need re-checking from scratch — start from "what else could silently mutate a persistent FiftyOne dataset's tags with no rebuild, no restart, no competing kernel, and no predictions regeneration" as new territory, not from these three again.
+
+---
+
+## DEC-093: Write-Back's Prediction-Promotion Was Not Idempotent — Every Re-Run Duplicated Every Previously-Promoted Box
+
+- **Date:** 2026-08-26
+- **Status:** Accepted
+- **Related:** DEC-092 (the same review session this was found in, immediately after recovering from that incident)
+
+### Context
+
+After recovering `roboflow_pothole_voxrl`'s review work per DEC-092, the student restarted the kernel, resumed the main (persistent) dataset via the existing "resume without rebuild" cell, added more `ground_truth` boxes by hand, and inspected the result via cell 13's read-only preview (port 5152) before running write-back again. That inspection found duplicated `ground_truth` boxes.
+
+### Decision
+
+**Confirmed a real, unambiguous code bug, not a repeat of DEC-092's unexplained mechanism.** The write-back cell's (`p0review... write-back`, cell 12) promotion loop:
+
+```python
+accepted = [det for det in sample["predictions"].detections if "accept" in (det.tags or [])]
+...
+sample["ground_truth"].detections.extend(fo.Detection(label=det.label, bounding_box=det.bounding_box) for det in accepted)
+```
+
+filters purely on the `accept` tag and never clears it, and never records anywhere that a given prediction has already been promoted. Every re-run of write-back re-selects every prediction still tagged `accept` — including ones promoted in an earlier run — and appends a fresh duplicate `Detection` for each. A dataset that's had write-back run N times has every once-promoted box duplicated N times. This dataset had write-back run at least twice live (the 208-promotion run, then again after the DEC-092 recovery + kernel restart), so duplication was real and expected, not a fluke.
+
+**Fixed**: the promotion filter now also excludes anything already tagged `promoted`, and after promoting, each promoted prediction gets `accept` swapped out for `promoted` on its own tags (`accept` stays as a historical record of intent; `promoted` is the new idempotency guard the filter checks). A prediction can now only ever be promoted once, regardless of how many times write-back runs afterward.
+
+**Live duplicates from before the fix were removed** via a one-off deduplication pass against the live dataset — for each sample, `ground_truth.detections` deduplicated by exact `(label, bounding_box)` match, keeping one copy of each. Safe by construction: two independently-drawn boxes sharing floating-point-identical coordinates is not a realistic collision; every actual duplicate here was a byte-for-byte copy created by the bug itself.
+
+### Rationale
+
+This is a straightforward correctness bug once identified — a missing idempotency guard — not a design tradeoff with alternatives worth weighing. Fixing it at the tag level (rather than, say, deduplicating at write-time) keeps the fix visible and inspectable in the App (a `promoted`-tagged prediction is still there to look at) rather than silently masking the symptom downstream.
+
+### Consequences
+
+- **Checked the two other sources ever promoted through this notebook — both were actually affected, not hypothetically.** `roboflow_cv_project_hovyc`: 165 files, 554 duplicate `(label, bounding_box)` lines. `roboflow_trashcan_detection_pihfn`: 95 files, 420 duplicate lines. Both were already promoted over the real `dataset/processed/<source>/labels/` (DEC-087), meaning this duplication had been silently sitting in the **live, active candidate pool** — not just a staging folder — since 2026-08-21, affecting every `cap_per_class.py`/`merge.py`/`box_audit.py` run since. Fixed directly: current (duplicated) `labels/` backed up to `labels_pre_dedup_bak_20260826_035316/` for each source (reversible, not deleted), then deduplicated in place by exact `(label, bounding_box)` match. Verified 0 duplicate files remain in either source afterward.
+- **Downstream reports are now stale relative to the corrected box counts**, though the *image* selection itself is unaffected (deduplication only removes redundant boxes within an already-selected image's label file, never removes an image) — `box_audit_report.json`/`merged_box_audit_report.json`'s per-source instance totals for these two sources overcounted by the duplicate amount, and any per-class instance totals that included them (Doors, Person, Stairs, Chairs, Vehicle, Pole, Trash Bins, Bicycle, Tables, Animals, Pedestrian Lane, Motorcycle for `cv_project_hovyc`; Trash Bins, Person, Vehicle, Chairs for `trashcan_detection_pihfn`, per DEC-087's contribution breakdown) are very slightly inflated in any report generated before this fix. Not re-run here — flagged for whoever next runs `box_audit.py`/`cap_per_class.py` for real to pick up the corrected counts naturally.
+- `roboflow_pothole_voxrl`'s live `ground_truth` is deduplicated as of this fix; its `labels_reviewed/` needs a fresh write-back run (now safe, idempotent) to reflect the corrected state.
+
+**Same day, follow-up — the DEC-092 recovery script inherited this exact bug.** Checking whether *other* reviewed sources were affected (a direct, full scan of every processed source's `labels/` and any `labels_reviewed/` for internal duplicate `(label, bounding_box)` lines, not assumed clean) found `roboflow_pothole_voxrl`'s `labels_reviewed/` itself had 150/665 files, 450 duplicate lines — because the standalone recovery script written for DEC-092 faithfully reproduced the *original, buggy* promotion logic (it predates this fix), and the 02:46 backup it read from already contained the first write-back's 208 promoted boxes inside `ground_truth`, with those same predictions still tagged `accept` — so the recovery script re-promoted them a second time, same failure mode, different code path. Deduplicated in place, same method as above. `cv_project_hovyc`/`trashcan_detection_pihfn`'s stale (unused, pre-promotion) `labels_reviewed/` folders were also deduplicated for consistency, though only their already-fixed real `labels/` actually matters downstream.
+
+**Two small, separate, pre-existing findings from the same full scan — explicitly NOT the same bug, not fixed here**: `crowdhuman` (6 duplicate lines across 19,370 files) and `open_images` (3 duplicate lines across 31,011 files) have a handful of internal duplicate boxes in their real `labels/`. Neither source has ever been touched by this notebook's write-back — no `labels_reviewed/` exists for either — so this has a different, unidentified origin, most plausibly the Open Images cross-folder merge (DEC-052) for `open_images`, unknown for `crowdhuman`. Flagged, not investigated or fixed — negligible in scale (well under 0.1% of files each) and a real, separate root-cause question if ever worth pursuing.
+
+### Resolution — and a methodology lesson worth more than the fix
+
+After all three fixes above landed and the student re-ran dedup → write-back, they still reported seeing duplicates in the read-only verify App (port 5152). Three further hypotheses were proposed and **all three were wrong**: a stale notebook tab holding pre-fix write-back code (disproven — the student pasted the cell's real content, the fix was present), the `predictions` overlay rendering on top of `ground_truth` (disproven — the student pointed out predictions are already promoted into `ground_truth` in the verify dataset, so there is no separate predictions field to toggle off there), and a retroactive-marking gap for predictions promoted before the `promoted` tag existed (real in principle, but returned 0 — nothing to fix).
+
+**What actually resolved it was abandoning mechanism-guessing and reading the artifact directly.** A scan of `labels_reviewed/` on disk — the exact files the verify App renders — proved it already clean: 2,262 boxes across 665 files, **0 exact duplicate lines**, and only 3 high-IoU (>0.8) same-class pairs in the entire source, all three being two genuinely different accepted predictions of the same object (the model predicting one car twice at slightly different sizes), not promotion artifacts. An earlier "near duplicate" heuristic (same class, centers within 0.05, sizes within 0.05) had produced 79 false hits and was discarded as unfit — it flagged genuinely distinct small potholes clustered together in one image; IoU is the correct measure for "visually the same box," coordinate proximity is not.
+
+With "disk is clean" and "App shows duplicates" both established as facts, only one explanation remained: **the App was not reading current disk state.** The verify cell builds `verify_dataset` as a `persistent=False` snapshot at the moment the cell runs, then binds the App to it — refreshing the browser does nothing, only re-running the cell rebuilds. The snapshot under inspection had been built while `labels_reviewed/` still contained the recovery script's un-deduplicated output. Re-running the cell resolved it; no further code or data fix was needed, because none was outstanding.
+
+**Lesson, recorded because it cost several wrong turns across this and DEC-092**: when a symptom persists after a fix that provably landed, check the concrete artifact (the file on disk, the actual bytes) before theorizing about mechanisms. Three consecutive plausible-sounding theories were disproven at real cost; one direct read of the files produced a provable answer immediately. This is the same discipline the rest of this project already applies to pipeline results ("verified directly, not just reasoned about") — it applies to debugging too.
+
+### Queued fix, agreed but NOT yet applied — the rebuild guard has a hole
+
+Found 2026-08-26 while rebuilding `roboflow_revised_pedestrian_obstacle` with `hide_duplicates = True`: the build cell's guard only raises on `existing.persistent and not FORCE_REBUILD`. But the build cell *always* creates the dataset as `fo.Dataset(dataset_name, persistent=False)`, and persistence is only turned on by a **separate, manually-run cell** (`dataset.persistent = True`). So **a freshly-built dataset has no protection at all** until the student remembers to run that separate cell — re-running the build cell in that window silently deletes and rebuilds, discarding any tagging done in the meantime. Confirmed live: with `FORCE_REBUILD` correctly set back to `False`, re-running the build cell still rebuilt (and re-ran YOLO inference), because the dataset wasn't persistent yet. No work was lost this time (nothing had been tagged), but this is exactly the shape of the `cv_project_hovyc`/`door_detection_zqt59` tag-loss incidents.
+
+Contributing factor worth noting: the instruction given was "set `FORCE_REBUILD = False` again" without stating that the value applies to the *next* run and does not require re-running the cell — the student re-ran it to "apply" the change, which is what triggered the rebuild. Guidance for this flag should say so explicitly.
+
+**Agreed fix, deferred to a stopping point at the student's request** (notebook was mid-session and open; per the standing rule, substantial edits wait for a clean break): create the dataset as `persistent=True` directly in the build cell, so the guard is armed from the moment the dataset exists rather than depending on a remembered follow-up step. The existing `dataset.persistent = True` cell then becomes redundant but harmless — keep it rather than removing it, since kernel history and muscle memory both reference it.
+
+### Final state of `roboflow_pothole_voxrl`
+
+- `labels_reviewed/`: 665 files, **2,262 boxes**, verified free of exact duplicates. Not yet promoted over the real `labels/` — that step remains manual and deliberate, unchanged.
+- 3 genuine double-prediction pairs (`img-286`, `img-521`, `img-596`, all class 1/Vehicle, IoU 0.81–0.95) remain as real content for the student to delete by hand if desired — not duplicates in the bug sense, two distinct accepted predictions of one object.
+- The notebook gained a permanent, reusable "check/remove duplicate `ground_truth` boxes" cell (markdown + code, `dedup_gt_header`/`dedup_gt_code`) sitting between the write-back warning and the write-back cell itself, so this no longer depends on pasting a snippet from a chat log. Notebook version 24.
+
+---
+
+## DEC-094: Roboflow Sources Found Pre-Augmented; De-Augmented at the Processed Layer and Guarded at Split, Exposing Four Classes as Genuinely Below the Floor
+
+- **Date:** 2026-08-26
+- **Status:** Accepted
+- **Related:** `docs/OPEN_QUESTIONS.md` #17 (the finding, options, and remaining decisions), DEC-089/DEC-090 (the GPU dedup run this complements rather than replaces), DEC-042 (the floor/cap/ratio policy this re-measures), DEC-091 (the 5,500-cap run this supersedes)
+
+### Context
+
+Mid-review of `roboflow_revised_pedestrian_obstacle`, the student reported still seeing many duplicates even with `hide_duplicates = True`. Investigating the actual files — rather than theorizing, per DEC-093's methodology lesson — showed the cause was not a dedup failure: **most Roboflow sources in this project ship pre-augmented**, and the existing embedding-based near-duplicate check structurally cannot catch that.
+
+### Decision
+
+**The finding, proven not inferred.** Roboflow exports as `<original>_<origext>.rf.<hash>.<ext>`, so augmented copies of one photo share a base name. Base image `100` in `revised_pedestrian_obstacle` exists as 7 files; two carry boxes `14 0.462500 …` and `14 0.537500 …` — identical width/height with the x-center mirrored exactly around 0.5, i.e. a **horizontal flip**. Others share identical box geometry with differing md5 (brightness/noise variants). Active pool: **97,933 files from 75,679 distinct photos**. Worst offender `door_detection_zqt59` at 6.2x (4,493 files, 724 photos). Clean at 1.00x: `pothole_voxrl`, `cv_project_hovyc`, `crosswalk_detector_lz3hc`, and every non-Roboflow source.
+
+**Why not simply re-run dedup at a higher threshold** (the student's own question, answered with measurement rather than argument): measured recall of dedup@0.2 on real augmented siblings is **46.6%** — of 3,539 base-sibling pairs in `revised_pedestrian_obstacle`, it grouped 1,648. `mobilenet-v2-imagenet-torch` features are not flip-invariant, so a flipped copy is genuinely distant in that space; raising the threshold far enough to catch flips would flag masses of unrelated images (the student already hand-reviewed 3,829 false positives at 0.2). Filename base-name matching gives 100% precision and recall instantly. **Explicitly decided: do not re-run GPU dedup for this** — ~8 hours, mostly upload, for a strictly worse signal than a regex. The RunPod pod is kept for the training phase instead.
+
+**Applied — option B, de-augment at the processed layer.** New `scripts/preprocess/deaugment_sources.py` keeps the alphabetically-first file per base group and **moves** (never deletes) the rest into per-source `images_augmented_aside/` + `labels_augmented_aside/`; `--revert` restores completely. Real run: **22,254 files moved aside** across 9 active sources. Verified after: image/label pairing exact in every affected source, zero sibling groups remaining. Labels travel with their image so no orphan labels are left for `box_audit.py` to count.
+
+**Applied — option C, guard at split.** New `augmented_sibling_groups()` in `scripts/build/split.py`, unioned into the existing duplicate-group list. `assign_splits()` already ran real union-find (added earlier for overlapping exact/near-dup groups), so sibling groups merge into the same connected components rather than one grouping source silently overriding the other. Grouping is keyed on `(source, base)`, so two sources that both uploaded a `100.jpg` are never merged — unit-tested directly against a synthetic pool. Post-B this correctly reports **0 groups**: it is now a standing safety net for a future augmented source or a `--revert`, not an active fix. That is the intended end state.
+
+**Shared helper, deliberately not duplicated.** `roboflow_base_name()` lives in `scripts/utils/file_utils.py` and is imported by both scripts. This was a direct response to a real failure earlier in the same session: two ad-hoc copies of the regex (one matching only `_jpg`, one matching `_jpg|_jpeg|_png`) produced **different answers for the same source** (`dlsu_d_vehicle_type_detection` 10,574 vs 8,731 bases), which is exactly the drift the project's "import rather than reimplement" convention exists to prevent.
+
+**Pipeline re-run for real** against the de-augmented pool: `cap_per_class.py --hard-cap 5500` → `merge.py --cap-report cap_report_hardcap5500.json`. `dataset/merged/` is now **44,606 images** (was 67,109). `split.py --dry-run` passes cleanly (31,243 / 6,729 / 6,634), correctly reporting the dedup report as a tolerated superset (67,109 > 44,606).
+
+### Rationale
+
+De-augmenting at the processed layer rather than re-exporting from Roboflow (option A) preserves completed review work — a re-export changes every filename, which would have invalidated `trashcan_detection_pihfn`'s promoted review and `revised_pedestrian_obstacle`'s in-progress one. The tradeoff accepted knowingly: the surviving file may itself be a transformed copy rather than the pristine original, which is harmless for training (a correctly-transformed image with correctly-transformed boxes is valid ground truth) and unidentifiable from Roboflow's naming anyway. Option A remains available and is the right tool if a specific class needs genuinely new imagery rather than honest counting of what exists.
+
+### Consequences
+
+- **Four classes are now below DEC-042's 1,500 floor**, on real post-merge counts: **Stairs 1,417 · Trash Bins 1,339 · Elevator 1,338 · Pedestrian Lane 1,193**. Doors (−66%, to 1,980) and Tricycle (−53%, to 1,784) cleared but thinned sharply. Ratio invariant degraded to 4.61 (was 3.27). **Framing that matters: de-augmentation did not cause this shortfall, it revealed one that already existed** — if the floor exists to guarantee enough genuinely distinct data, those four classes were never actually clearing it; augmented copies were padding the count. Student's call on what to drop, bench, or backfill; explicitly not decided here. Provisionally accepted so far: Stairs and Trash Bins staying low. Pedestrian Lane is under consideration for benching. **Elevator is newly surfaced and unruled.**
+- **`roboflow_trashcan_detection_pihfn` shrank from 559 to 215 files after promotion** — its reviewed labels survive for the kept variants; `labels_reviewed/` entries for moved-aside files are now orphaned but harmless.
+- Any review dataset built before this run points at moved files and must be rebuilt. `dataset/reports/deaugment_report.json` records exactly what moved.
+- Recorded for the drop decision: 11 of 16 classes survive dropping Roboflow entirely (Open Images / ExDark / CrowdHuman / Dataset Ninja cover them). The five with **no non-Roboflow fallback** are Doors, Stairs, Elevator, Tricycle, Pedestrian Lane. The only Roboflow sources droppable at zero cost to another class are `wtf_dwvgm` (475 distinct) and `crosswalk_detector_lz3hc` (202), both Pedestrian-Lane-exclusive.
+
+---
+
+## DEC-095: Per-Source Naming Audit Explains Where De-Augmentation Worked and Where It Could Not — Cross-Source Duplicates Found and Guarded at Split
+
+- **Date:** 2026-08-26
+- **Status:** Accepted
+- **Related:** DEC-094 (the de-augmentation run this audits and extends; supersedes its "KNOWN LIMITATION" paragraph with measured numbers), `docs/OPEN_QUESTIONS.md` #17, DEC-063 (duplicate-aware splitting), DEC-042 (floor/cap policy)
+
+### Context
+
+After DEC-094, the student asked whether the de-augmentation had actually been *tailored per source* — whether each dataset's naming scheme had been analysed and the collapse fitted to it — observing that "in some datasets it did work effectively, but in some it didn't."
+
+It had not. DEC-094 applied one generic Roboflow regex uniformly to all 26 sources. That was acknowledged rather than defended, and a per-source audit was run to find out whether the uniform rule was actually wrong or merely looked untailored.
+
+### Decision
+
+**The uniform rule was correct, and the reason is now a stated classification.** Two measurements — `rf%` (share of files carrying the `.rf.<hash>` export suffix) and `ratio` (files ÷ distinct base names) — sort every source into three tiers with no overlap:
+
+| tier | rf% | ratio | sources | de-augmentation outcome |
+|---|---|---|---|---|
+| not Roboflow | 0% | 1.00 | `crowdhuman`, `exdark`, `open_images`, both `dataset_ninja_*` | no-op **by construction** |
+| Roboflow, augmentation OFF | 100% | 1.00 | `crosswalk_detector_lz3hc`, `cv_project_hovyc`, `pothole_voxrl` | no-op **correctly** — nothing to collapse |
+| Roboflow, augmentation ON | 100% | 1.38–6.21 | the 9 sources DEC-094 processed | worked as intended |
+
+The uniform regex never *failed* on tiers 1–2; there was nothing there to catch. A per-source rule would have produced identical output.
+
+**Roboflow augments only the train split — proven, not assumed.** Cross-referencing processed group sizes against `dataset/raw/roboflow_projects/*/{train,valid,test}`:
+
+```
+roboflow_trashcan_detection_pihfn
+  train    172 bases   sizes: 3x172     <- every train image -> exactly 3
+  valid     22 bases   sizes: 1x22      <- untouched
+  test      21 bases   sizes: 1x21      <- untouched
+```
+
+`elevator_status_0iq4p` matches (419/424 train at 3x; 121/122 valid at 1x). Roboflow's default 3× setting is therefore recoverable from filenames alone, and **size-1 groups are not misses — they are val/test images**. This retires the concern that de-augmentation had silently skipped a large fraction of each source.
+
+**Three failure modes identified, only one of which is fixable by code.**
+
+1. **`door_detection_zqt59` was exported, re-uploaded, and re-exported.** Its *valid* and *test* splits carry group sizes 5 and 7, which train-only augmentation cannot produce; 72.4% of its base names end in `_JPG`, the fossil of a prior export. Pass 2 treated pass 1's augmented copies as fresh originals — hence 4,493 files from 724 photos and compounding odd group sizes (3/5/7/9). Not recoverable from filenames.
+2. **Pre-upload augmentation is structurally invisible to base-name matching.** Bases such as `IMG-20210825-WA0006flip_output_output` carry the transform *inside* the name, so each reads as its own photo. Measured: `escalator_stairs` 158/2,663 bases, `revised_pedestrian_obstacle` 56/2,100, `stairs_i2yia` 29/1,372. Not recoverable from filenames.
+3. **Cross-source duplicates — the one with training consequences, and now fixed.** **173 base names / 346 files in `dataset/merged/` are the same photo under two different source keys.** `split.py` grouped per `(source, base)` by design, so these were free to straddle splits, and `dedup.py`'s embedding check links only **29 of the 346**.
+
+**Applied — `cross_source_duplicate_groups()` in `scripts/build/split.py`**, unioned into the duplicate-group list alongside the existing dedup and augmented-sibling groups (`assign_splits()`'s union-find merges overlaps). Guarded by `_is_distinctive_base()`: a base must be ≥10 characters **and** contain at least one letter, so coincidental collisions (`5.jpg`, `100.jpg`, bare numeric stems) are never merged while genuine hits are kept. Live pool: **173 groups / 346 files**; `split.py --dry-run` passes with zero leakage at 31,225 / 6,686 / 6,695.
+
+### Rationale
+
+Kept as a **separate function** from `augmented_sibling_groups()` rather than folded into it, because the two describe different events: one source exporting a photo many times, versus several sources each shipping the same photo once. They also have different life expectancies — `deaugment_sources.py` drives the sibling count to zero at the source, but it operates within one source directory and therefore **cannot** collapse cross-source duplicates. The sibling grouping is a dormant safety net; this one is a permanent, load-bearing fix.
+
+The distinctiveness guard is deliberately conservative. Merging two unrelated images into one split-group costs only a small loss of shuffling freedom; merging by coincidence across a whole pool of short numeric stems would corrupt the split. Erring toward missing a few genuine matches is the cheaper error.
+
+### Alternatives Considered
+
+- **Key cross-source grouping on base name alone, unguarded.** Rejected: `dataset_ninja_pothole_detection`'s `potholes5` and a Roboflow `5.jpg` are unrelated, and the pool contains many such stems.
+- **Perceptual/content hashing to catch all three failure modes at once.** Rejected for now — it would catch modes 1 and 2 as well, but it is a new pipeline stage with its own threshold to tune and review, and modes 1–2 affect count honesty rather than leakage. Recorded as available if a class later needs its true distinct-photo count established.
+- **Re-exporting `door_detection_zqt59` from Roboflow with augmentation off** (DEC-094's option A). Still available and still the correct tool if Doors needs genuinely more distinct imagery; not triggered by this audit.
+
+### Consequences
+
+- **~317 files of previously-undetected train/val leakage are closed** (346 cross-source duplicate files, of which dedup already linked 29).
+- **`roboflow_door_detection_zqt59` was built by scraping Open Images.** Verified visually: `open_images__01b15d5fcabae5b0.jpg` and its `door_detection_zqt59` counterpart are the same room with the same burned-in `3/29/2009 14:46` camera timestamp, differing only by Roboflow's 416×416 resize. 12 such pairs reach the merged pool. Relevant to the pending drop decision — this source contributes less independent data than its file count suggests.
+- Largest overlaps recorded for that same decision: `revised_pedestrian_obstacle + wtf_dwvgm` (101 bases), `elevator_awvus + elevator_status_0iq4p` (53), `open_images + door_detection_zqt59` (12).
+- `split.py`'s stats now report `augmented_sibling_groups` / `_files` and `cross_source_duplicate_groups` / `_files`, so both grouping sources are visible in `split_report.json` instead of only in stdout.
+- **Failure modes 1 and 2 remain open and are not code-fixable.** Distinct-photo counts for `escalator_stairs`, `stairs_i2yia`, `revised_pedestrian_obstacle`, and `door_detection_zqt59` are still overstated by an unmeasured amount. This does not affect leakage (embedding dedup and the split guards still apply) but does mean DEC-042's floor is measured against a mild overcount for those sources.
+
+---
+
+## DEC-096: Two Roboflow Sources Re-Acquired Clean (Re-Pin and Fork), Four Silent Data-Corruption Bugs Fixed, De-Augmentation Strategy Settled Per Source
+
+- **Date:** 2026-08-26
+- **Status:** Accepted
+- **Related:** DEC-094 (de-augmentation at the processed layer), DEC-095 (per-source naming audit that motivated this), DEC-089 (the RunPod dedup run whose verdict is carried across re-exports here), DEC-090 (the crosswalk fork precedent + `dedup_extend_exact.py`), DEC-093 (write-back idempotency), DEC-092 (backup-before-write-back rule), DEC-042 (floor/cap policy)
+
+### Context
+
+DEC-095 established that Roboflow augmentation is baked into a *version* at generation time and cannot be filtered at download. That reframed the problem: several sources were not "badly augmented", they were **pinned to the wrong version**. Acting on it exposed four separate bugs that were silently corrupting data, none of which had visible symptoms.
+
+### Decision
+
+**A version audit across all 22 Roboflow projects, comparing each version's image count to the project's source-image pool.** Nine were augmented. Seven had no clean version and would genuinely require a fork; **two were avoidable and had simply been pinned wrong**:
+
+| project | was pinned | multiplier | clean version |
+|---|---|---|---|
+| `door_detection_zqt59` | v3, 5,173 images | **2.60x** | **v1, 1,993** |
+| `trashcan_detection_pihfn` | v2, 559 images | **2.59x** | **v1, 216** |
+
+The prior config comment on door read *"latest, 5173 images (up from v2's 4747, v1's 1978)"* — version image count was read as more data when it was the same photos multiplied. That framing is the trap worth remembering.
+
+**`door_detection_zqt59` re-pinned v3 -> v1.** 1,978 raw -> 1,704 converted -> 1,601 after the dedup keep-list. This also resolved DEC-095's open puzzle about why this source behaved incoherently (multiplier 9, only 12.8% of val/test obeying the train-only rule): it was a 2.6x augmented export layered on top of a source pool that *already* contained ~2.4x pre-upload augmentation. Verified from v1's own splits — its `valid` has 251 base-groups of size 3 and `test` 147, and Roboflow never augments val/test, so those triples arrived as separate uploads. Confirmed visually (`Door0444` is one scene with a hue shift and crop). De-augmentation is therefore *correct* for this source, contradicting DEC-095's reading of it: all 474 multi-file bases are distinctive 16-hex or `Door####` names with zero camera-roll names, so same-base genuinely means same photo. Collapsed 1,601 -> **654**.
+
+**`revised_pedestrian_obstacle` forked and regenerated.** All four upstream versions were 1.80x augmented with **no clean version to re-pin**, so a fork was genuinely required. The student's visual judgment led here and was right, while objective metrics initially pointed the wrong way: Laplacian variance read this as the *sharpest* source in the project (3,428 vs open_images' 1,135) because the augmentation recipe was heavy **noise**, and noise inflates that metric. Fork v1 generated through the SDK (`project.generate_version`) with `augmentation: {}` and `preprocessing: {auto-orient: true}` — **3,523 images, exactly 1.00x the source pool**. Median noise dropped 7.64 -> 3.55. **No resize**, deliberately: ultralytics letterboxes to `imgsz` at train time, so an export-time resize is pure irreversible loss, and every non-Roboflow source in this project is already native-resolution while the Roboflow ones had been squashed to between 224x224 and 720x720.
+
+**Dedup verdicts carried across both re-exports rather than re-run.** New `build_dedup_keeplist.py` freezes a source's dedup verdict into a base-name keep-list before re-acquisition; `apply_dedup_keeplist.py` applies it after. The join key is the Roboflow base name, which survives a re-export while every `.rf.<hash>` filename changes. Coverage was **97.8%** for door and **99.8%** for revised_pedestrian_obstacle, so DEC-089's 8-hour GPU run was preserved for both. Scope stated honestly in the tooling: near-duplicate verdicts are claims about *content* and carry over soundly; exact-duplicate verdicts do not (different bytes) and were re-established with `dedup_extend_exact.py`, which found **0** for both — matching DEC-090's crosswalk result. A base is dropped only when every file carrying it was flagged AND none was a group's kept representative, and the tool aborts if under 50% of keep-list bases appear in the re-export.
+
+**Four silent data-corruption bugs found and fixed.** Each produced plausible-looking output:
+
+1. **`acquire_roboflow.py` never cleared its destination.** The SDK's `overwrite=True` only overwrites files it writes; it leaves a previous version's files behind. Re-pinning door produced `train/images/` with **6,137 files** (v3's 4,509 blended with v1's 1,628) while `data.yaml` correctly read `.../dataset/1`. Fixed with `rmtree` before download.
+2. **`yolo_to_intermediate.py` had the same bug.** A 1,704-image conversion left `images/` holding **3,790**. Fixed, scoped to only `images/` and `labels/` so `labels_reviewed/` — which holds hand-review work — is never touched.
+3. **`dedup_extend_exact.py`'s guard fired unconditionally.** Its `images_checked > merged_count` clause assumed a prior run of itself, but DEC-089's dedup ran against a 66,907-image pool, so `images_checked` is permanently 67,109 while `dataset/merged/` is whatever the current cap produces. It blocked both legitimate extensions. Narrowed to the `already_referenced` check, which is what actually encodes the intent.
+4. **The same script silently shrank the coverage record.** `images_checked = merged_count + len(new_images)` was correct for DEC-090's crosswalk (extended *before* merging) but destructive here: it drove 67,109 down to **48,000**, below `near_duplicate_sample_size` (66,907) — an incoherent state claiming the near-duplicate check covered more images than the exact check ever saw. Made monotonic with `max()`; restored from backup and re-ran.
+
+**De-augmentation strategy settled per source, not globally.** DEC-095 added a `provenance` strategy (collapse only groups provably inside train at the measured multiplier). The discriminator for whether the cheaper `filename` strategy is safe turns out to be **camera-roll naming**, not the `_is_distinctive_base()` test used for cross-source grouping — within one Roboflow project a bare sequential number like `102` is Roboflow-assigned and unique, while `IMG_7497` is user-supplied and collides. Measured share of multi-file bases with camera-roll names: `dlsu` **40%** (RISKY — this is where the verified `IMG_7497` collision lives, a motorcycle and a row of buses merged as one), `elevator_awvus` 11%, everything else 0–1%. Applied `filename` to `door`, `revised_pedestrian_obstacle`, `roitrikee`, `stair_gaptw`, `wtf_dwvgm`, `elevator_status_0iq4p`; left `dlsu` and `elevator_awvus` on `provenance`.
+
+**`elevator_status_0iq4p` marked `audit_status: failed`.** Student caught on visual inspection that its boxes do not wrap elevators. The native class names read correctly ("Open Elevator", "Closed Elevator") so the mapping looked sound, but the annotator was classifying elevator *state* and anchored every box on the **floor-indicator display above the door**. Confirmed objectively by geometry: **31% of its boxes are wider-than-tall versus 1% in `elevator_awvus`**, which is what boxing a horizontal indicator strip instead of a tall door produces, while median box area is near-identical (0.125 vs 0.142) — so the defect is orientation, not scale. Unusable: it would teach the detector to find small rectangular displays. Not a relabel candidate at any sane cost.
+
+**Review notebook v25 -> v28.** (a) The build cell now restores `exclude` sample tags from `<source>_excluded.json`, which both makes prior exclusions visible after a rebuild and puts `exclude` into the App's tag vocabulary so it is a checkbox rather than a retyped string. (b) When a source has no prior exclusions it seeds `exclude` on the first sample, printing the filename and instructing that it be un-tagged — the student's explicit call, since FiftyOne offers a tag only when some sample carries it and a zero-sample tag ceases to exist (verified against 1.20; `dataset.tags` is a dataset-level label, unrelated). (c) **The build cell now creates datasets with `persistent=True`.**
+
+### Rationale
+
+(c) above is the most important line in this entry. The rebuild guard only refuses when `existing.persistent` is True, but the cell created datasets as `persistent=False` — leaving every freshly built review dataset unprotected until the student manually ran the `dataset.persistent = True` cell. Any re-run of the build cell inside that window silently deleted the review. **This destroyed `door_detection_zqt59`'s review during this very session** (12 exclusions and 9 Stairs / 3 Bicycle / 2 Pole hand-drawn boxes, classes that existed nowhere else), recoverable only because a snapshot backup happened to exist — and it had already destroyed that source's tags once before, plus `cv_project_hovyc`'s 71 exclusions and 277 accepted predictions. Three destructions, one root cause, a fix that was identified earlier and deferred. The tradeoff — abandoned review datasets now survive restarts and need explicit deletion — is trivially worth it.
+
+### Consequences
+
+- **`dataset/merged/` is 45,132 images.** Class counts: Vehicle/Person at cap, Stairs **1,382**, Doors **1,910**, Elevator **1,350**, Pedestrian Lane **1,286**, Trash Bins 1,683, Tricycle 1,810. Ratio invariant degraded to 4.28. `split.py --dry-run` passes clean at 31,457 / 6,930 / 6,745 with zero leakage.
+- **Stairs, Pedestrian Lane and Elevator are tracked as class-removal candidates** at the student's request — explicitly NOT decided, and not to be recorded as dropped. Deprioritised for cleaning because they are 100% single-candidate-class sources: `elevator_awvus` (1,350), `stair_gaptw` (967), `wtf_dwvgm` (475), `crosswalk_detector_lz3hc` (202) — 2,994 images of review deferrable at zero risk to any other class. `revised_pedestrian_obstacle` is explicitly NOT on that list despite its name: only 16% of its boxes are candidate classes, and it is the largest clean Person/Vehicle contributor.
+- **`cap_per_class.py` indexes by the class ID present in each label file, not the source's configured `canonical_class`** — verified, and it matters now that hand-added boxes are introducing classes a source was never declared for (the door review added Stairs, Bicycle, Pole, Animals boxes to a Doors-only source). Those count normally.
+- **`review_roboflow_cv_project_hovyc`'s live FiftyOne dataset is a stale pre-deduplication snapshot** and must never be written back: it holds 2,297 boxes against 1,742 on disk, the surplus being the 554 duplicates removed from `labels/` under DEC-093. Its disk state is correct and its review is complete; the dataset is simply obsolete. One `acce[t` typo'd prediction tag found in it was fixed surgically on disk rather than by re-running write-back, precisely to avoid reinstating those duplicates.
+- `trashcan_detection_pihfn` remains on the augmented v2 by the student's explicit decision (keeping Trash Bins above the floor), reaffirmed after being shown the evidence. Its honest distinct-photo count from that source is **216**.
+- Backups from this session: `dataset/backups/pre_door_repin_20260826/` (config, notebook v25 and v27, pre-extend dedup report), `deaugment_statusquo_20260826.json` (the 21,910-file filename-strategy state), `door_pre_restore_*`, `labels_reviewed_pre_restore_bak_*`.
+
+---
+
+## DEC-097: Root Cause Found for Every "Lost Review Edit" in This Project — FiftyOne's In-Process Sample Cache, Not Data Loss. DEC-092 Resolved.
+
+- **Date:** 2026-08-26
+- **Status:** Accepted
+- **Resolves:** DEC-092 (recorded as "Root Cause Not Found"), `docs/OPEN_QUESTIONS.md` #15
+- **Related:** DEC-093 (the duplication bug found while chasing this), DEC-096 (the review notebook this fixes)
+
+### Context
+
+The student reported a recurring pattern, stated precisely enough to be testable: *"when it's time for the write back... some stuff doesn't reflect, some hijinks happen, I end up just loading the backup and then do the actual write back which actually reflects the changes."*
+
+That workaround is the diagnostic. A backup taken from the same `dataset` object moments earlier contained edits the write-back did not. Something was different between how the backup read the dataset and how write-back read it.
+
+### Decision
+
+**Root cause: FiftyOne caches `Sample` objects by id inside the Python process.** Once the kernel has materialised a sample, `for sample in dataset` returns that *same cached object* rather than re-reading the document. The App is a **separate process** — every box drawn, moved or deleted and every tag clicked goes to MongoDB, while the kernel keeps serving its stale copy.
+
+**Measured directly, in a controlled probe** (kernel materialises a sample; a second connection writes to MongoDB exactly as the App would; then the kernel reads):
+
+```
+1. kernel materialises        -> 1 box,  tags=[]
+2. DB actually contains       -> 2 boxes, tags=['exclude']
+3. `for sample in dataset`    -> 1 box,  tags=[]            <-- STALE
+4. after dataset.reload()     -> 2 boxes, tags=['exclude']  <-- correct
+```
+
+**And the second half, which explains the workaround exactly:**
+
+```
+iteration sees   -> 1 box,  tags=[]
+dataset.export() -> 2 boxes, tags=['exclude']
+```
+
+`dataset.export()` queries MongoDB directly and is **always accurate**. Iteration is not. So the backup cell captured truth while the write-back cell — iterating the same object — wrote a snapshot from before the edits. Restoring that backup worked because `Dataset.from_dir` constructs fresh, uncached `Sample` objects.
+
+**No cell in the notebook called `dataset.reload()`.** Fixed by adding it as the first executable statement of every cell that reads the live dataset: the write-back cell, the ground-truth dedup cell, and the retroactive-promotion cell. `reload()` re-reads documents from the DB and discards nothing unsaved, so it is cheap and unconditionally safe.
+
+### Rationale
+
+This retires a mystery that consumed a large share of two sessions and produced several confidently-wrong theories. **DEC-092 is now resolved**: its 449 → 208 tag drop was never data loss. The kernel was reading a cached snapshot from before those tags were applied, so the tags existed in MongoDB the whole time — which is exactly why recovery from a backup export worked and why every "disproven hypothesis" in that entry (mis-tagged field, stale FORCE_REBUILD, duplicate kernel, predictions regeneration) came back clean. They were all looking for a deletion that never happened.
+
+It also explains, without any additional cause, the numbers in DEC-096's door incident: write-back wrote 730 boxes and 1 exclusion while the dataset genuinely held 733/12 at backup time and 789/12 later. Not three inconsistent states — one live state and two stale reads of it.
+
+**Methodology note worth keeping.** The fix came from taking the student's workaround literally and asking what was mechanically different between the two code paths, rather than theorising about what might have deleted the data. DEC-093 already recorded "read the disk instead of reasoning about it" after a similar detour; the generalisation is: when a workaround reliably works, the difference between the working path and the broken one *is* the bug, and it is directly testable.
+
+### Consequences
+
+- Write-back now reflects the live App state on the first run. The backup-restore-writeback workaround is no longer needed — though the **backup itself remains mandatory before every write-back** (DEC-092's standing rule stands, and this finding makes the reason sharper: the export is the one read path guaranteed accurate).
+- Review notebook is **v29**. Prior versions are backed up under `dataset/backups/pre_door_repin_20260826/` (v25, v27, v28).
+- **Any FUTURE code that reads the live review dataset must call `dataset.reload()` first.** This is not specific to write-back; it applies to any cell or script that iterates a dataset the App may have touched. The three fixed cells carry the full explanation inline so it is not re-derived.
+- The `verify_*` datasets are unaffected — they are built fresh from `labels_reviewed/` on disk, never from cached samples.
+- Not changed: `dataset.export()`, `count_sample_tags()`, `count_label_tags()` and other aggregation-based calls were already reading the DB directly. That is why the diagnostics run against this project's datasets throughout this session gave correct numbers while the notebook's own write-back did not.
+
+---
+
+## DEC-098: Predictions Overlay Filtered by Same-Class IoU Against Ground Truth, Not by Containment or Class Exclusion
+
+- **Date:** 2026-08-26
+- **Status:** Accepted
+
+### Context
+
+Review has moved from specialty sources (Doors, Poles, Potholes — no COCO analog) onto sources whose own classes overlap the COCO-pretrained `yolov8n` used for the predictions overlay (DEC-074). On those, the overlay re-detects objects `ground_truth` already has a box for. Measured across all 15 live review datasets on 2026-08-26:
+
+Measured with **both** contamination sources removed — already-promoted predictions, and predictions pixel-identical to a `ground_truth` box (promoted by an earlier write-back but never tagged, because the `promoted` tag postdates DEC-093). Each source's raw Roboflow export classes are shown, because they are what decides whether the rule can fire at all.
+
+| source | dup_gt | self-match | raw export classes |
+|---|---|---|---|
+| `me5_u6rvg` | **33.1%** | 0 | `0,1,2,3,4,5,6,7` — genuinely multi-class |
+| `roitrikee` | **25.1%** | 0 | `Tricycle` — entirely the alias rule |
+| `augmented_tricycle` | **23.9%** | 0 | `Tricycle,tricycle` — entirely the alias rule |
+| `pothole_voxrl` | 17.2% | 3 | `pothole` |
+| `trashcan_detection_pihfn` | 4.2% | 140 | `Trashbin` |
+| `cv_project_hovyc` | 2.9% | 277 | `Door,Exit up/down/left/right` |
+| `door_detection_zqt59` | 2.7% | 0 | `door,hinged,knob,lever` |
+| all 8 other sources | 0.0% | 0 | single-class specialty |
+
+**Three sources carry the entire effect**, and all three are explained by their raw labels: `me5_u6rvg` labels eight classes of its own, and the two Tricycle sources are matched only through `GT_CLASS_ALIASES`. Every single-class specialty source lands at 0–4%.
+
+An earlier cut of this table was wrong in both directions and is recorded here because the failure mode is easy to repeat. It reported `pothole_voxrl` at 83.6%, `cv_project_hovyc` at 69.0% and `door_detection_zqt59` at 62.7% — all artefacts of measuring against post-review `ground_truth` containing boxes promoted from the very predictions being tested. For `cv_project_hovyc`, 277 of its 289 matches were pixel-identical self-matches; its raw export contains no COCO class at all, so no real match was ever possible.
+
+### Decision
+
+A prediction is tagged **`dup_gt`** and has its `accept` withdrawn when it overlaps an existing `ground_truth` box of a **matching class** at **IoU >= 0.5**. It is never deleted. New notebook cell `dupgt_code` (v31), re-runnable against a live dataset.
+
+"Matching class" is same-class, plus one documented cross-class alias set:
+
+```python
+GT_CLASS_ALIASES = {"Tricycle": {"Vehicle", "Motorcycle", "Bicycle"}}
+```
+
+Two classes of prediction are skipped **before** the IoU test and are not counted: those tagged `promoted`, and those matching a `ground_truth` box at **IoU >= 0.999** (`SELF_MATCH_IOU`).
+
+**Cross-class alias pairs match on ANY overlap, not on IoU** — and only on a source whose `ground_truth` contains no box of the alias classes at all, decided from the dataset itself rather than a hand-kept list.
+
+### Rationale
+
+**IoU 0.5 is not tuned to taste.** The best-same-class-IoU distribution over 7,611 predictions is bimodal — 30.8% in `[0.0,0.1)` (same class, different object: a real find) and 64.9% at `>= 0.5` — with a 2.1% valley between. Suppression at 0.3 catches 5,049 and at 0.5 catches 4,940, a 2% spread across the whole valley.
+
+**The alias set is evidence-driven, not guessed.** Tricycle accounts for **3,134 of the 3,406** cross-class matches at IoU >= 0.5 (93%); `gt=Tricycle / pred=Vehicle` alone is 2,322 at median IoU 0.848 — `yolov8n` boxing the identical object under a different name. The remaining 272 are a long tail across every other class pair, left visible deliberately: each alias added is a class-confusion the student can no longer see.
+
+**The pixel-identical guard is geometric, not tag-based, and that is deliberate.** The `promoted` tag only exists for datasets reviewed after DEC-093. `cv_project_hovyc` was reviewed before it: its 277 promoted predictions carry `accept` with no `promoted` tag, and a tag-based guard alone reported it at 69.0% redundant against a true rate of 2.9%. `trashcan_detection_pihfn` has 140 in the same state. An IoU >= 0.999 test catches both without depending on review history — independent re-detection does not land on a hand-drawn or dataset-supplied box to six decimal places.
+
+**Promoted predictions must be excluded before the test, not after.** Write-back copies a promoted prediction into `ground_truth`, so it thereafter matches its own copy at IoU 1.0. `door_detection_zqt59` scores 62.7% "redundant" post-write-back, of which **119 of 121 are that self-match** and mean nothing. Testing them asks whether a box duplicates itself.
+
+### Alternatives Considered
+
+- **Disable the overlay on overlapping sources.** Rejected: forfeits the unlabelled-instance detections that justify the overlay.
+- **Filter by containment for SAME-class matches.** Rejected on measurement. Containment cannot separate "this box *is* the labelled object" from "this box is *inside* it." `gt=Tricycle / pred=Person` has **2,101** cases at containment >= 0.9 but median IoU **0.106** — a containment filter deletes 2,101 real person-in-tricycle detections; IoU >= 0.5 removes 31 and keeps 2,070.
+- **Exclude whole classes per source.** Rejected: a source specialising in one class still misses instances of it, and a class-level filter hides exactly those. The IoU rule cannot — a missed instance has no ground_truth box to match, so its IoU is 0 and it always survives. This is why the specialty sources measure 0.0%: the rule is self-scoping and does not fire where ground_truth has nothing of that class.
+- **Whitelist prediction classes per source** — on a Tricycle-only source show only `Person` predictions and drop `Vehicle`/`Motorcycle`/`Bicycle` outright. Simpler than containment (no thresholds at all) and kills 100% of the fragment noise rather than 763 of 1,207, and `roitrikee` is not a Vehicle or Motorcycle provider under DEC-087 in any case. **Rejected by the student on the grounds that a legitimately distant car in a tricycle photo would be suppressed, adding to the manual burden rather than reducing it.** The objection holds and is what the final rule preserves: **254** alias-class predictions on `roitrikee` touch no tricycle box at all and are kept, 201 of them occupying under 2% of the frame — the smallest at 0.070% — precisely the far-off vehicles a whitelist would have discarded and left to be drawn by hand.
+- **Delete redundant predictions instead of tagging.** Rejected: where ground_truth is the wrong box, the prediction is the evidence. Tagging keeps it findable and makes the pass reversible and idempotent.
+
+### Consequences
+
+- Accepts withdrawn at build time: `me5_u6rvg` 4,445 -> 2,438; `augmented_tricycle` 1,570 -> 1,355; `roitrikee` 670 -> 522. Single-class specialty sources are effectively unaffected (`cv_project_hovyc` withdraws 0, `door_detection_zqt59` 0).
+- **A separate finding from the same investigation, not caused by it:** `cv_project_hovyc`'s live FiftyOne dataset holds 2,297 ground_truth boxes against 1,743 on disk. The 554-box difference is entirely **exact-duplicate rows** stacked by the pre-DEC-093 non-idempotent promotion — de-duplicating the live dataset reproduces the disk total exactly, class for class. Disk is the correct copy and was already cleaned by the DEC-093 pass at 03:53:23 on 2026-08-26; the live dataset is the stale inflated one. No review work was lost and nothing was changed.
+- `roitrikee` lands at **45.8%** (953 of 2,079), with zero alias predictions left overlapping a tricycle and all 867 `Person` predictions kept. `augmented_tricycle` at 23.9%, purely from the alias rule. Both are 0% without it.
+- **`dlsu_d_vehicle_type_detection` is the safer of the two vehicle sources, not the riskier one.** It labels `Vehicle`/`Motorcycle`/`Tricycle`, so most of its duplication is caught by plain same-class matching — the robust rule with the clean valley — leaving the alias rule only the leftover. `roitrikee` labels only `Tricycle`, so every suppression there runs through the fuzzier alias path. Alias false-suppression risk on dlsu was measured against its own labels rather than assumed: just **2** real Vehicle/Motorcycle boxes out of 13,434 overlap a Tricycle box at IoU >= 0.5.
+- **Deliberately not aliased: `Vehicle` <-> `Motorcycle`.** `dlsu_d_vehicle_type_detection` distinguishes them and is the priority source for both (DEC-087), so a disagreement there is worth seeing rather than hiding.
+- **The alias rule's threshold is less robust than the same-class one, and this is a known limit.** Cross-class boxes align less tightly, so `roitrikee`'s alias-IoU distribution has no clean valley: 15.9% of alias-eligible predictions fall in `[0.2,0.5)` against 2.1% for the same-class case, and the dataset-wide rate moves 30.4% -> 25.1% between IoU 0.3 and 0.5. Same-class matching moves 2% across that range. 0.5 is kept for consistency, but a value in this band is a genuine choice for alias pairs rather than a read off a gap.
+- **Why `roitrikee` is only 25.1% despite being near-entirely tricycle imagery:** 42% of its predictions (867 of 2,079) are `Person` — riders, which cannot and must not alias-match `Tricycle`. Of the 1,207 alias-eligible predictions, 36.3% have best-IoU in `[0.0,0.1)` against every Tricycle box in their image: background vehicles, or tricycles the dataset never labelled. Both groups survive correctly. A low percentage here is the rule working, not failing to fire.
+- Hide `dup_gt` via the App sidebar's label-tag filter while reviewing.
+- The pass is **idempotent** — verified by executing the cell twice against clones of `augmented_tricycle` and `door_detection_zqt59`: the second run reports 0 changes. It recomputes rather than accumulates, so raising `GT_MATCH_IOU` or deleting a ground_truth box un-tags predictions that are no longer redundant.
+- Applies to datasets built from v31 on. Existing datasets get it by re-running `dupgt_code` against them — no rebuild needed.
+- **Not addressed:** cross-class high-IoU pairs outside the alias set (272 cases) still appear as normal predictions. Promoting one stacks a wrong-class box on a correct one, so it remains a thing to watch for by eye.
+
+---
+
+## DEC-099: Pedestrian Lane Dropped from the Class Schema — Queued, Not Yet Executed
+
+- **Date:** 2026-08-27
+- **Status:** Accepted (execution queued)
+- **Related:** DEC-042 (1,500 floor), DEC-087 (review-checklist policy). Resolves one of the three removal candidates the student had been tracking without committing; **Stairs and Elevator remain candidates and are explicitly NOT dropped.**
+
+### Context
+
+Pedestrian Lane entered `revised_pedestrian_obstacle`'s review already **below DEC-042's floor** — *"Per-Class Image Ceiling Set at 4,500 (Floor 1,500, 3:1 Ratio Invariant)"* — at 1,286 images against a 1,500 minimum.
+
+Reviewing that source made it worse. 237 images were tagged `exclude`, of which **225 carry a Pedestrian Lane box**, cutting `revised_pedestrian_obstacle`'s contribution from 605 images to 380 and the class as a whole:
+
+| | before | after |
+|---|---|---|
+| images | 1,286 | **1,061** (71% of floor) |
+| boxes | 1,459 | 1,228 |
+
+Remaining sources: `wtf_dwvgm` 475, `revised_pedestrian_obstacle` 380, `crosswalk_detector_lz3hc` 202, `cv_project_hovyc` 4. Closing the ~440-image gap to the floor would mean acquiring a new source, and the two largest existing contributors are both on the deprioritized list precisely because they feed only removal-candidate classes.
+
+### Decision
+
+**Drop `Pedestrian Lane` from the 16-class schema, taking it to 15.** Recorded now; execution deliberately deferred — nothing has been changed yet.
+
+### Rationale
+
+The exclusions were made on **quality** grounds, not to force this outcome. A class held above its floor by 225 images the student judged unusable was never really at 1,286; the count was measuring data that would have degraded the model. That argues for dropping the class rather than for keeping the images.
+
+The student's stated reason for accepting the loss: high-quality Pedestrian Lane data is hard to source, and re-augmenting the existing set is out of scope for now.
+
+### Alternatives Considered
+
+- **Acquire another Pedestrian Lane source.** Rejected as out of scope; the student's judgement is that quality candidates are scarce, which the existing pool corroborates.
+- **Keep the class below floor.** Rejected: at 1,061 it is 71% of the minimum, and DEC-042's floor is a training-viability threshold, not a target.
+- **Keep the 225 excluded images.** Rejected: they were excluded on inspection, and propping a class up with known-bad data is the failure the floor exists to prevent.
+
+### Consequences — Execution Plan (NOT yet done)
+
+`Pedestrian Lane` is **id 14**, so only **`Bicycle` (15) re-indexes**, to 14. Every other class id is unchanged, which keeps the migration far smaller than a mid-schema removal would.
+
+1. `config/classes.yaml` — remove the `pedestrian_lane` block; `config_loader.py`'s `CANONICAL_NAMES` drops to 15 (`nc: 16` -> `nc: 15`, regenerated by `generate_yaml.py`).
+2. `config/datasets.yaml` — drop `pedestrian_lane` from `revised_pedestrian_obstacle`'s `canonical_classes` and its `native_class_filter` `crosswalk` entry.
+3. **Two sources become empty and must be deactivated** — confirmed by scanning their converted labels, not assumed: `wtf_dwvgm` (540 boxes, all Pedestrian Lane) and `crosswalk_detector_lz3hc` (269 boxes, all Pedestrian Lane). `pedestrian_and_animal_crossing` also carries 2,158 but is already `benched`.
+4. **Hand-review work must be migrated in place, never regenerated:** across all `labels_reviewed/`, **27 files contain Pedestrian Lane** and **34 contain Bicycle** and need re-indexing. Small, but irreplaceable — `labels/` is rebuilt from raw by `yolo_to_intermediate.py`, `labels_reviewed/` is not.
+5. Derived layers need no migration, only a rebuild: `dataset/merged/` and `dataset/final/` are regenerated by the usual cascade (`cap_per_class.py` -> `merge.py` -> `dedup.py` -> `split.py` -> `generate_yaml.py`).
+
+Scope measured across 212,261 label files: 6,915 contain Pedestrian Lane (8,168 boxes), 10,982 need re-indexing. All but the 27 + 34 reviewed files are regenerable.
+
+**Not decided here:** whether `revised_pedestrian_obstacle`'s 237 exclusions should still be written back. They should — they were quality judgements about the images, and 12 of them carry Stairs boxes rather than Pedestrian Lane, so the exclusions retain meaning independently of this decision.
+
+---
+
+## DEC-100: Stairs, Elevator and Pedestrian Lane Dropped — Schema 16 -> 13, Executed
+
+- **Date:** 2026-09-04
+- **Status:** Accepted (executed)
+- **Related:** Supersedes DEC-099, which queued the Pedestrian Lane drop alone. DEC-042 (floor 1,500), DEC-087 (review policy).
+
+### Context
+
+All three classes sat below DEC-042's floor — *"Per-Class Image Ceiling Set at 4,500 (Floor 1,500, 3:1 Ratio Invariant)"* — measured against reviewed labels with exclusions applied:
+
+| class | images | shortfall |
+|---|---|---|
+| Stairs | 1,375 | 125 |
+| Elevator | 1,351 | 149 |
+| Pedestrian Lane | 1,099 | 401 |
+
+Every other class cleared the floor comfortably; five sit over the 4,500 cap. Closing the gaps meant acquiring new sources for three classes whose existing sources the student had already deprioritised.
+
+### Decision
+
+Drop all three. Schema **16 -> 13**. Executed 2026-09-04, not queued.
+
+### Rationale
+
+The student accepted the trade explicitly, including that returning later costs a full retrain: a changed class count means a new detection head, not a fine-tune. Pedestrian Lane was already decided in DEC-099 after review of `revised_pedestrian_obstacle` cut it from 1,286 to 1,099 on quality grounds — a class propped up by images judged unusable was never really at its stated count.
+
+### Consequences
+
+**Re-index.** Only ids 0-4 survive unchanged; eight classes shift. `Shelf` 6->5, `Doors` 7->6, `Chairs` 8->7, `Tables` 9->8, `Tricycle` 10->9, `Potholes` 11->10, `Trash Bins` 12->11, `Bicycle` 15->12.
+
+**Executed, in order** — promotion first, because migrating before promoting would copy un-migrated reviewed files over migrated ones:
+
+1. `promote_reviews.py --all` — 4,592 files across 7 sources copied from `labels_reviewed/` to `labels/`. `cap_per_class.py` reads only `labels/` (cap_per_class.py:220), so until this ran no review was visible to the pipeline.
+2. `drop_classes.py --drop Stairs Elevator "Pedestrian Lane"` — 53,206 of 124,045 files changed, 23,078 boxes removed, 16,529 files left with zero boxes. Stamp: `dataset/reports/class_migration_20260904_025230.json`.
+3. `config/classes.yaml` — `nc` 16->13, `names`, `hailo_runtime_names` (14 incl. Background), and the three per-class blocks removed.
+4. `scripts/utils/config_loader.py` — `CANONICAL_NAMES` and `EXPECTED_NC` -> 13.
+5. `config/datasets.yaml` — four sources set `benched`, each 100% a dropped class and now contributing nothing: `elevator_awvus` (2,035 Elevator boxes), `stair_gaptw` (1,155 Stairs), `wtf_dwvgm` (540 Pedestrian Lane), `crosswalk_detector_lz3hc` (269 Pedestrian Lane).
+
+**Verified:** a full scan of all 124,045 label files finds **no out-of-range class id**, and `load_classes()` validates at nc=13.
+
+Empty files are deliberately not deleted — `cap_per_class.py` indexes by ids present, so a zero-box file is a candidate for nothing and never reaches `merged/`.
+
+**Reversibility.** `dataset/backups/pre_class_drop_20260904_023304/` (4.1 GB) holds the complete 16-class state: config, reports, every `labels/` and `labels_reviewed/`, all referenced images including the `*_augmented_aside/` dirs, and all 18 FiftyOne review datasets. Verified self-contained — all 43,700 image references resolve inside it, `labels_reviewed/` byte-identical, and a FiftyOne round-trip import reproduced sample, box and tag counts exactly. `drop_classes.py` also wrote its own per-directory backups.
+
+Restoring is a wholesale copy-back. There is **no inverse migration script**, so review work done under the 13-class schema would have to be reconciled with restored 16-class files by hand.
+
+**Not yet run:** the cascade (`cap_per_class` -> `merge` -> `dedup` -> `split` -> `generate_yaml`). Everything under `dataset/merged/` and `dataset/final/` still reflects the 16-class pre-review state.
 
 ---
 

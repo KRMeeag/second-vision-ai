@@ -1,6 +1,6 @@
 # OPEN_QUESTIONS.md — Second Vision AI
 
-> **Last updated:** 2026-08-21
+> **Last updated:** 2026-08-26
 >
 > **Concurrent-session note (2026-08-20):** this repo has a deliberate split-agent setup (see the architectural handoff doc), and two sessions editing `docs/DECISIONS.md` concurrently produced a real DEC-number collision this session (see DEC-083's Consequences) — a live example, not a hypothetical. If you're picking this file up fresh, don't assume you have the complete picture; check `docs/DECISIONS.md`'s actual latest entry and `git log` before trusting this file's own "newly surfaced" section as exhaustive.
 >
@@ -129,6 +129,74 @@ Still an open checkbox in `TASKS.md` Phase 1 ("Verify CVAT/Label Studio integrat
 **Resolved 2026-08-21 (DEC-086).** Student's call: "we need that fallback now" — option (a), made active. `audit_status: approved` set explicitly in `config/datasets.yaml`, matching its sibling `dataset_ninja_pothole_detection`.
 
 Implementing this surfaced a bigger, separate problem: `cap_per_class.py` had **no `audit_status` awareness at all** — every `dataset/processed/<source>/` directory was scanned unconditionally regardless of status, meaning any source benched/failed *after* its first pull (all 7 from DEC-082/083) would have silently stayed eligible for the next real cap/merge run, contradicting what those entries claimed. Found, fixed (`get_inactive_processed_source_keys()` in `config_loader.py`, wired into `cap_per_class.py`), and verified via `--dry-run`: Potholes now correctly shows 2,661 candidates (`pothole_vhmow` excluded, `dataset_ninja_road_damage_detector` included), matching the number this item was originally about. Full writeup in DEC-086 — confirmed the last *real* run (DEC-077, 2026-08-18) predates this risk and isn't affected.
+
+---
+
+## Newly surfaced (2026-08-25/26, DEC-091 / DEC-092 / DEC-093)
+
+### 12. `roboflow_revised_pedestrian_obstacle` — are its 1,888 near-duplicate flags genuine, or false positives?
+**Deferred by the student mid-review 2026-08-26 ("ask me that again later, im focused on fixing up the labels") — genuinely open, not forgotten.** This source was never included in `BULK_FALSE_POSITIVE_SOURCES` during DEC-090's threshold review, and has **0** entries on the duplicate side of `dataset/reports/near_duplicate_false_positives.json` (it appears once, but only as the *kept* side of another group, which clears nothing for it). Real numbers: 1,888 near-duplicate `duplicate`-role entries plus 1 exact, against 3,960 images in the 5,500-cap selection — a **47.7%** flag rate, currently all treated as genuine.
+
+Interim action taken (not a resolution): the student rebuilt the review dataset with `hide_duplicates = True`, so ~2,071 images are under review instead of 3,960. That's a review-time decision only — it does not record any judgment about whether the flags are correct.
+
+Worth deciding with DEC-090's own empirical finding in mind: false-positive-ness consolidates cleanly by source (a source's flags tend to be *mostly* genuine or *mostly* false positives, rarely mixed), so a look at ~10 flagged groups should settle it rather than a full pass.
+
+### 13. `split.py` has no awareness of `near_duplicate_false_positives.json`
+**Open, known, and pre-existing** — flagged in `fiftyone_near_dup_inspection.ipynb`'s own write-back cell comment at the time it was built ("does not touch... `split.py`'s duplicate grouping. Deciding whether/how those specific pairs should stop being treated as duplicates downstream is a separate follow-up, not made here"), never resolved since.
+
+Verified directly 2026-08-26: `near_duplicate_false_positives.json` is read **only** by the two notebooks — nothing under `scripts/` references it. `split.py` reads `dataset/reports/dedup_report.json` directly and forces every duplicate group into a single split to prevent train/val leakage. So all 3,829 pairs the student cleared as false positives are **still grouped as duplicates at split time**.
+
+Effect is conservative, not dangerous — no leakage risk — but large forced groups could distort the 70/15/15 ratios (DEC-071). Needs a decision before `split.py` runs for real: either have `split.py` subtract the false-positive pairs, or accept the over-grouping deliberately.
+
+### 14. `crowdhuman` and `open_images` — a few duplicate boxes of unknown origin
+**Flagged, not investigated.** A full scan of every processed source (2026-08-26) found 6 duplicate `(class, bbox)` lines across `crowdhuman`'s 19,370 label files, and 3 across `open_images`' 31,011. **Not** the DEC-093 write-back bug — neither source has ever been through this notebook's write-back (no `labels_reviewed/` exists for either), so the cause is different and unidentified. Most plausible guess for `open_images` is the cross-folder box merge (DEC-052); no hypothesis for `crowdhuman`. Well under 0.1% of files each, so left alone deliberately rather than fixed blind.
+
+### 15. DEC-092's tag-loss mechanism — RESOLVED 2026-08-26 (DEC-097)
+**Answer: there was no tag loss.** FiftyOne caches `Sample` objects by id inside the Python process, so `for sample in dataset` returns the cached object rather than what the App (a separate process) has since written to MongoDB. The kernel was reading a snapshot from before the tags existed; the tags were in the database the whole time. Proven in a controlled probe — kernel sees 1 box/no tags, DB holds 2 boxes/`exclude`, iteration returns the stale 1, `dataset.reload()` returns the correct 2. It also explains why `dataset.export()` (the backup) was always accurate: export queries MongoDB directly. Fixed by calling `dataset.reload()` first in every notebook cell that reads the live dataset (v29). The original entry is kept below for the record.
+
+#### Original entry
+Not a decision to make, but recorded here because it's an unresolved *risk* affecting how review sessions should be run. See DEC-092 for the three disproven hypotheses and the standing operating rule (back up immediately before write-back; recover from the static export rather than re-running write-back live if anything looks inconsistent).
+
+### 17. Most Roboflow sources ship pre-augmented — de-augment, and what does that do to the floors?
+**Discovered 2026-08-26, mid-review, while investigating why duplicates were still visible after `hide_duplicates = True`.**
+
+**PARTIALLY RESOLVED 2026-08-26 (DEC-094).** Options B and C were both applied for real: 22,254 augmented files moved aside via the new `scripts/preprocess/deaugment_sources.py` (reversible, `--revert`), and `split.py` now unions augmented-sibling groups into its leakage-prevention grouping. `cap_per_class.py`/`merge.py` re-run — `dataset/merged/` is now 44,606 images (was 67,109). The "don't re-run GPU dedup at a higher threshold" question is also settled (measured 46.6% recall; filename matching is exact and free).
+
+**AUDITED 2026-08-26 (DEC-095).** A follow-up per-source naming audit confirmed the uniform regex was the right rule — sources sort cleanly into not-Roboflow / Roboflow-with-augmentation-off / Roboflow-with-augmentation-on, and the first two had nothing to collapse. It also proved Roboflow augments **only the train split** (so size-1 groups are val/test, not misses), and surfaced a separate leakage class now fixed in `split.py`: **173 base names / 346 files are the same photo under two source keys**. Two residual failure modes are not fixable from filenames — see #18.
+
+**STILL OPEN — the floor decision.** Real post-merge counts put four classes under DEC-042's 1,500 floor: **Stairs 1,417 · Trash Bins 1,339 · Elevator 1,338 · Pedestrian Lane 1,193**, with the ratio invariant at 4.61. Provisionally accepted: Stairs and Trash Bins staying low. Pedestrian Lane is under consideration for benching. **Elevator was surfaced by the corrected analysis and has not been ruled on.** Also still open: which Roboflow sources to drop outright. The original analysis below is kept intact as the reasoning behind DEC-094.
+
+**The finding, verified not inferred.** Roboflow exports use `<original>_<ext>.rf.<hash>.<ext>` naming, so augmented copies of one photo share a base name. Proof from base image `100` in `revised_pedestrian_obstacle`, which exists as 7 files: two of them carry boxes `14 0.462500 0.495312 0.482812 0.793750` and `14 0.537500 0.495312 0.482812 0.793750` — identical width/height with the x-center mirrored exactly around 0.5, i.e. a **horizontal flip**. Others share identical box geometry with different md5 (brightness/noise variants).
+
+Files vs. distinct base images, **active** sources only: `dlsu_d_vehicle_type_detection` 21,142→8,731 · `door_detection_zqt59` 4,493→724 (**6.2x**) · `revised_pedestrian_obstacle` 4,323→2,100 · `elevator_awvus` 1,777→755 · `elevator_status_0iq4p` 1,461→606 · `stair_gaptw` 1,564→967 · `wtf_dwvgm` 1,326→475 · `roitrikee` 665→483 · `trashcan_detection_pihfn` 559→215. Whole active pool: **97,933 → 75,679** (22,254 redundant files). Clean at 1.00x: `pothole_voxrl`, `cv_project_hovyc`, `crosswalk_detector_lz3hc`, and every non-Roboflow source.
+
+**Why the existing dedup run doesn't cover this, and why re-running won't help.** Measured recall on `revised_pedestrian_obstacle`: of 3,539 base-sibling pairs that actually exist, dedup@0.2 grouped only 1,648 — **46.6%**. `mobilenet-v2-imagenet-torch` embeddings are not flip-invariant, so a flipped copy is genuinely distant in that feature space; no threshold catches flips reliably without also flagging masses of unrelated images (the student already hand-reviewed 3,829 false positives at 0.2). Base-name matching gives 100% recall and 100% precision instantly. **Decision taken: do not re-run GPU dedup for this** — it would cost ~8 hours, mostly upload, for a strictly worse signal than a regex. The existing report also stays valid after de-augmentation (report covering more images than the pool is the documented, tolerated superset case).
+
+**Three harms, in severity order.** (1) **Train/val/test leakage** — augmented siblings of one photo can land in different splits, inflating apparent performance; `split.py`'s duplicate grouping only catches what the embedding threshold flagged, so it misses ~53% of siblings. (2) **Inflated counts corrupt the cap/floor policy** — a class "clearing" 1,500 on augmented copies does not have 1,500 distinct scenes. (3) **Multiplied review effort** — reviewing `door_detection_zqt59`'s 4,493 files shows only 724 distinct photos.
+
+**Options laid out for the student (B and C chosen, not yet applied):**
+- **A — de-augment at source** (fork + regenerate on Roboflow with augmentation off, as DEC-090 did for `crosswalk_detector_lz3hc`). Gold standard, but 9 sources to redo, and re-export changes filenames, invalidating completed review work on `trashcan_detection_pihfn` (already promoted) and `revised_pedestrian_obstacle` (in progress).
+- **B — keep one file per base name in `dataset/processed/`** (move the rest aside, reversible). Cheap, deterministic, flows naturally through cap→merge→split. Cost: the kept variant may itself be a transformed copy (harmless for training — correctly-transformed boxes are valid data), and it exposes the floor problem below.
+- **C — make `split.py` group by base name.** Fixes the leakage completely, zero data change, zero re-review, no floor impact. **Treated as mandatory regardless of A/B.**
+
+**The blocking question — de-augmenting drops four classes below the 1,500 floor:** Pedestrian Lane 2,947→**1,201**, Stairs 2,371→**1,441**, Elevator 3,191→**1,340**, Trash Bins 1,683→**1,339**. (Tricycle 3,798→1,788 is thin but clears.) The student has provisionally accepted Stairs and Trash Bins staying low, and is separately weighing benching Pedestrian Lane; **Elevator was newly revealed by the corrected analysis and has not been ruled on.** Framing worth preserving: B does not *cause* this shortfall, it *reveals* one that already existed — if the floor exists to guarantee enough genuinely distinct data, those classes were never really clearing it.
+
+**Related, recorded here because it shapes the drop decision:** 11 of 16 classes survive dropping Roboflow entirely (Open Images / ExDark / CrowdHuman / Dataset Ninja cover them). The five with **no non-Roboflow fallback at all** are exactly Doors, Stairs, Elevator, Tricycle, and Pedestrian Lane. The only Roboflow sources droppable at zero cost to any other class are `wtf_dwvgm` (475 distinct) and `crosswalk_detector_lz3hc` (202), both Pedestrian-Lane-exclusive.
+
+### 16. Downstream reports are stale after 2026-08-26's deduplication
+Not a question so much as a queued action. Removing 554 (`cv_project_hovyc`) + 420 (`trashcan_detection_pihfn`) duplicate boxes from those sources' live `labels/` changed their real instance counts, and `cap_class()` budgets against instance counts (`INSTANCE_TARGET`) — so `cap_report_hardcap5500.json`, `box_audit_report.json`, and `merged_box_audit_report.json` all now slightly overcount for those sources. Image *selection* is very likely unaffected (deduplication only removes redundant boxes inside already-selected images), but this hasn't been verified. Separately, promoting `roboflow_pothole_voxrl` will turn it from a 1-class into a 10-class source, which *will* change candidate pools. **The cap → merge cascade must be re-run after promotions and before `split.py`** — self-corrects naturally at that point, no special handling needed.
+
+### 18. Four sources still overstate their distinct-photo count, and filenames cannot fix it
+**Surfaced 2026-08-26 by the DEC-095 naming audit.** Two augmentation patterns survive de-augmentation because the transform is baked into the base name itself, not into Roboflow's export suffix:
+
+- **Export → re-upload → re-export.** `door_detection_zqt59` is the clear case: its *valid* and *test* splits carry group sizes 5 and 7, which train-only augmentation cannot produce, and 72.4% of its bases end in `_JPG` — the fossil of a previous export. Pass 2 treated pass 1's augmented copies as fresh originals, giving 4,493 files from 724 "photos" that are themselves partly duplicates.
+- **Pre-upload augmentation.** Bases like `IMG-20210825-WA0006flip_output_output` read as their own image. Measured: `escalator_stairs` 158/2,663 bases, `revised_pedestrian_obstacle` 56/2,100, `stairs_i2yia` 29/1,372.
+
+**Impact is on counting, not leakage** — embedding dedup plus `split.py`'s sibling and cross-source grouping still prevent these from straddling splits. But DEC-042's 1,500 floor is measured against a mild overcount for these four sources, which matters because three of them feed classes already at or near the floor (Stairs, Doors, Pedestrian Lane).
+
+**PARTIALLY RESOLVED 2026-08-26 (DEC-096).** `door_detection_zqt59` is fixed: re-pinned v3 -> v1 (removing a 2.60x Roboflow layer) and then filename-de-augmented (1,601 -> 654), which is legitimate for this source because all 474 of its multi-file bases are distinctive 16-hex/`Door####` names with zero camera-roll names. Its pre-upload augmentation was confirmed from v1's own splits: `valid` holds 251 base-groups of size 3 and `test` 147, and Roboflow never augments val/test. `revised_pedestrian_obstacle` is fixed by fork (1.80x -> 1.00x). **Still open for `escalator_stairs` and `stairs_i2yia`** (both currently inactive), whose `_flip_output_output` chains remain unmeasured.
+
+**Not yet decided:** whether to measure the true counts (perceptual hashing would catch both modes, at the cost of a new pipeline stage and threshold to tune) or to re-export `door_detection_zqt59` with augmentation off (DEC-094's option A, still available). Neither is triggered unless a class's floor decision turns on the exact number.
 
 ---
 
