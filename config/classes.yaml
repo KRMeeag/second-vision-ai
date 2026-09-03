@@ -24,47 +24,40 @@ annotation_policy:
     Hidden object extent must not be estimated. See DEC-012.
 
 # --- Number of classes ---
-nc: 16
-
+nc: 13
 # --- Class names (0-indexed for YOLO training) ---
 names:
-  0: Person
-  1: Vehicle
-  2: Motorcycle
-  3: Pole
-  4: Animals
-  5: Stairs
-  6: Shelf
-  7: Doors
-  8: Chairs
-  9: Tables
-  10: Tricycle
-  11: Potholes
-  12: Trash Bins
-  13: Elevator
-  14: Pedestrian Lane
-  15: Bicycle
+  0: "Person"
+  1: "Vehicle"
+  2: "Motorcycle"
+  3: "Pole"
+  4: "Animals"
+  5: "Shelf"
+  6: "Doors"
+  7: "Chairs"
+  8: "Tables"
+  9: "Tricycle"
+  10: "Potholes"
+  11: "Trash Bins"
+  12: "Bicycle"
 
 # --- Hailo runtime mapping (after background class injection) ---
 # Reference only — used when generating custom label JSON
 hailo_runtime_names:
-  0: Background
-  1: Person
-  2: Vehicle
-  3: Motorcycle
-  4: Pole
-  5: Animals
-  6: Stairs
-  7: Shelf
-  8: Doors
-  9: Chairs
-  10: Tables
-  11: Tricycle
-  12: Potholes
-  13: Trash Bins
-  14: Elevator
-  15: Pedestrian Lane
-  16: Bicycle
+  0: "Background"
+  1: "Person"
+  2: "Vehicle"
+  3: "Motorcycle"
+  4: "Pole"
+  5: "Animals"
+  6: "Shelf"
+  7: "Doors"
+  8: "Chairs"
+  9: "Tables"
+  10: "Tricycle"
+  11: "Potholes"
+  12: "Trash Bins"
+  13: "Bicycle"
 
 # --- Per-Class Source Configuration ---
 # Defines primary, secondary, and low-light augmentation providers
@@ -241,39 +234,6 @@ classes:
       guaranteed_floor: true
     cap: 4500
 
-  stairs:
-    id: 5
-    # stairs_lusiz + stairs_hsatv are `failed` pending possible relabel
-    # — see DEC-031 and docs/preprocessing.md. stairs_i2yia +
-    # escalator_stairs failed direct visual review 2026-08-20 (DEC-082)
-    # — duplicate/near-duplicate images, boxes not on the annotated
-    # object; stair_gaptw is the current active replacement.
-    primary_providers:
-      - source: roboflow
-        project: "stairs-n9kkx/stairs-lusiz"
-      - source: roboflow
-        project: "abeera-munir-v9edc/stairs-hsatv"
-      - source: roboflow
-        project: "tom-lai-8bp7n/stairs-i2yia"
-        note: "Failed direct visual review 2026-08-20 (DEC-082) — see datasets.yaml audit_note."
-      - source: roboflow
-        project: "escalatorstairsdetection/escalator-stairs"
-        native_class_filter: "stairs"
-        note: "Failed direct visual review 2026-08-20 (DEC-082) — see datasets.yaml audit_note."
-      - source: roboflow
-        project: "school-4awgw/stair-gaptw"
-        note: "Added 2026-08-20 (DEC-082) — the current active Stairs source, replacing the two above."
-    secondary_providers:
-      - source: roboflow
-        project: "thesis-test-dataset/revised-pedestrian-obstacle"
-        native_class_filter: "stairs"
-        role: volume_topup
-        note: >
-          Added 2026-08-20 (DEC-083) primarily as a Vehicle/Pedestrian
-          Lane source — its "stairs" class is an incidental Stairs
-          contribution.
-    cap: 4500
-
   shelf:
     id: 6
     primary:
@@ -416,64 +376,3 @@ classes:
     secondary_role: diversity
     cap: 4500
 
-  elevator:
-    id: 13
-    primary_providers:
-      - source: roboflow
-        project: "detection-3h20r/elevator-awvus"
-      - source: roboflow
-        project: "rightly-ai-huxry/elevator-status-s4lrk"
-        audit_note: >
-          Mini-audit 2026-08-08 (DEC-031): partially usable — has
-          genuine detection-style samples (people in elevators with
-          real boxes), not purely a scene classifier as first
-          suspected. State-related labels collapse into a single
-          "elevator" class. Same box-shape concern as Stairs. Full
-          Stage 5.3 audit still needed to isolate the usable subset.
-        note: >
-          Failed direct visual review 2026-08-20 (DEC-082) — overturns
-          the DEC-031 "genuine usable subset" framing above. Large
-          corrupted black regions baked into the source images
-          themselves. Replaced by elevator-status-0iq4p below.
-      - source: roboflow
-        project: "elevator-0iq4p/elevator-status"
-        native_class_filter:
-          elevator: ["Open Elevator", "Closed Elevator", "-Nobody was in the elevator"]
-          person: "People are in the elevator."
-        note: >
-          Added 2026-08-20 (DEC-082) — a distinct Roboflow project
-          from elevator-status-s4lrk (different workspace, verified
-          not a duplicate/mirror). "People are in the elevator." is
-          re-mapped to canonical Person, not Elevator, per explicit
-          student instruction — geometrically verified post-conversion
-          (tight, individual per-person boxes, not one elevator-shaped
-          box). See datasets.yaml for the full audit_note.
-    cap: 4500
-
-  pedestrian_lane:
-    id: 14
-    primary_providers:
-      - source: roboflow
-        project: "anomaly-road-crossing-detection/pedestrian-and-animal-crossing"
-        native_class_filter: "pedestrian_crossing"
-        audit_note: >
-          Multi-class source, also contains animal-crossing.
-          Confirm exact class label after download.
-        note: >
-          Benched 2026-08-20 (DEC-083) — replaced by wtf_dwvgm below.
-          (This project was separately forked into the student's own
-          workspace as kenth/pedestrian-and-animal-crossing-vcjuo with
-          a different native_class_filter — see datasets.yaml's
-          `pedestrian_and_animal_crossing` entry, DEC-053. That forked
-          entry is benched too, same DEC-083 change.)
-      - source: roboflow
-        project: "ajsh-yai1y/wtf-dwvgm"
-        native_class_filter: ["crosswalk", "Crosswalks"]
-        note: "Added 2026-08-20 (DEC-083) — 'Main Pedestrian Lane Dataset,' the current active primary source."
-    secondary_providers:
-      - source: roboflow
-        project: "thesis-test-dataset/revised-pedestrian-obstacle"
-        native_class_filter: "crosswalk"
-        role: volume_topup
-        note: "Added 2026-08-20 (DEC-083) — see datasets.yaml for the full multi-class mapping (also contributes Vehicle, Stairs, Person)."
-    cap: 4500
