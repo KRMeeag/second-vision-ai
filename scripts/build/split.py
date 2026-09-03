@@ -63,7 +63,9 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from scripts.utils.config_loader import get_canonical_names  # noqa: E402
-from scripts.utils.file_utils import ensure_dir, final_dir, list_images, merged_dir, reports_dir, safe_copy  # noqa: E402
+from scripts.utils.file_utils import (  # noqa: E402
+    ensure_dir, final_dir, list_images, merged_dir, reports_dir, roboflow_base_name, safe_copy,
+)
 
 TRAIN_RATIO = 0.70
 VAL_RATIO = 0.15
@@ -143,6 +145,83 @@ def load_duplicate_groups(merged_image_count: int) -> tuple[list[list[str]], boo
         f"{len(groups)} duplicate groups found across both will be kept intact."
     )
     return groups, near_dup_full_scale
+
+
+def augmented_sibling_groups(filenames: list[str]) -> list[list[str]]:
+    """
+    Groups of merged-pool filenames that are augmented copies of ONE original photo.
+
+    Roboflow bakes augmentation into its exports (docs/OPEN_QUESTIONS.md #17), so
+    several files can be flips/brightness variants of the same source image. Those
+    must never straddle train/val — the model would train on a photo and be
+    validated on a flipped copy of it, inflating apparent performance. This is the
+    same leakage concern load_duplicate_groups() exists for, but caught by an exact
+    filename identity rather than embedding distance: dedup.py's near-duplicate
+    check measured only 46.6% recall on real augmented siblings (MobileNet features
+    aren't flip-invariant), so relying on it alone leaves roughly half of them free
+    to straddle splits.
+
+    Grouping is per (source, base name) — the source prefix is kept in the key, so
+    two different sources that happen to share a base name (both having uploaded a
+    "100.jpg") are never merged into one group.
+
+    Returns only groups with 2+ members; singletons carry no constraint. Normally
+    EMPTY once scripts/preprocess/deaugment_sources.py has collapsed siblings in
+    dataset/processed/ — this is the standing safety net for anything that slips
+    through (a newly added augmented source, or a --revert), not the primary fix.
+    """
+    by_base: dict[tuple[str, str], list[str]] = {}
+    for filename in filenames:
+        source, _, original = filename.partition("__")
+        base = roboflow_base_name(Path(original).stem)
+        by_base.setdefault((source, base), []).append(filename)
+    return [group for group in by_base.values() if len(group) > 1]
+
+
+def _is_distinctive_base(base: str) -> bool:
+    """
+    Is this base name specific enough that two sources sharing it means one photo?
+
+    Guards cross_source_duplicate_groups() against false merges. Short or purely
+    numeric names collide by coincidence all the time — dataset_ninja_pothole's
+    `potholes5` and a Roboflow `5.jpg` are unrelated images that happen to share
+    a stem. Requiring 10+ characters AND at least one letter keeps the genuine
+    hits (Open Images' 16-hex-char ids, Facebook CDN names like
+    `325803739_949334939772005_2213410805579820159_n`) and drops the noise.
+    """
+    return len(base) >= 10 and any(character.isalpha() for character in base)
+
+
+def cross_source_duplicate_groups(filenames: list[str]) -> list[list[str]]:
+    """
+    Groups of merged-pool filenames that are the SAME photo under different sources.
+
+    Separate concern from augmented_sibling_groups(): that one catches one source
+    exporting a photo several times, this one catches several sources shipping the
+    same photo once each. Both leak the same way if they straddle splits.
+
+    Real and measured (2026-08-26): 173 base names / 346 files in dataset/merged/
+    are the same photo under two source keys — roboflow_door_detection_zqt59 was
+    built by scraping Open Images (verified visually: identical frame, identical
+    burned-in camera timestamp, only resized to 416x416), and elevator_awvus vs
+    elevator_status_0iq4p overlap on 53 Facebook-sourced photos. dedup.py's
+    embedding check links only 29 of those 346, so the rest would otherwise be
+    free to straddle train/val.
+
+    Unlike augmented siblings, deaugment_sources.py can NOT collapse these — it
+    works within one source directory — so this grouping is the primary fix, not
+    a safety net, and is expected to stay non-empty.
+    """
+    by_base: dict[str, list[str]] = {}
+    for filename in filenames:
+        source, _, original = filename.partition("__")
+        base = roboflow_base_name(Path(original).stem)
+        if _is_distinctive_base(base):
+            by_base.setdefault(base, []).append(filename)
+    return [
+        group for group in by_base.values()
+        if len({member.partition("__")[0] for member in group}) > 1
+    ]
 
 
 def assign_splits(filenames: list[str], duplicate_groups: list[list[str]] | None) -> dict[str, str]:
@@ -233,6 +312,36 @@ def run(dry_run: bool = False) -> dict[str, Any]:
     duplicate_result = load_duplicate_groups(len(filenames))
     duplicate_groups, near_dup_full_scale = duplicate_result if duplicate_result is not None else (None, False)
 
+    # Augmented-sibling groups are unioned in alongside the dedup report's groups --
+    # assign_splits() already runs real union-find, so an overlap between the two
+    # (a file that's both an augmented sibling and an embedding near-duplicate)
+    # merges into one connected component rather than one source of grouping
+    # silently overriding the other.
+    sibling_groups = augmented_sibling_groups(filenames)
+    if sibling_groups:
+        sibling_files = sum(len(g) for g in sibling_groups)
+        print(
+            f"  {len(sibling_groups)} augmented-sibling group(s) covering {sibling_files} files "
+            f"(Roboflow export variants of the same photo) -- grouped so they can't straddle splits. "
+            f"Run scripts/preprocess/deaugment_sources.py to collapse these at the source instead."
+        )
+        duplicate_groups = (duplicate_groups or []) + sibling_groups
+    else:
+        print("  0 augmented-sibling groups (pool is already de-augmented).")
+
+    # Same union-find rationale as above: a photo that is both a cross-source
+    # duplicate and an embedding near-duplicate ends up in one component.
+    cross_groups = cross_source_duplicate_groups(filenames)
+    if cross_groups:
+        cross_files = sum(len(g) for g in cross_groups)
+        print(
+            f"  {len(cross_groups)} cross-source duplicate group(s) covering {cross_files} files "
+            f"(one photo shipped by 2+ sources) -- grouped so they can't straddle splits."
+        )
+        duplicate_groups = (duplicate_groups or []) + cross_groups
+    else:
+        print("  0 cross-source duplicate groups.")
+
     assignment = assign_splits(filenames, duplicate_groups)
 
     # Verify: every file assigned exactly once, to exactly one of the 3 splits.
@@ -282,6 +391,10 @@ def run(dry_run: bool = False) -> dict[str, Any]:
             )
         ) if duplicate_groups is not None else None,
         "split_counts": split_counts,
+        "augmented_sibling_groups": len(sibling_groups),
+        "augmented_sibling_files": sum(len(g) for g in sibling_groups),
+        "cross_source_duplicate_groups": len(cross_groups),
+        "cross_source_duplicate_files": sum(len(g) for g in cross_groups),
         "cross_split_duplicate_leakage": leakage,
     }
 

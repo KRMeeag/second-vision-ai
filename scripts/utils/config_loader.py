@@ -60,7 +60,7 @@ CLASSES_YAML: Path = REPO_ROOT / "config" / "classes.yaml"
 DATASETS_YAML: Path = REPO_ROOT / "config" / "datasets.yaml"
 
 # Authoritative class count — must match nc in classes.yaml
-EXPECTED_NC: int = 16
+EXPECTED_NC: int = 13
 
 # Canonical class names in YOLO id order (0-indexed).
 # Must stay in sync with AGENTS.md and config/classes.yaml.
@@ -72,7 +72,6 @@ CANONICAL_NAMES: list[str] = [
     "Motorcycle",
     "Pole",
     "Animals",
-    "Stairs",
     "Shelf",
     "Doors",
     "Chairs",
@@ -80,8 +79,6 @@ CANONICAL_NAMES: list[str] = [
     "Tricycle",
     "Potholes",
     "Trash Bins",
-    "Elevator",
-    "Pedestrian Lane",
     "Bicycle",
 ]
 
@@ -114,7 +111,7 @@ def load_classes() -> dict[str, Any]:
 
     Validation checks:
       - File exists and parses as a YAML mapping.
-      - 'nc' field matches EXPECTED_NC (16).
+      - 'nc' field matches EXPECTED_NC (13).
       - 'names' field has exactly nc entries.
       - Each canonical name matches the hardcoded CANONICAL_NAMES list.
 

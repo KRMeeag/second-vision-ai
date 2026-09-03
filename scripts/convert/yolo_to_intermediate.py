@@ -53,6 +53,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import sys
 from pathlib import Path
 from typing import Any
@@ -154,6 +155,20 @@ def convert_project(project_key: str, entry: dict[str, Any], class_id_map: dict[
     stats["native_names"] = native_names
     stats["class_mapping"] = mapping
 
+    # Clear images/ and labels/ before writing. safe_copy(overwrite=True) replaces
+    # files it writes but leaves behind anything from a PREVIOUS conversion whose
+    # filename the new export doesn't reproduce -- and a Roboflow re-export renames
+    # every file (new .rf.<hash>), so nothing gets overwritten and the two versions
+    # accumulate. Hit for real on 2026-08-26 re-pinning door_detection_zqt59 v3->v1:
+    # a 1,704-image conversion left images/ holding 3,790 files, the surplus being
+    # v3 leftovers that cap/merge would then have treated as real data.
+    #
+    # Only these two directories are cleared. Sibling dirs written by other stages
+    # -- labels_reviewed/ above all, which holds hand-review work that no
+    # re-conversion should ever destroy -- are deliberately left untouched.
+    for stale_dir in (out_images_dir, out_labels_dir):
+        if stale_dir.is_dir():
+            shutil.rmtree(stale_dir)
     ensure_dir(out_images_dir)
     ensure_dir(out_labels_dir)
 

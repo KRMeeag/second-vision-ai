@@ -35,6 +35,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import sys
 from pathlib import Path
 from typing import Any
@@ -100,6 +101,15 @@ def pull_project(rf, project_key: str, entry: dict[str, Any]) -> dict[str, Any]:
     version_num = entry["pinned_version"]
     download_format = entry["download_format"]
 
+    # Clear the destination first. The SDK's overwrite=True only overwrites files
+    # it is writing -- it does NOT remove files left by a previous download, so
+    # re-pinning a project to a different version silently MIXES the two exports
+    # in one directory. Hit for real on 2026-08-26 re-pinning door_detection_zqt59
+    # from v3 to v1: data.yaml correctly said .../dataset/1 while train/images/
+    # held 6,137 files (v3's 4,509 plus v1's 1,628), which Stage 5.2 would have
+    # converted as though it were a single coherent export.
+    if dest_dir.exists():
+        shutil.rmtree(dest_dir)
     ensure_dir(dest_dir)
     project = rf.workspace(workspace).project(project_slug)
     version = project.version(version_num)

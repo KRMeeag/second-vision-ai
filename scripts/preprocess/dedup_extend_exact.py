@@ -85,21 +85,33 @@ def main() -> None:
         raise RuntimeError(f"No images found under {new_source_dir}.")
     new_prefixed_names = {prefixed_filename(args.source, p.name) for p in new_images}
 
-    # Idempotency guard: has this source already been folded into exact_duplicates,
-    # or already counted toward images_checked? (images_checked > merged_count is
-    # exactly what a prior successful run of this script against this source would
-    # leave behind, since the new source isn't in dataset/merged/ yet.)
+    # Idempotency guard: has this source already been folded into exact_duplicates?
+    # This is the check that actually encodes the intent -- a prior successful run
+    # against this source leaves its prefixed filenames in exact_duplicates, so
+    # finding one there is direct evidence of a re-run.
+    #
+    # An `or report["images_checked"] > merged_count` clause used to sit here too,
+    # on the reasoning that a prior run inflates images_checked above the merged
+    # count. That inference does not hold in this project and was removed
+    # 2026-08-26. DEC-089's full-scale RunPod dedup ran against a 66,907-image pool,
+    # so images_checked is permanently 67,109 while dataset/merged/ is whatever the
+    # current cap produces (47,346 today). The clause therefore fired on every
+    # invocation regardless of history -- it blocked the legitimate extension of
+    # door_detection_zqt59 and revised_pedestrian_obstacle after both were
+    # re-exported. split.py already treats the same superset condition as expected
+    # and documented rather than as an error.
     already_referenced = any(
         prefixed in new_prefixed_names
         for g in report["exact_duplicates"]
         for prefixed in [g["kept"], *g["duplicates"]]
     )
-    if already_referenced or report["images_checked"] > merged_count:
+    if already_referenced:
         raise RuntimeError(
-            f"{args.source} looks like it may already be reflected in dedup_report.json "
-            f"(images_checked={report['images_checked']} vs live merged pool={merged_count}, "
-            f"or a matching filename already appears in exact_duplicates). Refusing to "
-            f"re-extend -- check dedup_report.json by hand before forcing this."
+            f"{args.source} is already reflected in dedup_report.json — a filename from "
+            f"this source already appears in exact_duplicates, which is what a prior run "
+            f"of this script leaves behind. Refusing to re-extend and double-count. "
+            f"(images_checked={report['images_checked']} vs live merged pool={merged_count}; "
+            f"that gap is DEC-089's larger dedup pool, not evidence of a prior run.)"
         )
 
     print(f"New source: {args.source} ({len(new_images)} images)")
@@ -144,7 +156,16 @@ def main() -> None:
     report["exact_duplicates"].extend(new_groups)
     report["exact_duplicate_groups"] = len(report["exact_duplicates"])
     report["exact_duplicate_files"] = sum(len(g["duplicates"]) for g in report["exact_duplicates"])
-    report["images_checked"] = merged_count + len(new_images)
+    # images_checked records COVERAGE and must never shrink. The bare assignment
+    # `merged_count + len(new_images)` that used to be here assumed the source was
+    # not yet in dataset/merged/ -- true for DEC-090's crosswalk_detector_lz3hc,
+    # which was extended before merging. Run AFTER a merge, or against a report
+    # from a larger historical pool, that assignment silently DESTROYS the record:
+    # on 2026-08-26 it drove DEC-089's images_checked from 67,109 down to 48,000,
+    # which also left it below near_duplicate_sample_size (66,907) -- an incoherent
+    # state claiming the near-duplicate check covered more images than the exact
+    # check ever saw. max() keeps it monotonic in both orderings.
+    report["images_checked"] = max(report["images_checked"], merged_count + len(new_images))
     # near_duplicates / near_duplicate_sample_size / near_duplicate_covered_source_keys
     # deliberately untouched -- see module docstring.
 

@@ -23,6 +23,7 @@ Pipeline context:
 
 from __future__ import annotations
 
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -243,6 +244,57 @@ def prefixed_filename(source: str, filename: str) -> str:
         e.g. "open_images__0001.jpg".
     """
     return f"{source}__{filename}"
+
+
+# Roboflow export convention: <original>_<originalext>.rf.<hash>.<ext>. The inner
+# extension is the ORIGINAL upload's type and need not match the exported one —
+# verified against real filenames (`48_png.rf.<hash>.jpg`, `..._jpeg.rf.<hash>.jpg`).
+# Matching only `_jpg` under-collapses several sources, so all three are accepted.
+_ROBOFLOW_EXPORT_STEM = re.compile(r"^(.*?)_(?:jpg|jpeg|png)\.rf\.[0-9a-f]+$", re.I)
+
+
+def roboflow_base_name(stem: str) -> str:
+    """
+    The original-photo identity behind a processed file stem.
+
+    Roboflow bakes augmentation into its exports: several augmented copies of one
+    uploaded photo are emitted as separate files sharing a base name, differing only
+    in the `.rf.<hash>` segment. Grouping by this base name identifies those siblings
+    exactly — 100% precision and recall, unlike embedding-distance near-duplicate
+    detection, which measured only 46.6% recall on real augmented siblings because
+    MobileNet features are not flip-invariant (docs/OPEN_QUESTIONS.md #17).
+
+    Two consumers, deliberately sharing this one implementation rather than each
+    carrying its own regex (which is exactly how they would drift):
+    `scripts/preprocess/deaugment_sources.py` (collapses siblings in
+    dataset/processed/) and `scripts/build/split.py` (keeps any siblings that
+    survive together in one split, so they cannot straddle train/val and inflate
+    apparent performance).
+
+    Non-Roboflow stems (open_images, exdark, crowdhuman, dataset_ninja) never match
+    the pattern and are returned unchanged, so each is its own base and nothing is
+    ever collapsed for those sources.
+
+    KNOWN LIMITATION: only catches augmentation Roboflow generated at export time.
+    Augmentation baked in before upload survives — e.g.
+    `IMG_20210920_114223_output-jpg_flip_png.rf.<hash>`, where `_flip` is part of
+    the uploaded filename, reads as its own base image.
+
+    Parameters
+    ----------
+    stem : str
+        Filename stem (no extension), e.g. "100_jpg.rf.31b0f2b7303a5a6eef61261af8207eef".
+        A merged-pool stem must have its `<source>__` prefix stripped first, or the
+        prefix simply travels into the returned base (harmless for grouping within
+        one source, wrong if comparing across sources).
+
+    Returns
+    -------
+    str
+        e.g. "100". Returned unchanged when the stem isn't a Roboflow export.
+    """
+    match = _ROBOFLOW_EXPORT_STEM.match(stem)
+    return match.group(1) if match else stem
 
 
 def list_images(directory: Path, recursive: bool = True) -> list[Path]:
