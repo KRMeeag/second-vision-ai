@@ -246,8 +246,8 @@ batch: 16                # Adjust based on GPU memory
 |------|--------|
 | Select best experiment based on balanced metrics | ⬜ Todo |
 | Final ONNX export | ⬜ Todo |
-| Final Hailo HEF compilation | ⬜ Todo |
-| Verify HEF on Raspberry Pi 5 + Hailo-8 | ⬜ Todo |
+| Final Hailo HEF compilation | ⬜ Todo — **read DEC-116 first**: torch must come from a driver-matched CUDA index before ultralytics, or the DFC import fails while a TensorFlow GPU check still passes. Use `runpod_hailo_validate_wizard.sh`, which handles it. Pass `name=hailo8` (DEC-114) |
+| Verify HEF on Raspberry Pi 5 + Hailo-8 | ⬜ Todo (toolchain itself proven 2026-09-06, DEC-114 — this row remains the *final trained model*) |
 | Archive final model artifacts | ⬜ Todo |
 | Document final configuration and results | ⬜ Todo |
 

@@ -3412,7 +3412,626 @@ Empty files are deliberately not deleted — `cap_per_class.py` indexes by ids p
 
 Restoring is a wholesale copy-back. There is **no inverse migration script**, so review work done under the 13-class schema would have to be reconciled with restored 16-class files by hand.
 
+> **Correction added 2026-09-04 (DEC-105) — the backup is NOT self-sufficient.** The paragraph above says the backup holds "the complete 16-class state: config, ...". It holds the complete 16-class **data and config-file** state. It does **not** hold the **code** that defines the schema: `scripts/utils/config_loader.py` hardcodes `EXPECTED_NC` and `CANONICAL_NAMES`, and it is not in the backup. Restoring only the YAMLs makes `load_classes()` raise `classes.yaml 'nc' is 16, expected 13` immediately. See DEC-105 for the verified, complete revert procedure.
+
 **Not yet run:** the cascade (`cap_per_class` -> `merge` -> `dedup` -> `split` -> `generate_yaml`). Everything under `dataset/merged/` and `dataset/final/` still reflects the 16-class pre-review state.
+
+---
+
+## DEC-101: `classes.yaml`'s Per-Class `id:` Fields Were Never Re-Indexed by DEC-100 — Silent Converter Corruption Averted
+
+- **Date:** 2026-09-04
+- **Status:** Accepted (executed)
+- **Related:** DEC-100 (the incomplete migration), DEC-065 (which already documented `names:` as the authoritative field and the `classes:` block as separately-ordered metadata)
+
+### Context
+
+The first `cap_per_class.py` run after DEC-100 died immediately:
+
+```
+File "scripts/preprocess/cap_per_class.py", line 423, in run
+    configured_cap = id_to_cap[class_id]
+KeyError: 5
+```
+
+`config/classes.yaml` carries the schema **twice**: the authoritative `names:` map, and a parallel `classes:` block where each class repeats its own `id:` alongside its cap and provider documentation. DEC-100 updated `nc`, `names`, `hailo_runtime_names` and removed the three dropped blocks — but left the surviving blocks' `id:` fields on the **old 16-class numbering**. `names:` said Shelf was 5; the `shelf:` block still said `id: 6`. Bicycle still said `id: 15`, outside the valid range entirely.
+
+`load_classes()` did not catch it because its validation checks `nc` against `EXPECTED_NC` and the length of `names` — never that the block ids agree with `names`.
+
+### Decision
+
+Re-index all eight stale `id:` fields to match `names:`: Shelf 6->5, Doors 7->6, Chairs 8->7, Tables 9->8, Tricycle 10->9, Potholes 11->10, Trash Bins 12->11, Bicycle 15->12. Ids 0-4 were already correct. Exactly the mapping DEC-100 recorded in prose but applied to only one of the two structures.
+
+### Rationale
+
+`names:` is authoritative (DEC-065 established this when `generate_yaml.py` had to choose between the two). The blocks are the copy that drifted, so the blocks are what gets corrected.
+
+### Consequences
+
+**The crash was the mild symptom.** Three converters read `entry["id"]` to build their canonical class-id map:
+
+- `scripts/convert/yolo_to_intermediate.py:238` — every Roboflow source
+- `scripts/acquire/acquire_exdark.py:163`
+- `scripts/acquire/acquire_openimages.py:91`
+
+Any re-conversion would have written **16-class ids into a 13-class dataset** with no error: Shelf boxes landing on Doors, Doors on Chairs, and Bicycle at an out-of-range 15. `cap_per_class.py` crashed loudly only because it happened to index a dict; the converters would have succeeded silently and produced a plausible-looking, wrong dataset.
+
+This never fired because no converter had been re-run since DEC-100 — the labels on disk were migrated by `drop_classes.py` operating on label files directly, and DEC-100 verified no out-of-range id remained. Data on disk was never affected.
+
+**Verified after the fix:** all 13 blocks agree with `names:`, `nc = 13`, block count 13, zero mismatches.
+
+**Not done, deliberately:** no guard was added to `load_classes()` asserting block ids match `names:`. That is what would have caught this at import rather than mid-cascade, and it remains the obvious follow-up — left unimplemented because it is scope beyond the reported problem, pending the student's call.
+
+**Generalisation worth keeping.** A schema stored in two places will desync, and the copy without validation is the one that rots. DEC-085 already found this exact shape once — `classes.yaml`'s per-class *provider* documentation had gone stale for 7 classes while the pipeline read `datasets.yaml` instead. That instance was harmless because nothing read it; this one was not, because three converters do.
+
+---
+
+## DEC-102: Post-Class-Drop Cascade Re-Run — Dedup Deliberately Not Re-Run, `split.py`'s Duplicate Over-Grouping Accepted (OPEN_QUESTIONS #13 Closed)
+
+- **Date:** 2026-09-04
+- **Status:** Accepted (executed)
+- **Related:** DEC-100 (whose "Not yet run: the cascade" this completes), DEC-089 (the RunPod dedup result being preserved), DEC-090 (the false-positive review this rules on), DEC-101 (the bug that blocked step 1)
+
+### Context
+
+DEC-100 left everything under `dataset/merged/` and `dataset/final/` reflecting the 16-class, pre-review state. `docs/HANDOFF.md` prescribed a five-step cascade: `cap_per_class` -> `merge` -> `dedup` -> `split` -> `generate_yaml`, and asserted *"Nothing else is blocked on a decision."*
+
+Two things were wrong with that.
+
+**First, `docs/OPEN_QUESTIONS.md` #13 was genuinely open and gated step 4.** `near_duplicate_false_positives.json` — 3,829 pairs the student cleared by hand in DEC-090 — is read only by `build_dedup_keeplist.py`. Nothing under `scripts/build/` references it, so `split.py` was still treating every cleared pair as a duplicate.
+
+**Second, step 3 was actively destructive.** `dedup.py` writes `dedup_report.json` unless `--limit` is passed (dedup.py:255). A bare local run would have replaced DEC-089's 66,907-image RunPod near-duplicate coverage with a 6,000-image stratified sample — a 91% coverage loss, irreversible without renting another pod.
+
+### Decision
+
+**Run four steps, not five. Skip `dedup.py` entirely.** `split.py:117-124` explicitly tolerates a report covering a superset pool, printing *"Expected when reusing a dedup run made against a larger pool... not a bug."* The existing report covers 67,109 images against a 36,875-image merged pool — exactly that case.
+
+**OPEN_QUESTIONS #13: accept the over-grouping. No code change to `split.py`.**
+
+### Rationale
+
+The #13 decision was made on measurement, not preference. Duplicate groups chain transitively under `split.py`'s union-find, so the cleared pairs account for **3,844 of 12,715 edges (30.2%)**, welding 18,560 files into 5,868 clusters where subtraction would give 13,120 files in 4,255 clusters.
+
+The student's stated concern was that subtracting false positives would delete pothole data, since potholes dominate them (`road_damage_detector` 977 + `pothole_voxrl` 630 + `pothole_detection` 227 = 1,834 of 3,829, 48%). **That premise does not hold:** `assign_splits()` uses duplicate groups only to union filenames so they move together, and every filename in the pool receives a split. Nothing is dropped under either option.
+
+The real effect runs the other way — grouping *concentrates* a class rather than removing it. Measured per-class both ways:
+
+| | val% | test% |
+|---|---|---|
+| Potholes, as-is | **17.7%** | 14.5% |
+| Potholes, with subtraction | 15.0% | 15.0% |
+
+Potholes is the most skewed class in the table and subtraction fixes precisely it. But as-is it still holds **472 val / 386 test** images — 2.7pp above target, not starved — and every other class sits within ±1.6pp. Editing `load_duplicate_groups()` means overriding an algorithm with a hand review on the one code path that prevents train/eval contamination; AGENTS.md ranks correctness above dataset quality, and 2.7pp on one class is a thin return for that risk.
+
+**Cost accepted explicitly:** DEC-090's 3,829-pair review stays inert at split time. It retains its value as the record of why the 0.2 threshold was judged acceptable.
+
+### Consequences
+
+Executed in order, all verified against real files rather than script self-report:
+
+1. `cap_per_class.py` — blocked by DEC-101, fixed, re-run. All 13 classes clear the 1,500 floor; **ratio invariant 2.64** (max Person 4,500 / min Trash Bins 1,702).
+2. `merge.py` — **36,875 images** from 37,008 selected pairs, 133 removed by review `exclude` tags. Was 45,132 under the 16-class pre-review state.
+3. `dedup.py` — **skipped, deliberately.** DEC-089's report preserved intact.
+4. `split.py` — train 25,850 / val 5,527 / test 5,498 = **70.1/15.0/14.9**. `cross_split_duplicate_leakage: []`. 265 augmented-sibling groups and 8 cross-source groups held together. On-disk counts match the report exactly, images and labels paired 1:1 in all three splits.
+5. `generate_yaml.py` — `dataset/final/data.yaml` at `nc: 13`.
+
+**Verified against the real installed Ultralytics**, per AGENTS.md's standing instruction, using `check_det_dataset()` from an unrelated CWD: `nc=13`, 13 names in correct order, all three split paths resolved absolute and existing. This is DEC-066's lesson — the `path:` bug it caught would otherwise surface only on RunPod.
+
+**Known cosmetic defect in `split_report.json`.** Its `duplicate_group_coverage_note` claims the near-duplicate check *"only cover[s] dedup_report.json's stratified sample."* Misleading: `split.py:131` computes `near_dup_full_scale = near_duplicate_sample_size >= images_checked`, which is `66,907 >= 67,109` = False. The gap exists because DEC-090's `dedup_extend_exact.py` grew `images_checked` to 67,109 while honestly freezing near-duplicate coverage at 66,907. The near-duplicate pass genuinely was full-scale over the pool it ran against. The flag feeds a report string only — no behaviour depends on it — so it was left alone rather than fixed blind.
+
+**`docs/HANDOFF.md` gap, recorded for the next handoff author.** It states the schema is 13, reduced from 16, and gives the mechanical scale of the migration, but never names the three dropped classes and never gives the reason, deferring to DEC-095–100. A fresh session must infer the three from the benched-source list. The *what* was carried well; the *why* was not carried at all.
+
+---
+
+## DEC-103: `fiftyone_final_dataset.ipynb` Added — Whole-Dataset Browsing With `source` as a Real Field; `dataset/final/` Declared Read-Only
+
+- **Date:** 2026-09-04
+- **Status:** Accepted (executed)
+- **Related:** DEC-102 (the cascade that produced the pool this browses), DEC-054 (notebook-per-stage convention), DEC-081 (`dataset.classes` required or the App blocks), DEC-087 (why sources are no longer single-class)
+
+### Context
+
+Student asked for a notebook to view the final dataset in its entirety, filterable by source. Checked before answering: no such thing existed.
+
+`fiftyone_review_processed.ipynb` does accept `source_key = "final/train"`, but it falls short twice. It browses **one split at a time**, and its build cell never sets a `source` field — `sample["source"]` is assigned only in the mistakenness section (cell `27`), a separate cross-source mode. In `dataset/final/` the source survives purely as `merge.py`'s `<source>__` filename prefix, which the App sidebar cannot filter on.
+
+### Decision
+
+New notebook `notebooks/fiftyone_final_dataset.ipynb` (v1), created rather than extending the existing one — the student's explicit instruction, and independently the safer call: `fiftyone_review_processed.ipynb` is v40 with heavily interdependent cells and is routinely open in the student's IDE, where an edit would be overwritten by their buffer on save.
+
+Loads every requested split into **one** dataset with `source`, `split` and `num_boxes` as top-level sample fields, all sidebar-filterable.
+
+**`dataset/final/` is declared read-only.** The notebook has no write-back cell and must never get one.
+
+### Rationale
+
+`split.py` deletes and regenerates `dataset/final/` wholesale on every cascade run, so a box fixed there is destroyed by the next run with no warning. The only edit path that survives is upstream: `fiftyone_review_processed.ipynb` -> `labels_reviewed/` -> `promote_reviews.py` -> `labels/` -> cascade. Stating this in the notebook header is cheaper than discovering it after losing an afternoon's review — the same class of trap DEC-100 already had to warn about for `yolo_to_intermediate.py` silently deleting dlsu's hand-merged boxes.
+
+### Consequences
+
+Verified by executing every cell headlessly against the real 36,875-image pool, not by inspection:
+
+- Loads in **~12s** at ~3.0K samples/s. Counts cross-check against `split_report.json` exactly (25,850 / 5,527 / 5,498) — a built-in guard that fails loudly if `dataset/final/` is not what `split.py` last wrote.
+- Cross-checks `dataset/final/data.yaml` against `config/classes.yaml` and **raises** on disagreement. Given DEC-101 — where exactly this kind of two-copy schema drift went unnoticed — a viewer that silently labels boxes with stale names would be worse than no viewer.
+- Sets `dataset.classes["ground_truth"]` (DEC-081), so the App does not block on its schema-import prompt.
+- `persistent = False`: this holds no review work and is re-derived from disk in about a minute, so it must not accumulate alongside the 18 persistent review datasets.
+
+**Immediately useful output** — the per-source class breakdown makes DEC-087's multi-class enrichment concrete and visible for the first time. `roboflow_pothole_voxrl` is not a pothole-only source (Potholes=665, but also Vehicle=140, Person=45, Motorcycle=14); `roboflow_cv_project_hovyc` carries Doors=1,256 plus nine other classes. Only `crowdhuman` (Person), `dataset_ninja_pothole_detection` and `dataset_ninja_road_damage_detector` (Potholes) remain genuinely single-class.
+
+Registered in `notebooks/README.md`. Pre-existing gap noted but not fixed: `fiftyone_near_dup_inspection.ipynb` (DEC-090) is also absent from that index.
+
+---
+
+## DEC-104: Dataset Ninja Sources Measured for Unlabeled Objects — Reviewed Rather Than Dropped; `hide_duplicates` Would Have Hidden 73% of the Work
+
+- **Date:** 2026-09-04
+- **Status:** Accepted (review pending execution by the student)
+- **Related:** DEC-085/086 (the floor risk that makes dropping expensive), DEC-087 (multi-class enrichment from review), DEC-090 (the false-positive review this depends on), DEC-102 (the cascade to re-run after)
+
+### Context
+
+Student's own observation while browsing the final dataset: *"a lot of the vehicles are not labeled"* in the Dataset Ninja sources. Both are Potholes-only and, per `docs/HANDOFF.md`, the only two active sources never reviewed.
+
+Measured with COCO-pretrained `yolov8n` at conf >= 0.5 — any eligible detection is by definition unlabeled, since ground truth holds nothing but Potholes:
+
+| source | images | >=1 unlabeled object | >=1 unlabeled vehicle | unlabeled boxes |
+|---|---|---|---|---|
+| `dataset_ninja_road_damage_detector` | 1,331 | **87.4%** | **55.1%** | 4,018 |
+| `dataset_ninja_pothole_detection` | 665 | 23.3% | 19.5% | 378 |
+
+`road_damage_detector` breaks down as Person 1,729 · Vehicle 1,188 · Motorcycle 1,077 · Bicycle 20 — roughly three unlabeled objects per image, with **Person the larger problem than Vehicle**.
+
+The model has false positives, so the absolute numbers are soft. The 87.4% vs 23.3% gap between two similar pothole sources is not, and it has a control inside the project's own data: `roboflow_pothole_voxrl`, which *was* reviewed, carries Vehicle=140/Person=45 labels (DEC-087 enrichment). The unreviewed road-damage source carries zero on imagery where vehicles appear in 55% of frames.
+
+### Decision
+
+**Review both sources with the predictions overlay (DEC-079 workflow); do not drop them.** Student's call, option (a) of three offered.
+
+### Rationale
+
+An unlabeled car in a training image is not a neutral omission — it teaches the detector that cars are background, which is worse than the image being absent entirely. This is the structural cost of merging single-class datasets and the reason DEC-087's review pass added cross-class boxes at all.
+
+Dropping was the obvious alternative and is not free. DEC-085 already established that *"Potholes' 2,661 total depends on `dataset_ninja_road_damage_detector` counting as active... without it, Potholes sits at 1,330, below the 1,500 floor."* Dropping the source drops the class, and DEC-100 established that re-adding a class later costs a full retrain rather than a fine-tune.
+
+### Consequences
+
+**A trap was found in the review setup and must not be re-encountered.** `fiftyone_review_processed.ipynb` defaults to `hide_duplicates = True`, which would have hidden:
+
+| source | in pool | hidden | left to review |
+|---|---|---|---|
+| `road_damage_detector` | 1,331 | **977 (73.4%)** | 354 |
+| `pothole_detection` | 665 | 227 (34.1%) | 438 |
+
+**All 977 and all 227 are images the student had already cleared as false positives in DEC-090** — personally judged not to be duplicates. The default would have skipped 73% of exactly the images the review exists to fix, leaving them in training with unlabeled vehicles. **`hide_duplicates = False` is required for both sources**, and the general rule is that `hide_duplicates` is unsafe on any source whose flags were largely cleared as false positives.
+
+Prerequisites verified on disk: both sources have 1,331/665 images and labels in `dataset/processed/`, both are fully present in the merged pool, and both have an empty `labels_reviewed/` — confirming neither has ever been through write-back.
+
+**Expected downstream effect beyond Potholes.** Both sources become multi-class on promotion, changing candidate pools for Person, Vehicle and Motorcycle — precisely what `docs/OPEN_QUESTIONS.md` #16 anticipated. The cascade must be re-run after `promote_reviews.py --all`, still skipping `dedup.py` per DEC-102.
+
+**Not measured, offered and not yet taken up:** the same unlabeled-object scan across all 12 sources, which would establish whether `road_damage_detector` is an outlier or whether other pools carry the same defect.
+
+---
+
+## DEC-105: The 16-Class Revert Procedure, Verified and Written Down — Backup Alone Is Insufficient
+
+- **Date:** 2026-09-04
+- **Status:** Accepted (procedure documented; **deliberately NOT executed**)
+- **Related:** Corrects DEC-100's Reversibility section. DEC-101 (the block-id desync the backup predates)
+
+### Context
+
+Student asked whether the YAML config was included in `dataset/backups/pre_class_drop_20260904_023304/`, *"just in case that I want to go back to 16 classes."* Checked rather than trusted DEC-100's own claim — which had already proven incomplete once that day (DEC-101).
+
+The YAMLs **are** there, and they are clean:
+
+```
+config/classes.yaml   nc: 16, 16 names, 16 per-class block ids -- all consistent
+config/datasets.yaml  present (sources still active, pre-benching)
+MANIFEST.json         class_count: 16
+```
+
+Worth recording: the backed-up `classes.yaml` is **more internally consistent than what DEC-100 left on disk**. Its 16 block ids all agree with its `names:` map. DEC-101's desync was introduced *by* the drop, not inherited from before it.
+
+### The gap
+
+`scripts/utils/config_loader.py` is **not in the backup**, and it hardcodes the schema:
+
+```python
+EXPECTED_NC: int = 13
+CANONICAL_NAMES: list[str] = [...13 entries...]
+```
+
+Restoring the YAMLs alone fails immediately — `load_classes()` raises `classes.yaml 'nc' is 16, expected 13`. The backup covers data; git covers code; **neither alone is a revert.**
+
+### Decision
+
+Record the complete procedure now, while the facts are verified, rather than leaving it to be re-derived under pressure. **Not executed** — the student explicitly asked for it to be prepared and not run.
+
+### The verified revert procedure
+
+`b119543` is the commit that made the switch (`-EXPECTED_NC: int = 16` -> `+EXPECTED_NC: int = 13`, with `Stairs`/`Elevator`/`Pedestrian Lane` removed from `CANONICAL_NAMES`), confirmed by reading its diff. Its parent `2ac3cde` therefore holds the 16-class code.
+
+```bash
+B=dataset/backups/pre_class_drop_20260904_023304
+
+# 1. Code -- from git, NOT the backup
+git show 2ac3cde:scripts/utils/config_loader.py > scripts/utils/config_loader.py
+
+# 2. Config -- from the backup
+cp "$B/config/classes.yaml"  config/classes.yaml
+cp "$B/config/datasets.yaml" config/datasets.yaml
+
+# 3. Data -- ONLY the backup has this (dataset/processed/ is gitignored,
+#    and labels_reviewed/ is irreplaceable hand work)
+#    Wholesale copy-back of $B/processed/ over dataset/processed/
+
+# 4. Re-run the cascade: cap_per_class -> merge -> split -> generate_yaml
+#    (dedup still skipped, DEC-102)
+```
+
+### Consequences
+
+- **The config is the cheap part; the review work is not.** DEC-100's warning stands and is the real cost: there is no inverse migration script, so any review done under the 13-class schema must be reconciled with restored 16-class files by hand. As of this entry that includes the DEC-102 cascade and any Dataset Ninja review (DEC-104).
+- **Nine other files reference the dropped class names** — `cap_per_class.py`, `drop_classes.py`, `dedup_extend_exact.py`, `run_mistakenness.py`, `yolo_to_intermediate.py`, `config/datasets.yaml`, `docs/PROJECT.md`, `AGENTS.md`, `docs/OPEN_QUESTIONS.md`. None block a revert: they are either the drop tooling itself, doc strings (`run_mistakenness.py`'s `NO_COCO_ANALOG`), or documentation.
+- **Generalisation.** A backup that captures data but not the code defining that data's schema is not a restore point. This project keeps the class schema in *three* places — `classes.yaml`'s `names:`, `classes.yaml`'s per-class `id:` blocks, and `config_loader.py`'s hardcoded constants. DEC-101 was two of them disagreeing; this is a backup covering only one. A guard asserting all three agree remains the unbuilt follow-up.
+
+---
+
+## DEC-106: Review Predictions Overlay Moved to `yolov8m` — Proxy Model Chosen on Measurement, Not Inherited Default
+
+- **Date:** 2026-09-04
+- **Status:** Accepted
+- **Related:** DEC-060 (which introduced `yolov8n` as the proxy), DEC-074/079 (the overlay and auto-accept mechanism), DEC-104 (the review this was raised for)
+
+### Context
+
+`yolov8n` has been the COCO proxy model since DEC-060, never revisited. Student asked whether `yolov8m` or `yolov8l` would produce better labels, and stated the priority precisely: *"im especially keen towards ensuring that smaller instances in an image are caught."*
+
+Two measurements were run rather than answering from published benchmarks.
+
+**1. Recall on the target imagery** — 300 `dataset_ninja_road_damage_detector` images (seed 42, conf >= 0.5), which have no ground truth, so raw detection counts only:
+
+| model | images with >=1 detection | boxes | Person | Motorcycle | Vehicle | speed |
+|---|---|---|---|---|---|---|
+| `yolov8n` | 265 (88.3%) | 956 | 419 | 241 | 290 | 11.5 img/s |
+| `yolov8m` | 290 (96.7%) | 1,697 | 659 | **589** | 434 | 3.6 img/s |
+| `yolov8l` | 288 (96.0%) | 1,817 | 727 | 615 | 451 | 1.8 img/s |
+
+**2. Precision/recall against real ground truth.** The student's own remark — that `revised_pedestrian_obstacle` is *"as good as it gets in terms of labelling since I hand-reviewed it myself"* — makes it a trustworthy benchmark. 400 of its 2,088 hand-reviewed images, 2,015 eligible-class GT boxes, matched at same-class IoU >= 0.5:
+
+| model | conf | precision | recall | F1 |
+|---|---|---|---|---|
+| `yolov8n` | 0.50 | **94.0%** | 48.6% | 64.1% |
+| `yolov8n` | 0.25 | 76.0% | 70.2% | 73.0% (its peak) |
+| `yolov8m` | 0.40 | 83.8% | 68.6% | **75.4%** (its peak) |
+| `yolov8l` | 0.40 | 83.1% | 69.5% | **75.7%** (its peak) |
+
+**Recall by object size at conf 0.5** (small < 0.33% of frame, medium < 3%, large >= 3% — COCO's convention mapped to relative area):
+
+| model | small | medium | large |
+|---|---|---|---|
+| `yolov8n` | **12.9%** | 48.0% | 77.4% |
+| `yolov8m` | **30.0%** | 63.7% | 84.4% |
+| `yolov8l` | 32.0% | 65.1% | 86.3% |
+
+### Decision
+
+**Switch the review overlay to `yolov8m` with `AUTO_ACCEPT_CONFIDENCE = 0.7`.** `yolov8l` rejected.
+
+### Rationale
+
+**On small objects — the stated priority — `yolov8n` finds about one in eight. `yolov8m` finds nearly one in three**, a 133% improvement. `yolov8l` adds 2 points for double the runtime.
+
+**The precision numbers invert the naive reading, and this is the substantive finding.** At conf 0.5 `yolov8n` scores 94.0% precision against `yolov8m`'s 88.4%, which looks like the smaller model is *more accurate*. It is not. Per-box precision rewards a model for declining to guess: `yolov8n` scores high because it only attempts large, easy objects and abstains on everything hard. F1 corrects for this — 73.0% peak for `n` against 75.4% for `m`.
+
+**Model size and auto-accept threshold are independent knobs, and that resolves the student's actual goal of less hand-checking:**
+
+| setting | auto-accepted | wrong | precision |
+|---|---|---|---|
+| `yolov8n` @ 0.60 | 823 | 20 | 97.6% |
+| **`yolov8m` @ 0.70** | **908** | **41** | **95.5%** |
+| `yolov8m` @ 0.80 | 587 | 12 | 98.0% |
+
+`yolov8m` at 0.7 dominates `yolov8n` at 0.6 — 64 more correct boxes pre-tagged for 21 more errors to spot. And m's sub-threshold detections still render untagged in the App, so small distant objects are at least *visible* for manual acceptance. Under `yolov8n` they are not detected at all and can only be drawn by hand.
+
+**Cost is not a constraint.** Full-source inference: `n` ~2 min, `m` ~6 min, `l` ~12 min for 1,331 images. DEC-079 already established the review cap was the student's time budget, never inference cost.
+
+### Alternatives Considered
+
+- **`yolov8l`.** Rejected on measurement: +2pp small-object recall and +0.3pp F1 over `m`, for 2x the runtime (299s vs 155s on 400 images). It also detected *fewer* images than `m` in the road-damage sample (288 vs 290).
+- **Keep `yolov8n` for consistency with already-reviewed sources.** Rejected — an improvement is not a regression, and the sources most affected are re-runnable.
+
+### Consequences
+
+- Change is one string in `p0review3build`: `YOLO("yolov8n.pt")` -> `YOLO("yolov8m.pt")`. Left for the student to apply, since the notebook is open in their IDE and an edit from here would be overwritten on save.
+- **The 7-class ceiling does not move.** COCO has 80 fixed classes regardless of model size, so `COCO_CROSSWALK` still covers only Person, Vehicle, Motorcycle, Bicycle, Animals, Chairs, Tables. Potholes, Doors, Pole, Shelf, Tricycle and Trash Bins get nothing from any model size — a bigger model finds *more of the same 7*, not new ones.
+- **Measured precision is a lower bound.** A "false positive" here is any prediction with no matching GT box, which includes real objects the reviewer did not label. This most affects the *small* band, since tiny distant people are exactly what a human reasonably skips — so `yolov8m`'s 83.3% small-object precision is likely understated.
+- **Student intends to re-run `dlsu_d_vehicle_type_detection`** with the new model (its own review was a quick pass). Well-founded: it is dense with Vehicle/Motorcycle/Person, the three classes `m` improves most. `revised_pedestrian_obstacle` is explicitly **not** being re-reviewed — it was used as the measuring stick and the student considers its labelling finished.
+- **Not changed:** `run_mistakenness.py:157` and `final_merge_curation.py:91` still hardcode `yolov8n.pt` for Stage 5.5/5.7 mistakenness scoring. Those runs are complete and were not in scope here; if either is re-run, this decision is an argument for revisiting them too.
+- **Benchmark scope, stated so it is not over-read:** 400 images / 2,015 boxes from a single source, one IoU threshold (0.5). `revised_pedestrian_obstacle` is street imagery similar to the road-damage target, so it should transfer, but this is not a general result.
+
+---
+
+## DEC-107: The Class Schema Lives in Five Places, Only One of Which Is Authoritative — Map of the Copies and How Each Fails
+
+- **Date:** 2026-09-04
+- **Status:** Accepted (finding; no code changed)
+- **Related:** DEC-101 (copy 2 desynced), DEC-100 (the migration that desynced it), DEC-081 (which set copy 4), DEC-065 (which first identified `names:` as authoritative)
+
+### Context
+
+Three separate incidents in one session all traced to the same root shape: the class schema is duplicated across the project, and only one copy is validated. The fifth copy was identified by the student, from direct experience rather than from the code — *"every time i had to configure it myself... it can be the case that the schema in fiftyone is completely separate from the yaml configs."* That is correct, and verified below.
+
+### The five copies
+
+| # | Location | Kind | Validated? | How it has failed |
+|---|---|---|---|---|
+| 1 | `config/classes.yaml` `names:` | YAML | **authoritative** — `load_classes()` checks length vs `EXPECTED_NC` | — |
+| 2 | `config/classes.yaml` per-class `id:` blocks | YAML | **no** | DEC-101: left on 16-class ids by DEC-100. Crashed `cap_per_class.py`; would have made three converters silently write 16-class ids into a 13-class dataset |
+| 3 | `config_loader.py` `CANONICAL_NAMES` / `EXPECTED_NC` | Python constants | self-referential only | Served stale from a **bytecode cache** (`config_loader.cpython-314.pyc`, 2026-08-26) to the Python 3.14 notebook kernel while the 3.11 shell saw the correct 13 — rendered 2,657 Potholes as `Tricycle` |
+| 4 | `dataset.classes` per FiftyOne dataset | MongoDB, per dataset | **no** | A snapshot taken at build time. Review datasets built before DEC-100 still hold 16 entries; `review_roboflow_pothole_vhmow` still holds `Escalator`, pre-DEC-083 |
+| 5 | FiftyOne App annotation schema JSON | App-side state | **no** | Hand-pasted every session. Nothing derives it from 1–4 and nothing warns on drift |
+
+Copy 6 exists but is safe by construction: `dataset/final/data.yaml` is generated from copy 1 by `generate_yaml.py`. Copy 7, `AGENTS.md`/`docs/PROJECT.md`, was stale for weeks and is what the student copied the 16-class annotation JSON from; both corrected 2026-09-04.
+
+### Copy 5 verified, not assumed
+
+Checked directly against FiftyOne 1.20.0 on a live review dataset:
+
+```
+dataset.classes            -> {'ground_truth': 13, 'predictions': 13}   correctly set
+dataset.app_config         -> active_fields, color_scheme, media_fields,
+                              sidebar_groups, plugins ...  no annotation schema
+dataset.ontology           -> attribute does not exist
+dataset.annotation_schema  -> attribute does not exist
+```
+
+`dataset.classes` is populated and correct, and **there is nowhere on the dataset that stores the annotate-tab schema**. It is App-side, which is exactly why it must be re-entered each session. DEC-081 fixed the sidebar/rendering path; it did not and cannot fix the annotation dropdown.
+
+### Consequences
+
+**Copy 5 cannot corrupt stored data by itself.** `Detection.label` is a free string, so the dropdown only matters at the moment a class is picked. This is also what rules copy 5 out as the cause of the Potholes-as-Tricycle incident — the labels were already wrong in MongoDB, written by copy 3. The narrow risk is picking a class from a stale dropdown: a stored `Stairs` would then hit write-back's guard.
+
+**The mitigation for copy 5 is to generate rather than hand-keep it.** A snippet reading `get_canonical_names()` emits the JSON, so the pasted copy is always derived from copy 1, and its output doubles as a kernel-staleness check — a 16-entry result means copy 3 is stale before any review work begins.
+
+**The `load_classes()` guard is now clearly worth building.** Proposed after DEC-101 and deferred as out of scope; two further incidents since. It would cover copies 1↔2 directly and, by failing loudly at import, would catch a stale copy 3 as well. Copies 4 and 5 need separate handling — 4 is fixed by rebuilding a dataset, 5 by generating the JSON.
+
+**Generalisation:** every unvalidated copy of a schema is a place it can rot, and the copies that rot are the ones nothing checks. This project added copies for good local reasons — caps and provider docs alongside ids (2), import-time constants (3), App metadata (4) — and each was correct when written. The failure is not any single copy; it is that only copy 1 is ever verified.
+
+---
+
+## DEC-108: Pedestrian-Lane Sightings Recorded as Sample Tags, Exported to Disk — Boxes Deliberately Not Drawn
+
+- **Date:** 2026-09-04
+- **Status:** Accepted (executed — `scripts/preprocess/export_sample_tags.py` built and tested)
+- **Related:** DEC-100 (dropped the class), DEC-105 (revert procedure), DEC-107 (why the App schema made this idea plausible), DEC-078 (the `exclude` tag precedent this mirrors)
+
+### Context
+
+While reviewing the Dataset Ninja sources the student noticed pedestrian lanes in the imagery and asked whether a class could be added to the FiftyOne schema **for those sources only**. It cannot — `data.yaml` carries one global `names:` list and YOLO applies it to every image.
+
+But the underlying instinct was sound, and rested on DEC-107's finding: since the App's annotation schema is independent of the YAML, a class absent from the pipeline can still be offered in the dropdown. The stated goal was specific — *"so that if i were to come back and decided to re-include pedestrian lane, i wont have to hunt for those images that i already checked that has a pedestrian lane."*
+
+**Measuring first changed how much this matters.** Pedestrian Lane was dropped at 1,099 images, but that count excluded `pedestrian_and_animal_crossing`, benched by DEC-083 as *superseded*, not failed. De-augmented totals across every source that carries the class:
+
+| source | files | distinct photos | ratio |
+|---|---|---|---|
+| `pedestrian_and_animal_crossing` | 2,158 | 365 | 5.91x |
+| `wtf_dwvgm` | 475 | 475 | 1.00x |
+| `revised_pedestrian_obstacle` | 605 | 386 | 1.57x |
+| `crosswalk_detector_lz3hc` | 202 | 202 | 1.00x |
+| `cv_project_hovyc` | 4 | 4 | 1.00x |
+| **total** | | **1,432** | |
+
+**68 distinct images short of DEC-042's 1,500 floor** — not the 401 DEC-100 recorded, which was measured without the benched source. That is close enough that sightings found during an unrelated review could decide it.
+
+### Decision
+
+**Record sightings as a `has_pedestrian_lane` SAMPLE tag. Do not draw boxes.** New script `scripts/preprocess/export_sample_tags.py` exports the tags to `dataset/reports/<source>_tagged_<tag>.json`.
+
+### Rationale
+
+Drawing boxes was the obvious approach and is blocked by a deliberate gate. Write-back (cell `2343228f`) does not skip an unrecognised label — it **raises**:
+
+```python
+if det.label not in CANONICAL_NAMES:
+    raise ValueError(f"{label_filename}: detection has label {det.label!r}, not one of the 16 canonical classes ...")
+```
+
+A single Pedestrian Lane box would abort the entire write-back, making the source unreviewable. Loud rather than silent, but fatal to the workflow.
+
+Sample tags avoid this completely: write-back reads exactly one sample tag, `exclude` (verified by reading every tag reference in that cell). Every other tag is inert with respect to the pipeline.
+
+**The tags are exported to disk rather than left in MongoDB, and that is the substantive part of this decision.** Tags live only in the live dataset until something writes them out. Rebuilding a review dataset drops them silently, with no error and nothing to recover from — and review datasets in this project have been destroyed twice (DEC-096) plus rebuilt repeatedly during this session alone. `labels_reviewed/` protects box edits; nothing protected tags before this script.
+
+### Alternatives Considered
+
+- **Sidecar file for real boxes** — relax the write-back guard to divert unknown labels into `labels_deferred/`. Preserves geometry and is the durable answer if the class is definitely returning. Deferred: it revises a deliberate hard gate for a class that may never come back, and the student's stated need is finding the images again, not the geometry.
+- **Draw boxes, back up, delete them before write-back.** Rejected: one forgotten step yields either a crash or lost work.
+- **Add the class back now.** Premature at 68 images short and with the largest contributor unreviewed.
+
+### Consequences
+
+- Script **accumulates by default**, mirroring `<source>_excluded.json` (DEC-078), so a half-finished session cannot erase marks recorded earlier. `--prune` opts into dropping entries whose tag was cleared in the App. Both paths tested for real: after untagging one of three samples, the default run held at 3 and `--prune` correctly dropped to 2. `--list` shows tag counts across every dataset without writing.
+- Calls `dataset.reload()` before reading (DEC-097). Omitting it would return the kernel's stale snapshot and miss tags applied minutes earlier in the App — self-defeating for a script whose whole purpose is capturing them.
+- **No pipeline stage reads these files.** They are a human record, not labels. Reinstating the class would still require the DEC-105-style migration, plus recovering the deleted boxes from the 16-class backup.
+- **Appending Pedestrian Lane as id 13 would re-index nothing** — every existing class keeps its id and every label file stays valid, unlike the removal which shifted eight classes and rewrote 53,206 files. The migration back is far cheaper than the migration out; the cost is a full retrain (new detection head) and reviewing the 365-image `pedestrian_and_animal_crossing`, whose provenance DEC-053 flagged (real class name `==============================`, *"almost certainly a garbage name from a mislabeled annotation batch"*).
+
+**Two unrelated findings surfaced by `--list`, recorded but not acted on:**
+
+1. **A typo'd exclusion tag.** `review_roboflow_cv_project_hovyc` holds `{'exclude': 71, 'excluded': 1}` and `verify_roboflow_dlsu_d_vehicle_type_detection_reviewed` holds `{'excluded': 1}`. Write-back matches `exclude` exactly, so the `excluded` sample was **never excluded** despite being marked. One image, but it is a silent miss of exactly the kind DEC-078 exists to prevent.
+2. **Large model weights are untracked and not ignored.** `notebooks/yolov8m.pt` (50M) and `notebooks/yolov8x.pt` (131M) now sit untracked, while `notebooks/yolov8n.pt` is **tracked in git**. `.gitignore` covers `models/weights/` but not `notebooks/*.pt`, so a careless `git add -A` would commit 181MB of downloadable weights.
+
+---
+
+## DEC-109: Cross-Class Alias Rule Made Per-Image and Containment-Based; 112 Wrongly Stacked Boxes Removed from dlsu
+
+- **Date:** 2026-09-05
+- **Status:** Accepted (executed)
+- **Related:** Revises DEC-098's alias rule. DEC-106 (the bigger proxy model that would have amplified this), DEC-087 (dlsu as priority source for Vehicle/Motorcycle)
+
+### Context
+
+Student reported, from their own review: *"a lot of tricycle ground truths have vehicles/motorcycle autolabels that got accepted, which should really not be the case."*
+
+Root cause is DEC-098's own documented blind spot. Its alias rule fires only on a source whose ground truth contains **no** box of the alias classes:
+
+```python
+alias_ok = {composite: set(aliases) for composite, aliases in GT_CLASS_ALIASES.items()
+            if composite in present and not (set(aliases) & present)}
+```
+
+`dlsu_d_vehicle_type_detection` labels Vehicle, Motorcycle **and** Tricycle, so the rule switched itself off entirely — on the one source where tricycles are dense. A Vehicle prediction boxing a *piece* of a tricycle then matched neither branch: not same-class, and the alias branch was disabled. It survived, was auto-accepted, and write-back promoted it on top of the correct Tricycle box.
+
+**Measured damage:** DEC-098 recorded 2 such boxes out of 13,434 before the review pass. After one pass: **76 at IoU >= 0.5 across 78 files** — a 38x increase.
+
+### Decision
+
+**The alias rule is now per-image and containment-based.** The per-source self-disable is removed; `ALIAS_CONTAINMENT = 0.8` added. Notebook is **v41**.
+
+### Rationale
+
+**Why the old guard existed, and why removing it is nonetheless safe.** dlsu labels **576 genuine Vehicle/Motorcycle boxes overlapping a Tricycle, 193 of them almost wholly inside one**. Suppressing on "any overlap" really would have destroyed real data, exactly as DEC-098 argued.
+
+But those genuine boxes are **ground truth**. A prediction landing on one matches it same-class at `GT_MATCH_IOU` and is already tagged by the same-class branch, which runs first. Nothing is lost — the GT box stays and only the redundant prediction is suppressed, which is correct. The boxes that got through were precisely those with **no same-class GT to match**: a part of a tricycle the source never labelled.
+
+**Containment, not IoU.** A tricycle's motorcycle half scores low IoU against the whole tricycle (the union is dominated by the tricycle) while sitting almost entirely inside it. Measured on dlsu's 107 wrongly-added boxes: **98 at containment >= 0.8, 90 at >= 0.9**, with 5 below 0.3.
+
+**0.8 is chosen to protect the case the student cares about.** The 5 low-containment boxes are plausibly real vehicles merely clipping a tricycle's box — DEC-098's author objected to suppressing exactly those, and that objection still holds. 0.8 takes 91.6% of the bad boxes and leaves that tail alone.
+
+Verified on four hand-constructed cases: motorcycle-half (containment 1.00, suppressed), sidecar cabin (1.00, suppressed), distant car clipping a corner (0.08, kept), separate motorcycle alongside (0.22, kept).
+
+### The cleanup, and a wrong first attempt worth recording
+
+`scripts/preprocess/strip_alias_stacked_boxes.py` removes what the old rule already wrote. A box goes only if it is a part class, sits >= 0.8 inside a composite box, **and is absent from a pre-review reference snapshot**.
+
+**The first version used "has no same-class twin" as the safety condition and a dry run exposed it as wrong — it flagged 454 boxes where only ~107 were ever review-added.** A genuine part box the source labelled is usually the only one of its class in that image, so it has no twin either. The condition that protects a *prediction* (it matches an existing GT box) has no equivalent when inspecting GT boxes directly. Only a snapshot taken before the review pass separates them. `dataset/backups/pre_class_drop_20260904_023304/.../labels` serves: 9,104 files, **zero Person boxes**, so it provably predates every promotion. Its 16-class ids are compared by name, never by raw id.
+
+Had that first version run, it would have destroyed the 193 genuine boxes this decision exists to protect. The dry run is what caught it.
+
+### Consequences
+
+Executed against `roboflow_dlsu_d_vehicle_type_detection`, both `labels/` and `labels_reviewed/` (byte-identical, promotion already applied), each backed up to `*_bak_alias_20260905_171115/` first:
+
+- **112 boxes removed across 108 files** — Vehicle 32, Motorcycle 69, Bicycle 11. The Vehicle count matches the independent IoU-based measurement exactly.
+- **Stacked boxes at IoU >= 0.5: 76 -> 8.** The residual 8 sit below the containment threshold, i.e. genuinely ambiguous rather than clearly parts.
+- **741 part boxes still overlap a Tricycle** — the genuine population is preserved, as required.
+- Class totals now: Vehicle 8,151 · Motorcycle 3,517 · Tricycle 1,827 · Person 2,011 · Bicycle 90 · Chairs 5 · Animals 4.
+
+**`Person` is deliberately not an alias of `Tricycle`** and never has been. Riders are real objects and must keep being detected — DEC-098 established this on roitrikee, where 867 Person predictions are riders. The 2 Person boxes overlapping a Tricycle in dlsu were left untouched.
+
+**Not re-run:** the cascade. `dataset/merged/` and `dataset/final/` still contain the 112 removed boxes and will until the next `cap_per_class` -> `merge` -> `split` -> `generate_yaml` pass.
+
+**Applies to other sources on rebuild.** `roitrikee` and `augmented_tricycle` label only Tricycle, so the old rule was already active there and the new rule changes little; their alias suppressions now use containment rather than any-overlap, which is strictly more conservative.
+
+---
+
+## DEC-110: Loose Ground-Truth Boxes Let Redundant Predictions Through — Suppressed by Containment With an Area-Ratio Cap; Author Boxes Always Kept
+
+- **Date:** 2026-09-05
+- **Status:** Accepted (executed)
+- **Related:** DEC-098 (`GT_MATCH_IOU`), DEC-109 (same containment technique, alias case), DEC-106 (the stronger model about to amplify this)
+
+### Context
+
+Student, from inspecting dlsu: *"sometimes its the case that the ground truth made by the authors of this dataset is too loose, and because of that the auto accept bounding boxes (which is sometimes actually better than the hand drawn boxes) still gets accepted."*
+
+Exactly right. A loose author box scores **under** `GT_MATCH_IOU` against a tight prediction of the same object, so `dup_gt` never fires, the prediction is auto-accepted, and write-back promotes it — leaving two boxes on one object.
+
+Measured against the pre-review snapshot (which separates author boxes from promoted ones): **191 cases, 8% of dlsu's 2,389 review-added boxes.** 185 of 188 host boxes contain exactly one added box, so multi-object confusion is rare. Area ratio of author box to prediction:
+
+| ratio | count |
+|---|---|
+| 1.5–2x | 1 |
+| **2–3x** | **132** |
+| 3–5x | 19 |
+| 5–10x | 6 |
+| **>10x** | **33** |
+
+Two clusters with a valley at 5–10x. The >10x group is not this phenomenon at all — a box 10–445x larger than the one inside it is a **different object** (a distant car within a truck's box) and must keep being detected.
+
+### Decision
+
+Extend the SAME-class branch of `dup_gt`: a prediction is redundant if it is **>= 0.8 contained** in a same-class ground_truth box **and** that box is **< 5x its area**. `LOOSE_GT_CONTAINMENT = 0.8`, `LOOSE_GT_MAX_RATIO = 5.0`. Notebook **v42**.
+
+**The prediction is suppressed and the author's box kept.**
+
+### Rationale
+
+**Why not replace the author box with the better prediction.** A 2–3x ratio is equally consistent with two opposite situations, and no geometry separates them:
+
+- the author drew loosely around a fully visible car — the prediction is better; or
+- the car is **partially occluded**, the author boxed its full extent (standard YOLO convention), and the model boxed only the **visible part** — the author is better.
+
+A visible half is roughly 40% of a full box, i.e. ~2.5x — dead centre of the observed cluster. So the very tightness that makes the cluster look clean also makes it ambiguous. Automatic replacement would silently truncate occluded vehicles, which is precisely the *"risk of actual value bounding boxes being deleted"* the student asked to be weighed. Defaulting to the human-drawn box is wrong only in the cheaper direction.
+
+**The cap sits in the measured valley**, the same method DEC-098 used for `GT_MATCH_IOU` and DEC-109 for containment.
+
+**Worth doing at all?** 191 pairs in ~15,600 boxes is 1.2%, and doing nothing was a defensible option. It was taken because a ~2-hour yolov8x pass over 6,099 images is about to generate thousands more auto-accepts, so the rate matters going forward more than the existing stock does.
+
+### Consequences
+
+`strip_alias_stacked_boxes.py` gained `--rule {alias,loose}` (default `alias`, so DEC-109's documented behaviour is unchanged). Run against dlsu, both dirs backed up to `*_bak_loose_20260905_181835/`:
+
+- **152 boxes removed across 139 files** — Motorcycle 121, Vehicle 29, Bicycle 2. Exactly the 2–5x cluster.
+- **Loose-GT duplicates: 152 -> 0.** Different-object cases (>5x): **37 preserved**, untouched by design.
+- Class totals now: Vehicle 8,122 · Motorcycle 3,396 · Tricycle 1,827 · Person 2,011 · Bicycle 88 · Chairs 5 · Animals 4.
+
+**Verified that no author box was deleted.** 36 reference boxes are absent from the current labels — but the count is **identical (36/13,252) before the alias cleanup, after it, and after this one**, so both scripts removed zero author boxes. Those 36 are the student's own review edits (deletions and box moves), which is what review is for. Worth recording because the raw number reads as data loss until staged that way; the check that settles it is comparing the *same* metric across the script's own backups rather than against the live state alone.
+
+**Not re-run:** the cascade. `dataset/merged/` and `dataset/final/` still contain both DEC-109's 112 and this decision's 152 boxes.
+
+---
+
+## DEC-111: Area-Ratio Cap Added to the Alias Rule — Distant Objects Inside a Composite Box Are Not Its Parts
+
+- **Date:** 2026-09-05
+- **Status:** Accepted (executed)
+- **Related:** Completes DEC-109, which introduced the alias containment rule without a size bound. DEC-110 (the same cap on the same-class branch), DEC-098 (whose objection this restores)
+
+### Context
+
+DEC-109 made the alias rule per-image and containment-based, but gave it **no bound on relative size** — unlike DEC-110's same-class branch, which caps at 5x. Auditing the 112 boxes DEC-109 removed from dlsu exposed the gap:
+
+| Tricycle ÷ removed-box area | count |
+|---|---|
+| **<2x** | **70** |
+| 2–3x | 11 |
+| 3–5x | 14 |
+| 5–10x | 7 |
+| **>10x** | **10** |
+
+median 1.3x, max **472x**
+
+The 70 below 2x are the model calling a whole tricycle a "vehicle" — correctly suppressed. Real parts (motorcycle half, sidecar cabin) land at 2–5x. But **a box 472x smaller than the one containing it is not a part of that object**; it is a separate thing that happens to fall inside its bounding box, typically a distant vehicle.
+
+That is precisely what DEC-098 declined to discard: *"a legitimately distant car in a tricycle photo would be suppressed, adding to the manual burden rather than reducing it"* — the student's own objection, restated in this session as the expensive case to get wrong.
+
+### Decision
+
+Add `ALIAS_MAX_RATIO = 10.0` to the alias branch, mirroring `LOOSE_GT_MAX_RATIO` on the same-class branch. Notebook **v43**.
+
+### Rationale
+
+**10x rather than 5x, deliberately.** A part is inherently larger relative to its composite than a loose box is to the object it wraps. Every measured real part sits under 5x, so 10x costs nothing genuine while clearly separating the distant-object cases, whose minimum is 10.9x. The gap between 5x and 10.9x in the observed data is empty of real parts.
+
+**Direction of the change, since it inverts easily:** the cap makes the rule *more conservative*. It suppresses fewer predictions, and the ones it stops suppressing are exactly the small distant vehicles. Without it those were tagged `dup_gt`, had `accept` withdrawn, and were lost.
+
+### Consequences
+
+New `scripts/preprocess/restore_alias_overcut.py` repairs what the uncapped run deleted. It restores a box only when it was present in the pre-cleanup backup, absent now, is a part class, sits >= 0.8 inside a composite box, **and** that box is >= 10x its area — reconstructing exactly why the uncapped rule fired, so nothing removed for another reason (notably DEC-110's loose-GT cleanup, which ran afterwards) is disturbed. Lines are appended; existing ones are never rewritten.
+
+Run against dlsu, both dirs backed up to `*_bak_prerestore_20260905_183941/`:
+
+- **10 boxes restored across 8 files** — Vehicle 5, Motorcycle 3, Bicycle 2. Ratios 10.9x to 472.4x, median 44.6x.
+- Final state: review-added boxes still suppressible under the capped rule **0**; distant objects kept **10**; dlsu's own **63** author part-boxes untouched throughout.
+- Class totals: Vehicle 8,127 · Motorcycle 3,399 · Tricycle 1,827 · Person 2,011 · Bicycle 90 · Chairs 5 · Animals 4. No malformed or out-of-range lines.
+
+**A verification lesson worth keeping, repeated from DEC-110.** The first check of this cleanup reported "63 still suppressible", which reads as a failure. It was counting dlsu's own author part-boxes alongside promoted ones. Any check on this source must separate author boxes from review-added ones using the pre-review reference; a metric that lumps them together will keep producing false alarms. Same shape as DEC-110's "36 author boxes missing", which turned out to be the student's own review edits.
+
+**Net effect of DEC-109 through DEC-111 on dlsu:** 254 wrongly stacked boxes removed (112 alias + 152 loose, minus 10 restored), zero author boxes lost, and three rules that now all bound containment by relative size.
+
+**Not re-run:** the cascade. `dataset/merged/` and `dataset/final/` still reflect the pre-cleanup state.
 
 ---
 
@@ -3439,3 +4058,534 @@ Restoring is a wholesale copy-back. There is **no inverse migration script**, so
 ### Consequences
 [Expected impact, tradeoffs, and follow-up actions]
 ```
+
+---
+
+## DEC-112: Post-dlsu-Review Cascade Re-Run — DEC-109/110/111 Validated On Real Data, `dataset/final/` Rebuilt At 36,877 Images
+
+- **Date:** 2026-09-05
+- **Status:** Accepted (executed)
+- **Related:** DEC-102 (the identical cascade this repeats, whose skip-dedup ruling still holds), DEC-109/110/111 (the three suppression rules executing against real data for the first time), DEC-106 (the yolov8x proxy model), DEC-089 (the RunPod dedup coverage still being preserved)
+
+### Context
+
+The `roboflow_dlsu_d_vehicle_type_detection` review completed: yolov8x inference over 6,099 images produced 16,985 predictions, of which 12,261 cleared `AUTO_ACCEPT_CONFIDENCE = 0.5`. This was the first execution of DEC-109's containment-based alias rule, DEC-110's loose-ground-truth rule, and DEC-111's `ALIAS_MAX_RATIO` cap against real data — all three had been written and reasoned about but never run.
+
+### What The Rules Actually Did
+
+**12,637 of 16,985 predictions were tagged `dup_gt`**, dropping the promotion set from 12,261 to **2,096**. Without DEC-109/110/111, all 12,261 would have been promoted — the rules suppressed **10,165 redundant or wrongly-stacked boxes**, roughly 83% of what the confidence threshold alone would have accepted. This is the largest single correction any review rule has made in this project.
+
+**DEC-111's area-ratio cap is confirmed load-bearing, not theoretical.** 41 promoted part-class boxes (Vehicle/Motorcycle/Bicycle) sit >= 0.8 inside a Tricycle box. Their area ratios run **min 5.1x, median 17.1x, max 330.4x** — 39 of 41 sit above the 10x cap, meaning they are distant vehicles inside a nearer tricycle's bounding box, exactly the case DEC-098's author refused to discard. An uncapped rule would have deleted all 41.
+
+**Two residual sub-cap cases found, diagnosed, and deliberately not fixed.** Both surviving boxes below the 10x cap (5.1x and 8.4x) sit inside a Tricycle box that was **absent from pre-review `labels/`** — hand-drawn in the App during the review itself. `dup_gt` is computed once at dataset-build time, against ground truth as it stood before any editing, so a box drawn later cannot retroactively suppress a prediction. This is an ordering property of the design, not a rule defect. At 2 boxes in 2,096 promotions it does not justify re-running suppression after every edit.
+
+### Write-Back Verification
+
+Checked by reconciliation rather than script self-report, in both directions:
+
+- FiftyOne `ground_truth`: **17,262 boxes**; on-disk `labels_reviewed/` for the same 6,099 files: **17,262 boxes**. Exact match.
+- Pre-review `labels/` for those files held 15,169 boxes; net **+2,093** against 2,096 promotions, 4 hand-deletions across 3 files, and 1 hand-drawn addition.
+
+An initial comparison of raw directory totals (`labels` 20,634 vs `labels_reviewed` 20,655, apparently only +21) was **misleading and should not be repeated**: `labels_reviewed/` accumulates across sessions and covered 7,880 files spanning several review scopes, against `labels/`'s 9,104. Only a stem-matched comparison scoped to the files a given write-back touched is meaningful.
+
+### Cascade Result
+
+`promote_reviews.py --all` promoted **3,094 files across 9 sources** — dlsu 1,605, plus two Dataset Ninja sources (`road_damage_detector` 1,304, `pothole_detection` 185) whose completed reviews had been sitting unpromoted from earlier sessions. Four steps then ran, `dedup.py` skipped again for DEC-102's unchanged reason.
+
+| stage | result |
+|---|---|
+| `cap_per_class.py` | 13/13 classes clear the 1,500 floor; ratio invariant **2.64** (Person 4,500 / Trash Bins 1,702) |
+| `merge.py` | **36,877 images** from 37,012 selected pairs, 135 removed by `exclude` tags |
+| `dedup.py` | **skipped** — DEC-089's 66,907-image coverage preserved |
+| `split.py` | train 25,606 / val 5,701 / test 5,570 = **69.4/15.5/15.1**; `cross_split_duplicate_leakage: []` |
+| `generate_yaml.py` | `dataset/final/data.yaml` at `nc: 13` |
+
+Verified independently of script self-report: on-disk image/label counts pair 1:1 in all three splits and match `split_report.json` exactly; every class id across all 122,264 final boxes falls in 0–12 with no strays; per-class box totals match `merge_report.json` exactly. `check_det_dataset()` from `/tmp` resolves `nc=13`, correct name order, and all three split paths absolute and existing — DEC-066's check, which matters because training runs on RunPod, not this machine.
+
+### Consequences
+
+`dataset/final/` is now training-ready and reflects every completed review. The pool grew by 2 images against DEC-102 (36,875 -> 36,877) but its **labels are materially different**: dlsu alone gained 2,093 net boxes, and the 10,165 suppressed duplicates are boxes DEC-102's pool would have carried had the review run under the old rules.
+
+Not addressed here, and still open: `roboflow_cv_project_hovyc` (297 files), `door_detection_zqt59` (47), `revised_pedestrian_obstacle` (64) and `roitrikee` (39) have images in `labels/` with no `labels_reviewed/` entry — reviews narrower than their source, left alone by design (`promote_reviews.py` never deletes unreviewed files).
+
+---
+
+## DEC-113: FiftyOne's Sidebar Silently Truncates Unindexed Filter Values — Indexes Now Created At Build Time
+
+- **Date:** 2026-09-05
+- **Status:** Accepted (fixed)
+- **Related:** DEC-103 (the notebook this fixes), DEC-112 (the pool being browsed), DEC-081 (`dataset.classes`, the *other* App-side setup step this notebook already does)
+
+### Context
+
+Browsing `dataset/final/` in `fiftyone_final_dataset.ipynb`, the App sidebar offered only **12 classes and 5 sources**. The pool genuinely holds **13 classes and 12 sources**. An earlier session hit the same thing and reported "11 classes / no roboflow" — investigated at the time, wrongly attributed to a stale App server, and left open. It is the same cause.
+
+### Cause
+
+FiftyOne 1.20 resolves a sidebar filter's value list with a **bounded scan when the field has no database index**, and returns a partial list rather than failing. The only signal is a small **"Incomplete search. create an index"** note under the dropdown. `final_dataset_browse` carried only the four automatic indexes (`id`, `filepath`, `created_at`, `last_modified_at`) — nothing on `source` or `ground_truth.detections.label`.
+
+Verified the data was never at fault: `count_values("ground_truth.detections.label")` returns 13, `count_values("source")` returns 12, and all 122,264 label ids in `dataset/final/` fall in 0–12.
+
+### Why This Is Worth An Entry
+
+**What gets dropped is not predictable, and differs by field.** `source` kept the 5 alphabetically-first values (every `roboflow_*` invisible). `ground_truth.label` dropped **Doors from the middle of the alphabet** — the rarest class at 2,280 boxes. Neither list looks truncated on its own: a sidebar showing a plausible, alphabetically-ordered set of classes reads as complete. This misled two sessions into believing real data was missing, once far enough to question a completed cascade.
+
+The general lesson: **the App sidebar is not a source of truth about dataset contents.** Verify with `count_values()` / `distinct()`, never by reading the filter dropdown.
+
+### Decision
+
+`fiftyone_final_dataset.ipynb`'s build cell now calls `create_index()` on `source`, `split`, and `ground_truth.detections.label` immediately after `add_samples()` (notebook v2). It must live in the build cell, not be run once by hand: the dataset is `persistent=False` and the cell drops and recreates it on every run, so the indexes go with it. Cost is ~0.1s per field on 36,877 samples.
+
+Not applied to `fiftyone_review_processed.ipynb`, which browses one source at a time with far fewer distinct values and has not shown the symptom — left for whenever it actually does.
+
+---
+
+## DEC-114: Hailo Toolchain Validation Prepared — DFC 3.34 Can Downgrade Its Own HEF Version, Removing DFC 3.33 As The Only Fallback
+
+- **Date:** 2026-09-06
+- **Status:** Accepted — **RESOLVED 2026-09-06: PASS.** DFC 3.34.0 output loads on HailoRT 4.23.0; DFC 3.33 is not needed.
+- **Related:** DEC-003/DEC-004 (repo split — RPi5 runtime lives in the separate `second-vision` repo), DEC-022/DEC-026 (the export path this validates), DEC-089 (RunPod operational lessons — SSH keys baked at boot, rsync over tar, Terminate not Stop), DEC-112 (`dataset/final/` at 36,877 images, the model this export path will eventually carry)
+
+### Context
+
+The export chain `DFC 3.34.0 -> HEF -> HailoRT 4.23.0` had never been run end to end. Ultralytics documents DFC **3.33** + HailoRT 4.23 as the validated pair; the wheel on hand is **3.34**, and HailoRT refuses HEFs newer than itself. If 3.34's output is rejected, everything downstream of training is blocked. The stated fallback was a login-gated ~500 MB download of DFC 3.33 from the Hailo Developer Zone.
+
+### What Was Established Without Spending Anything
+
+Read directly out of the wheel and the installed Ultralytics 8.4.118, before any pod was rented:
+
+- **`LATEST_HEF_VERSION = 5`** (`hailo_sdk_common/versions.py:3`) — the concern is real; 3.34 does emit v5 by default.
+- **DFC 3.34 can emit HEF v1 through v5.** `version_alias_dict` in `hailo_sdk_client/allocator/platform_params.py:34-49` maps `v1`-`v5`, wired to the model-script command `platform_param` (`commands.py:80`). The line `platform_param(hef_version=4)` downgrades the output.
+- **Ultralytics exposes no hook for it.** The model script is hardcoded at `engine/exporter.py:1665-1716` and passed straight into `runner.load_model_script()`. Using the knob requires patching `exporter.py` or driving `ClientRunner` directly.
+- **Expected failure signature**, from a documented case of the same mismatch class: `Unsupported hef version <N>` followed by `Failed parsing HEF file HAILO_INVALID_HEF(26)`.
+- `exporter.py:622` asserts `LINUX and not ARM64` — compilation genuinely cannot happen on the student's Mac or on the Pi. A pod is unavoidable.
+
+### Decision
+
+**Compile two HEFs in one pod session — the default v5 and a patched v4 — rather than v5 alone.** A v5 rejection then still ends the session with a working answer instead of a gated download and a second sitting. DFC 3.33 becomes the fallback only if **both** are rejected.
+
+### Two Corrections To The Handoff's Verified-Facts Section
+
+Both claims were wrong against the installed source, and both were being treated as settled:
+
+- **"Hailo export requires `data=`; it will not silently fall back."** It does fall back. `exporter.py:619-620` sets `self.args.data = TASK2CALIBRATIONDATA.get(model.task)`, which is `coco128.yaml` for detect. Passing `data=coco8.yaml` is still correct here, but for compile speed (8 images vs 128), not because it is mandatory.
+- **"`quantize` must be `8` or `w8a16`."** True as a constraint, but it does not have to be passed. `exporter.py:611-617` auto-enables `quantize=8` with a warning. Only an explicit `quantize=32` raises.
+
+The rest of the handoff's Ultralytics claims were verified accurate at the exact line numbers cited (646, 647, 611, 619, 1598, 1658), including that `name="hailo8"` must be passed or the export silently targets `hailo8l`, the 13-TOPS part rather than the 26-TOPS AI HAT+.
+
+### The Pi Was Not Offline — It Moved
+
+`192.168.1.19` (the address in the handoff) failed both ping and SSH, initially reading as a dead device. It was a DHCP lease change: the Pi answers at **192.168.1.20**, proven by an identical ED25519 host key, `SHA256:qCmOUTr/QBVvlyXqZmrzBYC0kqr3Hln65BVDR/mu37M`, recorded for `.19` in `known_hosts` and live at `.20`. `.19` is now a different device. Key auth from the Mac does not currently work for any tried user, so the Pi-side steps are written to be run at the device with a keyboard and monitor rather than over SSH, at the student's request.
+
+### Rationale
+
+The expensive failure mode here was spending the pod session to learn only "v5 is rejected", then needing a gated download and a second session. Reading the wheel first cost nothing and found the downgrade path the handoff had concluded did not exist ("could not be determined by reading the wheel"). Compiling both in one sitting converts a possible dead end into a decision.
+
+### Consequences
+
+- `runpod_hailo_validate_wizard.sh` (gitignored, ephemeral per the wizard skill, same as `runpod_dedup_wizard.sh` in DEC-089) drives 10 stages: pod deploy, connect, wheel upload, venv, TF-GPU check, both compiles, download, teardown.
+- `docs/HANDOFF_hailo_pi_verification.md` holds the Pi-side steps, PASS/FAIL criteria, and the exact failure signature to look for.
+- **The result is still unknown.** No pod has been rented and no HEF has been parsed. `hailo_validation_report.txt` will carry a `PENDING:` line until the Pi test runs.
+- **The 30 GB network volume the handoff called for was dropped from this run**, on the student's challenge ("since I'm just doing a test run why do I need a 4090 right off the bat?") — a fair question that exposed a weaker premise underneath it. The DFC wheel is only needed to *export*, never to train, so it is used across a handful of sessions, not the many-session pattern a volume pays off for. The 4.7 GB dataset that would justify one is explicitly not being uploaded yet because the class schema may still change, so a volume created today would hold 524 MB in a 30 GB allocation at $2.10/month. Worse, attaching it would have **constrained the throwaway test pod's GPU choice to a single datacenter** in a session whose whole goal is renting the cheapest thing available. This is DEC-089's own reasoning for rejecting a volume for the one-time dedup run, applied to a job of the same shape.
+- **This concerns the Network Volume only, not the pod's own disk.** RunPod calls both "storage" and they are easy to conflate (they were, in this session): the pod's persistent/volume disk at `/workspace` is set at deploy time, billed with the pod, dies with it, and is mandatory — every pod has one. Take the template's recommendation, typically 50 GB, which comfortably fits the 524 MB wheel plus the DFC's TensorFlow/JAX/CUDA install.
+- **The datacenter decision is therefore deferred to training planning**, where it can be made against a settled schema, real dataset and checkpoint sizes, and actual training-GPU requirements. Accepted cost: one 524 MB re-upload of the wheel at export time. Accepted risk: a preferred datacenter may lack storage capacity when the volume is finally created — the same failure hit during DEC-089 — but that is resolved by picking a different datacenter, which is precisely the flexibility committing today would spend.
+- The TF-GPU check is a warn-and-continue gate, not a hard stop: an 8-image calibration on CPU still answers the HEF-acceptance question. The real 36,877-image run must not proceed on a CPU-only image.
+
+### Session Interrupted 2026-09-06 — Environment Proven, Compile Not Yet Run
+
+Stopped for session limits after the environment was built and verified, before any HEF was compiled. **No `parse-hef` has run; the central question is still open.** Four real operational failures were hit and fixed, all now baked into the wizard:
+
+- **`pip install -q` over a silent SSH channel died mid-install.** No keepalives, minutes of no traffic. Fixed with `ServerAliveInterval=30` on both remote helpers, and by running the install **detached on the pod** with its own log and a polling loop — a dropped connection now costs a reconnect, not the install. A guard prevents a re-run launching a second pip into the same venv.
+- **The venv was being built on `/workspace`, which is network storage** (`fuseblk`, MooseFS at `mfs#euro-3.runpod.net:9421`), not local disk. Tens of thousands of small package files across FUSE is slow and fragile. Moved venv and work dir to `/root` (local overlay); the install then finished in ~100 seconds.
+- **The blocker that would have survived every existing check: a CUDA major-version collision.** pip took the newest torch, `2.14.0+cu130`, onto a `570.195.03` driver capped at **CUDA 12.8**. TensorFlow was genuinely fine — a real matmul ran on the L4 — so the wizard's TF-only gate at stage 6 would have **passed straight through**. But importing torch initialised a CUDA 13 runtime that poisoned the process, and `import hailo_sdk_client` then died on `cudaGetDevice() failed`. `yolo export` imports both. Fixed by purging the `nvidia-*-cu13` stack and installing torch from the driver-matched index; the wizard now reads the CUDA ceiling from `nvidia-smi` and selects cu130/cu128/cu126/cu124/cu121/cu118 **before** ultralytics can pull a torch of its own choosing. This will recur on the real post-training export if not carried forward.
+- **The DFC's first-run check wants OS packages** the image lacks: `python3-tk`, `graphviz`, `libgraphviz-dev`, and `column` (`bsdmainutils`). Non-fatal — the import succeeds regardless — but installed to avoid discovering it mid-compile. A residual `Cannot use graphviz, so no visualizations will be created` warning remains and is cosmetic (visualisations only).
+
+Verified working state at the stop: `hailo_sdk_client 3.34.0` (LATEST_HEF_VERSION 5), `torch 2.11.0+cu128` with `cuda True`, `tensorflow 2.18.0` with 1 GPU, `ultralytics 8.4.118`, on an **NVIDIA L4** at $0.50/hr. The venv lives on the pod's local disk and does **not** survive termination — but it now rebuilds in about three minutes unattended, so terminating is the cheap choice.
+
+### Resumed And Re-Stopped 2026-09-06 — What A RunPod Restart Actually Costs, Measured
+
+The pod was left Running over an hour-long pause, then found unreachable: the host still answered ping, but the SSH port was closed. It had **restarted** — Running in the console, but with everything below re-initialised. Three concrete behaviours, measured rather than assumed, and worth not rediscovering:
+
+- **The exposed TCP port changes on restart** (12592 → 10512). Any stored SSH command goes stale. This is why `.env` holding a previous pod's `RUNPOD_SSH_CMD` is actively dangerous — the wizard's `ask` offers it as an `[Enter keeps current]` default, so pressing Enter silently targets a dead pod.
+- **`/root` (container overlay) is wiped; `/workspace` survives.** The entire venv — torch, TensorFlow, the DFC, the apt packages — was gone, while the 524 MB wheel was intact byte-for-byte. So the pod's *own* disk is not a place to keep anything, but the upload does not need repeating.
+- **The host key changes**, so a restarted pod fails `BatchMode` SSH with "Host key verification failed". This exposed a real latent bug: the wizard's stage-3 connection test had no host-key policy, meaning it would have failed on **every freshly deployed pod** and reported the misleading "SSH key was added after boot" message. Fixed with `StrictHostKeyChecking=accept-new` on all SSH paths — which trusts a first-seen key but still refuses a *changed* one.
+
+Full unattended rebuild from a wiped `/root` measured at **~180 seconds** (apt packages, venv, driver-matched torch, ultralytics, DFC). The student elected to **Stop** rather than Terminate, judging reclaim unlikely across a short window — a materially cheaper bet than DEC-089's, where a stopped pod held a multi-hour dataset upload. Here the only unrecoverable asset is ~100 seconds of wheel re-upload.
+
+### RESOLVED — The Answer Is PASS
+
+Both HEFs compiled (v5 in 298s, v4 in 334s on an L4) and **both parse cleanly on the Pi** under HailoRT 4.23.0, firmware 4.23.0, Board Hailo-8, HAILO8:
+
+    Architecture HEF was compiled for: HAILO8
+    Network group name: yolov8n, Single Context
+    Input  yolov8n/input_layer1 UINT8, NHWC(640x640x3)
+    Output yolov8n/yolov8_nms_postprocess FLOAT32, HAILO NMS BY CLASS
+    Op YOLOV8, score th 0.250, IoU th 0.70, 640x640, 80 classes
+
+`hailortcli run` on the v5 HEF: **1,596 frames, 318.84 FPS**, 3134.29 Mbit/s send.
+
+**Consequences:**
+
+- **The DFC 3.34 / HailoRT 4.23 version worry is closed.** Ultralytics documents 3.33 + 4.23 as the validated pair, but 3.34's v5 output is accepted as-is. The login-gated ~500 MB DFC 3.33 download is not needed and should not be pursued.
+- **The v4 hedge was never required.** Both files parse identically. `parse-hef` prints no HEF version number, so whether `platform_param(hef_version=4)` actually took effect is still unconfirmed — now moot, but the knob and its wiring (`platform_params.py:34-49`, `commands.py:80`) remain documented here in case a future HailoRT/DFC pairing does reject one.
+- **`name=hailo8` was correctly applied** — the HEF reports `HAILO8`, not the 13-TOPS `HAILO8L` that Ultralytics defaults to at `exporter.py:646`. That default remains the single easiest way to silently ship a wrong-accelerator binary.
+- **318 FPS is not a prediction for this project.** It is stock yolov8n over COCO's 80 classes. YOLOv8s on 13 classes will differ. It does establish that the accelerator has large headroom over a smartglass obstacle-warning frame rate.
+- The Pi-side silence that briefly looked like a driver fault was **a loose ribbon cable on the AI HAT+** — worth checking first next time, before `lsmod`/`lspci`/`dmesg` diagnosis.
+- The export path is now unblocked end to end. The remaining Hailo work is the real export after training, which must reuse the driver-matched-torch fix recorded above.
+
+## DEC-115: Schema 13 → 15 — Stairs and Bench Added From Open Images. Doors Top-Up Proposed Then Withdrawn. Queued, Not Yet Executed
+
+- **Date:** 2026-09-06
+- **Status:** Accepted (queued — no config, dataset, or code changed by this entry). **Amended same day — the Doors top-up was withdrawn by the student; see the amendment at the end of this entry. The Doors passages below are left as originally written so the reversal is legible.**
+- **Related:** DEC-100 (dropped Stairs; this partially reverses it), DEC-083 (the propose-then-*look* precedent this followed), DEC-042 (floor/cap/ratio), DEC-107 (the five schema copies), DEC-101/DEC-105 (why appending beats re-indexing), DEC-052 (cross-class-folder box merging, which creates the Bench↔Tables conflict), DEC-102 (dedup deliberately skipped in the cascade). Full evidence: `docs/HANDOFF_replacement_classes.md`. **Numbering:** originally written as DEC-114 and renumbered to 115 — a concurrent session had independently taken 114 (Hailo toolchain validation), which is already referenced from `TASKS.md` and `docs/HANDOFF_hailo_pi_verification.md` while this entry had no references. Same resolution rule as DEC-083's collision.
+
+### Context
+
+Training was ready to start on the verified 13-class `dataset/final/` (DEC-112, 36,877 images). Before starting, the student asked whether any class should replace the three dropped by DEC-100. A planning pass enumerated **all 599 Open Images V7 detection classes**, measured every navigation-relevant and indoor-obstacle candidate for distinct-image count, boxes/image, median box area and small-box share, and visually inspected the shortlist with boxes drawn — Stairs (30 samples), Bench, Traffic sign, Traffic light, Door (24 each), Bed, Couch, Houseplant, Box (18 each).
+
+The pass recommended **Stairs only**. The student decided on **Stairs + Bench + a Doors top-up**.
+
+### Decision
+
+Schema **13 → 15**, all three sourced from Open Images V7:
+
+| change | class | id | Open Images label |
+|---|---|---|---|
+| new | Stairs | **13** | `"Stairs"` |
+| new | Bench | **14** | `"Bench"` |
+| top-up | Doors | 6 (unchanged) | `"Door"` |
+
+**Appended, not inserted.** ids 0–12 are untouched, so none of `dataset/final/`'s 122,264 boxes is rewritten and no inverse of `drop_classes.py` is needed.
+
+**Stairs is built from Open Images alone; the benched Roboflow stair sources stay benched.** `drop_classes.py` deleted every Stairs box from every source's `labels/`, `stair_gaptw` included, and DEC-100 records that no inverse migration script exists. Recovering those ~1,416 images would mean hand-restoring old-id-5 boxes from the 4.1 GB backup across six sources and remapping 5 → 13 with no tooling — DEC-101/DEC-105 territory. A fresh Open Images pull yields more images (2,630) and needs none of it.
+
+**`doors:` must be restructured from `primary_providers` to `primary:`.** `get_openimages_targets()` (`acquire_openimages.py`) selects on `primary.source == "open_images"` and ignores `secondary_providers` entirely; `openimages_to_intermediate.py:53` imports that same function. An Open Images entry added under `secondary_providers` would be **silently ignored** — no error, no data. The two existing Roboflow door sources move to `secondary_providers`. Same restructure DEC-083 applied to Pole.
+
+**Deliberate `cap:` divergence for the two new classes — Stairs 5500, Bench 8000.** `acquire_openimages.py` splits `ceil(cap × 1.35)` evenly across three splits, and both classes are train-heavy, so `cap: 4500` strands 450 Stairs and **1,544 Bench** images. Bench at 4,500 pulls only 2,039, which after exclusions lands near the 1,500 floor — the exact failure mode that killed the previous three classes. Verified that `cap_per_class.py` takes its ceiling from `--hard-cap` (default 4500, `cap_per_class.py:114`) and **never reads the per-class `cap` field**, so `cap` is purely an acquisition-buffer input and DEC-042's selection ceiling is still enforced at Stage 5.4. `cap: 5500`/`cap: 8000` pull each class in full (2,630 / 3,583), config-only. Each block **must** carry an inline `note:` saying so — `classes.yaml` documents `cap` as "hard cap 4500 for every class", and without the note a future reader will correctly-looking-ly revert it.
+
+### Two measurements that corrected this session's own earlier claims
+
+Both were first asserted from small visual samples and then measured against the full annotation set. Recording both, because the sampling bias behind them will recur.
+
+1. **Open Images `"Door"` car-door contamination: 1.8%, not ~17%.** The handoff first flagged Door as unsafe because 4 of 24 rendered samples boxed car doors. Measured properly: **350 of 19,970 Door boxes (1.8%)** sit ≥80% inside a Car/Bus/Truck/Van/Taxi box; 237 images (1.7%) carry one; 199 (1.4%) are nothing but vehicle doors. The visual sample was drawn from locally cached images, which are the intersection with images pulled *for Person and Vehicle* — i.e. structurally car-biased. **The claim was wrong by an order of magnitude and the source is sound.**
+2. **Bench ↔ Tables collision: 9.7% of boxes, not ~33%.** 685 of 7,038 Bench boxes sit at IoU ≥ 0.5 with a `Table`/`Coffee table`/`Kitchen & dining room table`/`Desk` box; 84 more (1.2%) against `Chair`; 13.8% of Bench images are affected. Real, an order of magnitude smaller than the 4-of-24 sample implied, and mitigable.
+
+**Generalisation worth keeping:** the locally cached Open Images subset is *not* a random sample of Open Images — it is the residue of past per-class pulls, and it inherits their class bias. Use it to judge *annotation quality*; never to estimate a *rate*. Rates come from `detections.csv`.
+
+### The Bench ↔ Tables conflict lands inside our own pool
+
+Not merely a source quirk. Per DEC-052, `openimages_to_intermediate.py` merges boxes across class folders rather than dropping them, so once Bench is a target class, an image pulled for Tables that also carries a Bench box gets **both boxes on the same picnic table** — one `Tables`, one `Bench`. Contradictory supervision the model cannot resolve, and exactly the class of defect DEC-112 showed to be worth 10,165 suppressed boxes elsewhere.
+
+Chosen mitigation: **filter at conversion** — drop the Bench box when IoU ≥ 0.5 with a same-image Tables or Chairs box, keep the Tables box. ~770 boxes. This is the **only code change** in the plan (a small addition to `openimages_to_intermediate.py`), and it mirrors DEC-109/110/111's existing containment logic rather than inventing a new rule.
+
+### Rationale
+
+Stairs is the highest-consequence obstacle in the schema — every other class causes a collision, a missed descending staircase causes a fall — and it was dropped purely on a 125-image shortfall that Open Images removes. Its Open Images boxes are proper axis-aligned rectangles, so DEC-031's polygon-derived-sliver defect against the old Roboflow stair sources does not reproduce; median box area is 16.6% of frame with only 5.6% of boxes under 1%, among the best measured, which is what makes it viable at 640px on Hailo-8 where Traffic sign and Traffic light are not.
+
+Bench was recommended against and the student overrode it. The override is reasonable on the corrected 9.7% figure: street furniture is a genuine torso-height hazard, and the collision is a tenth of the class with a mechanical fix, not a third with no fix.
+
+Doors is the schema's thinnest class (1,938 images / 2,280 boxes) and Open Images offers 13,910 at 1.8% contamination. Cheapest real quality gain available.
+
+### Alternatives Considered
+
+- **Insert Stairs at its old id 5**: Rejected — re-indexes eight classes and rewrites every label file for a purely cosmetic ordering gain, after this project has already paid twice for schema churn (DEC-101, DEC-107).
+- **Revive Stairs by restoring the Roboflow sources from the backup**: Rejected — no inverse migration script exists (DEC-100), it needs a hand-written 5 → 13 remap across six sources, and it yields *fewer* images than a clean Open Images pull.
+- **Leave both new classes at `cap: 4500`**: Rejected — strands 1,544 Bench images and leaves the class hovering at the floor with no recovery short of another acquisition round.
+- **Add Bed instead of Bench**: Not chosen by the student. On the data it is the strongest indoor candidate measured (median box area 0.330, 0.8% tiny boxes, 17 of 18 samples clean, zero overlap) but a bed sits in the one room a blind user knows best — best data, weakest use case.
+- **Accept the Bench/Tables double-labelling**: Rejected — DEC-112 measured what redundant stacked boxes cost when left in.
+
+### Consequences
+
+- **Full retrain, not a fine-tune.** 13 → 15 is a new detection head. Accepted knowingly, as in DEC-100.
+- **All five DEC-107 schema copies move together**, plus `dataset/final/data.yaml` (generated) and the FiftyOne App annotation JSON (generate it from `get_canonical_names()`; do not hand-type it). Delete `__pycache__` before validating `config_loader.py` — DEC-107's bytecode-staleness incident.
+- **The cascade re-runs**: `acquire_openimages.py --classes doors,stairs,bench` → `openimages_to_intermediate.py` → review → `promote_reviews.py` → `cap_per_class.py --hard-cap 4500` → `merge.py` → *skip `dedup.py`* (DEC-102) → `split.py` → `generate_yaml.py`. `openimages_to_intermediate.py` rebuilds the **whole** `dataset/processed/open_images/` pool, so verify its output against the report rather than trusting it — the DEC-050/DEC-085 stale-file pattern.
+- **Expected end state**: Doors ~4,500 (hits the cap), Stairs ~2,100–2,500, Bench ~2,600–3,000, every other class unchanged. Ratio invariant stays **2.64** (Person 4,500 / Trash Bins 1,702) provided both new classes land above 1,702; Trash Bins remains the binding minimum.
+- **Stairs will be instance-thin** — ~1.2 boxes/image, ~2,600–3,000 instances, against DEC-042's 10,000 target (6,000 for small/hard). Not disqualifying: `Doors` ships 2,280 boxes and `Trash Bins` 2,737. Expect Doors-like AP.
+- **Training is delayed by roughly 3–5 days**, dominated by the review pass on three new pools, not by compute.
+- **Housekeeping found while planning**: `cap_per_class.py`'s `CLASS_PRIORITY_SOURCES` still carries a stale `"Elevator"` key for a class dropped in DEC-100. Harmless — never looked up — but delete it while the file is open.
+- **Not yet done**: everything above. This entry is the queued plan; a separate session executes it. `docs/HANDOFF_replacement_classes.md` §0 holds the step-by-step.
+
+### Amendment, 2026-09-06 — Doors top-up withdrawn by the student
+
+**The Doors top-up is cancelled. `doors:` is not restructured, Open Images `"Door"` is not pulled, and `doors:` keeps its existing `primary_providers` shape with the two Roboflow sources. Only Stairs (id 13) and Bench (id 14) proceed.**
+
+The student's reasoning, recorded verbatim in substance: *if there is even a chance of car doors being in the pool, drop it.* This overrides the 1.8% measurement above, and it is a risk-tolerance judgment rather than a factual disagreement — the measurement is not in dispute, the acceptable level of contamination is. Noted and not re-argued.
+
+Worth recording that a mitigation existed and was not taken: the same containment test used to *measure* the contamination (Door box ≥80% inside a Car/Bus/Truck/Van/Taxi box) would also **remove** it at conversion, dropping 350 boxes and the 199 images that are nothing but vehicle doors. The student chose to avoid the source rather than filter it. If Doors is ever revisited, that filter is the cheap path and this entry's measurements are the basis for it.
+
+**Consequences of the withdrawal:**
+
+- `Doors` stays at **1,938 images / 2,280 boxes** and remains the schema's thinnest class by image count. It is still **above** DEC-042's 1,500 floor, so nothing is out of compliance.
+- The ratio invariant is unaffected: the binding minimum is `Trash Bins` at 1,702, not Doors, so max/min stays **4,500 / 1,702 = 2.64**.
+- The plan loses its only `primary_providers` → `primary:` restructure. **The finding behind it still stands and is still worth knowing:** `get_openimages_targets()` selects on `primary.source == "open_images"` and ignores `secondary_providers` entirely, so any future attempt to add an Open Images provider to a class under `secondary_providers` will be **silently ignored** — no error, no data. This is a live trap for `doors:`, `potholes:`, `tricycle:` and every other `primary_providers`-shaped class.
+- Acquisition narrows to `acquire_openimages.py --classes stairs,bench`.
+- Expected end state revises to: Stairs ~2,100–2,500, Bench ~2,600–3,000, **Doors unchanged at 1,938**, every other class unchanged.
+- `docs/OPEN_QUESTIONS.md` gains nothing new — Doors' thinness was never an open question, and it is not blocking.
+
+### Amendment 2, 2026-09-06 — browse-first pull executed. The `est. pull` model was wrong for Stairs; `cap: 5500` would have failed the floor
+
+Step 4 of the plan ("browse the pools before touching config") was run ahead of everything else, as a throwaway pull into two persistent FiftyOne datasets (`preview_oi_stairs`, `preview_oi_bench`) outside the pipeline. Nothing in `config/`, `scripts/` or `dataset/` was touched. It reproduced `acquire_openimages.py`'s real behaviour exactly — per-split `max_samples`, `shuffle=True`, `seed=42`, then DEC-043's `IsDepiction`/`IsGroupOf` filter.
+
+**It caught a plan-breaking error before any schema copy was edited. This is why the browse-first step exists.**
+
+| | predicted | **actual** |
+|---|---|---|
+| Stairs @ `cap: 5500` | 2,630 images | raw 2,643 → **1,514** carrying a clean Stairs box |
+| Bench @ `cap: 8000` | 3,583 images | raw 3,614 → **3,555** carrying a clean Bench box |
+
+**Stairs at `cap: 5500` yields 1,514 images — fourteen above DEC-042's 1,500 floor, before a single review exclusion.** At the 15–20% exclusion rate this session estimated, it lands at ~1,210–1,290, i.e. **below the floor** — the exact failure that killed it under DEC-100. `cap: 5500` is wrong and must not be executed.
+
+**Why the model was wrong.** `est_pull` assumed the per-split budget is spent on images that survive DEC-043's filter. It is not: the Zoo's `classes=` selector picks images that contain the class *at any flag value*, then the filter runs afterwards. When a class has a high `IsGroupOf`/`IsDepiction` rate, most of the budget is spent on images that the filter then discards.
+
+Measured clean rate — the share of a class's images that carry at least one box surviving DEC-043 — differs enormously by class:
+
+| class | images with any box | with a clean box | clean rate | GroupOf/Depiction box rate |
+|---|---|---|---|---|
+| **Stairs** | 4,700 | 2,630 | **56.0%** | **48.8%** |
+| Shelf | 6,797 | 5,915 | 87.0% | 8.9% |
+| Bench | 3,644 | 3,583 | 98.3% | 3.0% |
+| Street light | 11,364 | 11,323 | 99.6% | 2.3% |
+
+**The Street light validation gave false confidence.** The model was checked against DEC-083's real Street light pull and matched to the image (2,159 exactly) — but Street light has a 99.6% clean rate, so the dilution the model ignores was invisible there. Validating on the easiest case is not validation. **Any `est. pull` figure in `docs/HANDOFF_replacement_classes.md` §3 and §6 is an upper bound, not an estimate, and is only trustworthy for classes with a high clean rate.**
+
+### The real finding: DEC-043's blanket `IsGroupOf` filter is actively wrong for Stairs
+
+**48.8% of Stairs boxes are flagged `IsGroupOf`** — five times Shelf's rate and twenty times Street light's. The cause is semantic: a flight of stairs reads to an annotator as *a group of steps*, so the flag fires on the ordinary case rather than the exceptional one.
+
+**Those boxes were inspected (18 rendered at random from the real pool) and they are the *best* Stairs annotations in the class** — single, tight, correctly-framed boxes around one flight: a grand civic staircase, subway stairs, hillside steps, interior flights. They are not the sprawling multi-object cluster boxes `IsGroupOf` is meant to catch.
+
+DEC-043's rationale for dropping `IsGroupOf` is specific and does not transfer: *"the on-device algorithm determines a group of a class by counting multiple individual instance detections within an area of interest"*, so a group-box would teach the model that a cluster is one object. That is correct for Person and Car. **For Stairs the desired output is exactly one detection per flight — nobody wants the device counting individual steps.** The rule is being applied to a class whose semantics invert it.
+
+### Revised options for Stairs — the student's call
+
+| option | cap | images | notes |
+|---|---|---|---|
+| ~~**A′.** as planned~~ | 5,500 | **1,514** | **Not viable.** 14 above the floor pre-exclusion. Do not execute. |
+| **A. Keep DEC-043 as-is, raise the cap** | **~10,100** | **2,630** | Clears the floor with ~1,130 margin. No rule change, no code change. Downloads 4,700 images to keep 2,630. **Recommended.** |
+| **B. Keep `IsGroupOf` for Stairs only** | ~10,100 | **4,700** | Best data — richer boxes, and the ones visually judged best. Requires a per-class filter in `acquire_openimages.py` (a code change) and an explicit amendment to DEC-043. |
+| **C. Drop Stairs, ship Bench alone** | — | — | Schema 13 → 14. Honest fallback if neither the download nor the rule change is wanted. |
+
+Recommended: **A**, with **B** flagged as the better-data option worth a deliberate decision rather than inheriting a blanket rule. Under A the `cap:` divergence noted in the main entry gets larger, not smaller — `cap: 10100` against a documented "hard cap 4500" — so the inline `note:` requirement is now mandatory, not advisory.
+
+### Bench is confirmed, and this session's objection to it is withdrawn
+
+**Bench came in at 3,555 clean images against 3,583 predicted — a 0.8% miss.** `cap: 8000` stands exactly as written.
+
+More importantly, **24 images rendered at random from the real pool show this session's stated objection to Bench was a sampling artefact.** The original "picnic-table contamination, reject" verdict came from the locally cached subset, which is the residue of past Person/Vehicle/Tables pulls and therefore biased toward exactly the scenes that produce the confusion. On an unbiased draw the pool is overwhelmingly genuine outdoor street and park furniture — park benches, bus-shelter seating, riverside and playground benches — with roughly 2–3 of 24 questionable, matching the measured 9.7% collision rate rather than the 4-of-24 (17%) the biased sample implied.
+
+**The student's choice of Bench was better than this session's recommendation against it.** The §0.5 IoU filter is still worth applying, but as tidy-up rather than rescue.
+
+### Consequences of this amendment
+
+- `cap: 5500` for Stairs is **withdrawn**. Execution must not proceed on the numbers in §0.4 of the handoff as originally written.
+- Stairs' viability now depends on a decision the student has not yet made (A, B or C above). **This is the one open blocker in the plan.**
+- Bench is unblocked and unchanged.
+- The two preview datasets are persistent and browsable now, before anything is edited: `fo.load_dataset("preview_oi_stairs")` / `("preview_oi_bench")`, then `fo.launch_app(...)`. Per DEC-113, create an index on `ground_truth.detections.label` before trusting the sidebar's class list.
+- The zoo cache at `~/fiftyone/open-images-v7/` grew by the pulled images. Harmless and reusable — a real acquisition run will find them already downloaded.
+- **Method lesson, worth more than this entry's specific numbers:** a per-class count taken from `detections.csv` is a *ceiling*, not a *yield*. Yield depends on the class's clean rate and must be measured by pulling. This session asserted three numbers from static analysis (car-door rate, Bench collision rate, Stairs pull) and measurement corrected all three — twice in the pessimistic direction, once fatally in the optimistic direction.
+
+---
+
+### Handover note, 2026-09-06
+
+Execution handed to the main session. `docs/HANDOFF_stairs_bench_execution.md` is the handover document.
+
+Reasons, in order: (1) the `cap:` raise this plan depends on has already been discussed in the main session and this sub-session has no visibility into those concerns, so §4 of the handover states what the field mechanically does — every reader of it, verified by reading the code — rather than arguing a position; (2) DEC-114's Hailo session is live, has ~750 uncommitted lines in this file, and is validating a toolchain against `nc: 13` that this change would make `nc: 15` — sequencing belongs to whoever holds both threads; (3) the operative decision is scheduling, not technique.
+
+**A third correction to this session's own claims, found while writing the handover.** This entry and the handoff both stated that `cap_per_class.py` "never reads the per-class `cap` field". **That is false** — it reads it at `cap_per_class.py:393` (`id_to_cap = {entry["id"]: entry["cap"] ...}`). The substantive claim survives: the value passed into `cap_class()` is `hard_cap_preset` from the CLI, never `configured_cap`, so selection is still governed by `--hard-cap` and DEC-042's ceiling is unaffected by a raised `cap`. But `cap` is not unread, and two further facts follow that matter for the decision:
+
+- A raised `cap` is **visible at runtime, not silent** — `cap_per_class.py:426` prints `NOTE: <class>'s classes.yaml cap (N) overridden by --hard-cap=4500` on every run where they differ. That is a point in favour of the approach.
+- `id_to_cap[class_id]` requires every id `0..nc-1` to exist in `classes.yaml` with a `cap`. A missing or mis-numbered per-class `id:` raises `KeyError` here — DEC-101's failure mode, and the first place a botched schema edit surfaces.
+
+Tally for the record: this session asserted four things from static analysis — Door car-door rate (~17%), Bench/Tables collision (~17%), Stairs yield at `cap: 5500` (2,630), and `cap_per_class.py` not reading `cap`. Measurement corrected all four: 1.8%, 9.7%, 1,514, and false respectively. Three were harmless or pessimistic; one was plan-breaking. **The pattern, not the individual numbers, is the thing to carry forward: static analysis of `detections.csv` and of code produced confident wrong answers four times; running the thing produced right ones each time.**
+
+**Concurrency, observed twice in one session.** This entry was renumbered 114 → 115 mid-session after the Hailo session took 114, and while appending this very note the same session appended **DEC-116**, so a blind append would have written it into DEC-116's body. `docs/DECISIONS.md` is being edited by two sessions concurrently right now: **locate your entry's own closing separator before appending, never `tail` the file.** This is the concrete recurrence of the hazard flagged in DEC-083's Consequences and `docs/OPEN_QUESTIONS.md`'s header.
+
+---
+
+
+## DEC-116: Torch Must Be Installed From a Driver-Matched CUDA Index Before Ultralytics, Or Hailo Export Breaks — And a TensorFlow GPU Check Will Not Catch It
+
+- **Date:** 2026-09-06
+- **Status:** Accepted
+- **Related:** DEC-114 (the validation run where this was found), DEC-022/DEC-026 (the export path this protects), DEC-089 (RunPod operational lessons). **Numbering:** written as DEC-115 and renumbered to 116 — a concurrent session had independently taken 115 (schema 13 → 15). Same resolution rule as that entry used against DEC-114: the entry with no inbound references moves.
+
+### Context
+
+Found while validating the Hailo toolchain (DEC-114) on a RunPod pod with an NVIDIA L4. A plain `pip install ultralytics` resolves torch against the newest wheel on PyPI, with no reference to what the host's NVIDIA driver can actually run. On that pod it installed **torch 2.14.0+cu130** — a CUDA 13 build — onto driver **570.195.03**, which caps at **CUDA 12.8**.
+
+### What Actually Breaks
+
+Two failures, and the second is the dangerous one:
+
+1. `torch.cuda.is_available()` returns `False`. Visible, easy to diagnose.
+2. **Importing torch initialises a CUDA 13 runtime that poisons the process.** A subsequent `import hailo_sdk_client` then dies with `InternalError: cudaGetDevice() failed. CUDA driver version is insufficient for CUDA runtime version`. `yolo export ... format=hailo` imports both torch and the DFC in one process, so the collision is unavoidable once the stacks disagree.
+
+The venv ends up holding a genuinely mixed stack — `nvidia-cublas 13.1.1.3`, `nvidia-cudnn-cu13`, `nvidia-nccl-cu13` sitting beside the CUDA 12 libraries TensorFlow uses.
+
+### Why This Is Easy To Miss
+
+**TensorFlow tested completely healthy throughout.** Not merely enumerating a device — a real `tf.matmul` ran on the L4, creating a 20,847 MB context at compute capability 8.9. So the natural gate, "does TensorFlow see the GPU?", **passes** while the export is already doomed. Any check built only around TF — which is the obvious one to write, since the DFC's heavy work is TF-side — gives false confidence here.
+
+The failure also surfaces far from its cause: the error names `hailo_sdk_client`, not torch.
+
+### Decision
+
+**Install torch from a CUDA index matched to the driver, before ultralytics can resolve one of its own.** Read the ceiling from `nvidia-smi` and select accordingly:
+
+    DRV=$(nvidia-smi | grep -o 'CUDA Version: [0-9.]*' | head -1 | awk '{print $3}')
+    MAJ=${DRV%%.*}; MIN=${DRV##*.}
+    if   [ "$MAJ" -ge 13 ]; then IDX=cu130
+    elif [ "$MAJ" -eq 12 ] && [ "$MIN" -ge 8 ]; then IDX=cu128
+    elif [ "$MAJ" -eq 12 ] && [ "$MIN" -ge 6 ]; then IDX=cu126
+    elif [ "$MAJ" -eq 12 ] && [ "$MIN" -ge 4 ]; then IDX=cu124
+    elif [ "$MAJ" -eq 12 ]; then IDX=cu121
+    else IDX=cu118
+    fi
+    pip install --no-cache-dir torch torchvision --index-url https://download.pytorch.org/whl/$IDX
+
+Then install `ultralytics`, then the DFC wheel. Ordering matters: ultralytics accepts an already-satisfied torch, but left first it pulls whatever is newest.
+
+**Verification must import the DFC, not just TensorFlow.** The gate is `import hailo_sdk_client` succeeding in the same process as `import torch` — nothing weaker proves anything.
+
+### Consequences
+
+- `runpod_hailo_validate_wizard.sh` does this automatically; it was the fix that unblocked DEC-114.
+- **This recurs on the real post-training export.** Nothing about it was specific to yolov8n or to the L4 — any pod whose driver is older than the newest torch reproduces it, and driver ages vary across RunPod hosts and datacenters.
+- Recovery, if hit anyway: purge every `nvidia-*` package plus torch/torchvision, then reinstall from the matched index. Measured at ~80 seconds.
+- A related trap worth pairing with this: the DFC's first-run check wants OS packages the stock image lacks — `python3-tk`, `graphviz`, `libgraphviz-dev`, and `column` (`bsdmainutils`). Non-fatal, but it prints red `Error` lines that read like failure.
+
+---
+
+## DEC-117: Schema 13 → 15 Executed — Stairs and Bench Added, `cap` Divergence Justified By Measurement, Bench↔Furniture Collision Filter Built
+
+- **Date:** 2026-09-06
+- **Status:** Accepted (executing)
+- **Related:** DEC-115 (the plan this executes, which was explicitly "queued, not yet executed"), DEC-100 (dropped Stairs; this partially reverses it), DEC-042 (floor/cap/ratio), DEC-043 (the `IsGroupOf`/`IsDepiction` filter at the centre of the Stairs problem), DEC-052 (cross-class-folder merging, which creates the Bench↔Tables conflict), DEC-109/110/111 (the same wrong-box-on-right-box pattern), DEC-101/105/107 (why appending beats re-indexing, and the five schema copies)
+
+### Context
+
+DEC-115 left one question unresolved: Stairs is viable only at a `cap:` well above the 4,500 convention, and the student had raised a concern in the main session that raising it would break DEC-042's ratio invariant. The student also chose to **skip the manual review pass** for both new classes and trust Open Images' annotations, on time grounds — which removes the safety net that would otherwise catch bad boxes, and raises the stakes on getting the measurements right first.
+
+### Decision
+
+**Option A.** Stairs at `cap: 10100`, Bench at `cap: 8000`, DEC-043 unchanged, no per-class filter exemption. Schema **13 → 15**, ids appended: **Stairs 13, Bench 14**.
+
+Option B (allowing `IsGroupOf` for Stairs only) was rejected: it rests on 18 inspected boxes and would amend a project-wide rule at the same moment the review safety net is being removed. Option C (Bench alone at `nc: 14`) was not needed once Stairs measured viable.
+
+### The ratio concern, resolved by measurement
+
+The concern does not hold, for two independent reasons.
+
+**Mechanically**, `cap:` controls download volume only — read at `acquire_openimages.py:93,234` as `max_samples = ceil(cap × 1.35)` and nowhere else that changes behaviour. `cap_per_class.py:393` reads it *only* to print an override NOTE. The 4,500 selection ceiling, 1,500 floor and 3:1 invariant are enforced separately by `cap_per_class.py --hard-cap 4500`.
+
+**Empirically**, and this is the decisive part: **Open Images contains only 2,633 usable Stairs images in total.** `cap: 10100` therefore means "download everything that exists," which is still far below the 4,500 selection ceiling. Stairs cannot become the max class and cannot move the invariant. Person stays at 4,500, Trash Bins at 1,702, ratio **2.64**.
+
+### Measurements taken before executing (all three Open Images splits, from `detections.csv`)
+
+**Stairs** — 6,179 raw boxes across 4,700 images; after DEC-043, **3,173 boxes / 2,633 usable images** (51.4% box rate, 56.0% image rate). Confirms DEC-115's 2,630 estimate. The class is an outlier: 48.8% of its boxes carry `IsGroupOf`, three times the next-worst class in the schema, because a flight of stairs reads to an annotator as a group of steps.
+
+Why the cap had to move: at `cap: 4500` the pull yields ~1,228 usable images — **below the floor**, the exact failure that killed this class under DEC-100. At `cap: 5500` (DEC-115's original plan, withdrawn) it yields 1,514, fourteen above the floor.
+
+**Bench** — after DEC-043: 3,587 images / 7,042 boxes. Applying the new collision filter:
+
+| IoU | boxes dropped | images losing last Bench box | usable images |
+|---:|---:|---:|---:|
+| 0.3 | 897 | 351 | 3,236 |
+| **0.5** | **758 (10.8%)** | **307** | **3,280** |
+| 0.7 | 555 | 214 | 3,373 |
+
+Viability is not threshold-sensitive — every setting leaves Bench at roughly 2.2× the floor. **IoU 0.5** chosen to match DEC-109/110/111's existing precedent. Note the real collision rate is 10.8%, slightly worse than DEC-115's 9.7% estimate.
+
+### Executed
+
+1. **`config/classes.yaml`** — `nc: 15`; `names` 13/14 = Stairs/Bench; `hailo_runtime_names` 14/15 (Background still at 0, so runtime ids remain +1); two new class blocks. Verified: block ids are exactly 0–14 with no gaps, and every id agrees with `names`.
+2. **`scripts/utils/config_loader.py`** — `EXPECTED_NC = 15`, `CANONICAL_NAMES` appended. All `__pycache__` cleared before validating (DEC-107's bytecode-staleness incident, which once made every Pothole render as a Tricycle).
+3. **`scripts/convert/openimages_to_intermediate.py`** — new `drop_bench_on_furniture()` removing Bench boxes at IoU ≥ 0.5 against same-image Tables/Chairs boxes, called after the cross-folder merge and before `audit_class_counts()`. Class ids resolved via `get_class_id()`, never hand-copied (AGENTS.md:105-111). The **Bench** box is always the one dropped; Tables and Chairs predate this class and their counts must not move.
+
+**Append-only is the point.** Ids 13 and 14 sit after Bicycle (12), so no existing id shifts. This is categorically safer than DEC-100's 16→13, which moved eight classes and produced DEC-101's near-miss where three converters would have silently written stale ids into a re-indexed dataset.
+
+### The `cap` self-documentation hazard, handled
+
+`classes.yaml`'s own header comment describes `cap` as "hard cap 4500 for every class per DEC-042", which a value of 10,100 contradicts on its face — the DEC-107 pattern of a field doing double duty with only one meaning documented. Mitigated with a long inline `note:` on the Stairs block stating that `cap` is download volume only, naming the two call sites, and giving the measured yields at 4,500 / 5,500 / 10,100 so a future reader can see why "fixing" it back would silently re-break the class.
+
+### Consequences and accepted costs
+
+- **No manual review pass** for either class — a deliberate, time-constrained choice by the student. Consequence: the Bench↔furniture filter is the *only* defense for those 758 boxes, and Open Images' annotation quality is trusted as-is. Recorded as a limitation, not a defect.
+- **`openimages_to_intermediate.py` rebuilds the entire pool** (31,011 label files). Existing classes' labels are regenerated, and images previously pulled for Tables/Chairs will gain Bench boxes. Output must be verified against the report rather than trusted (DEC-050/085 stale-file pattern).
+- **`dataset/final/` is rebuilt**, so the split is redrawn. The frozen-evaluation-set protocol for the training ablation must therefore be pinned to the *new* split, after this cascade — not the DEC-112 one.
+- The imbalance figures measured for the training plan (image ratio 5.07, box ratio 11.91 at cap 4500) are recomputed at 15 classes. Both new classes land above Doors' 2,280 boxes, so Doors should remain the box-count minimum and the ratio should barely move — to be confirmed, not assumed.
+- Backup at `dataset/backups/pre_schema15_20260906_205738/` holds the pre-change `classes.yaml`, `config_loader.py`, `openimages_to_intermediate.py`, `data.yaml` and all three cascade reports.
+
+### Executed result (appended 2026-09-06, same day)
+
+Cascade complete. `dedup.py` skipped per DEC-102.
+
+| stage | result |
+|---|---|
+| `acquire_openimages.py --classes stairs,bench` | Stairs 3,980 images pulled, Bench 3,585. Requested 13,635 / 10,800 — both classes exhausted at source, as predicted |
+| `openimages_to_intermediate.py` | **37,106 images / 95,659 boxes** (was 31,011). Verified on disk: file count and box count match the report exactly, images and labels pair 1:1 with **zero orphans**, no id outside 0–14 |
+| `cap_per_class.py --hard-cap 4500` | 15/15 clear the floor. Stairs 2,630, Bench 3,545, both `stop=all_candidates_included`. **Ratio invariant 2.64, unchanged.** Both override NOTEs printed as designed |
+| `merge.py` | **42,988 images** from 43,123 selected, 135 removed by `exclude` tags |
+| `split.py` | train 29,949 / val 6,664 / test 6,375 = **69.7/15.5/14.8**; `cross_split_duplicate_leakage: []`, `missing_labels: []` |
+| `generate_yaml.py` | `nc: 15`; `check_det_dataset()` from `/tmp` resolves 15 names in correct order, all three split paths existing |
+
+**Final pool: 42,988 images / 132,434 boxes / nc=15.** All ids 0–14, none out of range.
+
+**Imbalance essentially unmoved**, as predicted: image ratio **5.07** (Person 8,630 / Trash Bins 1,702 — identical to the 13-class figure); box ratio **11.93** vs 11.91 before (Person 27,190 / Doors 2,280). Doors remains the box-count minimum; both new classes land above it. The training plan's ablation framing therefore carries over unchanged.
+
+**The collision filter fired far less than the standalone measurement predicted — 30 boxes across 20 images, not 758.** This is correct behaviour, and the discrepancy is worth understanding rather than treating as a bug. The 758 figure counted collisions in Open Images' *complete* annotation set. The converter takes only each folder's own native classes (Bench boxes from the bench folder, Table boxes from the tables folder), so both boxes reach the same label file only when an image was pulled into *both* folders — true for 3,008 of 37,106 images overall. Where the Table box never entered the pool there is no contradictory supervision to remove. The filter remains correct and worth keeping: it is scoped to exactly the case that actually causes harm, and its cost is negligible. Verified by 8 synthetic unit cases covering drop, keep-below-threshold, keep-non-furniture, never-drop-Tables, and multi-bench partial-drop.
+
+**Known gap, accepted:** the 6,175 new Open Images images (2,630 Stairs + 3,545 Bench) are absent from `dedup_report.json`, which predates them, so `split.py` had no duplicate-group coverage for them and near-duplicates among them could straddle splits. Risk is materially lower than for the Roboflow video-frame sources the dedup work targeted — Open Images is curated and internally deduplicated — but it is a real gap. Re-running `dedup.py` is not an option (DEC-102: it would destroy DEC-089's 66,907-image RunPod coverage). `scripts/preprocess/dedup_extend_exact.py` could close the *exact*-duplicate half cheaply without a GPU, as DEC-090 did for the crosswalk source; not run here, left as the student's call.
+
+---
+
+## DEC-118: Stairs Boxes Recovered From Two Active Sources DEC-100 Had Stripped — Roboflow Stairs Datasets Stay Benched
+
+- **Date:** 2026-09-06
+- **Status:** Accepted (executed)
+- **Related:** DEC-117 (reinstated Stairs from Open Images; this supplements it), DEC-100 (deleted these boxes), DEC-083 (which first noticed `revised_pedestrian_obstacle` carried Stairs incidentally), DEC-082 (why the dedicated Roboflow stairs sources are benched), DEC-093 (the promote-order trap this avoids)
+
+### Context
+
+DEC-117 restored Stairs from Open Images only. But `drop_classes.py` (DEC-100) had deleted Stairs boxes from **every** label file, including sources that are still active and whose boxes had already been through this project's own review pass. The student asked whether the `revised_pedestrian_obstacle` boxes could be revived.
+
+Measured in `dataset/backups/pre_class_drop_20260904_023304/`, 7,370 images still hold legacy-id-5 (Stairs) boxes. Most sit in the three **dedicated** Roboflow stairs sources — `escalator_stairs` (4,429), `stairs_i2yia` (1,559), `stair_gaptw` (967) — which are benched on quality grounds and which the student explicitly ruled out. Two **active, general-purpose** sources also carried Stairs incidentally: `revised_pedestrian_obstacle` (338 images / 350 boxes) and `cv_project_hovyc` (77 / 87).
+
+### Decision
+
+Restore Stairs boxes from the two active sources only. New `scripts/preprocess/restore_stairs_from_predrop.py`. The three benched stairs sources are **not** touched and remain excluded.
+
+The distinction that makes this safe: these are not stairs datasets being un-benched. They are sources already in the merged pool for other classes, whose staircases happen to have been annotated and reviewed. **Zero new images enter the pool** — this adds supervision to images already present.
+
+### Two traps the implementation had to handle
+
+**All 415 files also exist in `labels_reviewed/`.** `promote_reviews.py` copies `labels_reviewed/` **over** `labels/`, so patching only `labels/` would have left a live landmine: the next promote run would copy the unpatched reviewed file back and silently delete every restored box, with no error. Both directories are written. This is DEC-093's failure mode in a new guise.
+
+**The backup carries 16-class ids.** Only legacy-id-5 lines are read and they are remapped to the current Stairs id via `get_class_id()` — never a literal (AGENTS.md:105-111). Every other line in the backup is ignored, so stale 16-class ids for other classes cannot leak back in. `LEGACY_NAMES[5] == "Stairs"` is asserted rather than assumed. Boxes are deduplicated on `(class_id, cx, cy, w, h)` at 6dp, so the script is safe to re-run.
+
+### Result
+
+**437 unique Stairs boxes restored across 415 images**, 0 duplicates, 0 out-of-range ids introduced. Verified present in both `labels/` and `labels_reviewed/` for both sources. Backups at `labels{,_reviewed}_bak_stairsrestore_20260906_222009`.
+
+Cascade re-run (`dedup.py` skipped per DEC-102):
+
+| | before (DEC-117) | after |
+|---|---|---|
+| Stairs candidates | 2,630 | **3,045** |
+| Stairs in `dataset/final/` | 2,630 img / 3,165 boxes | **3,004 img / 3,561 boxes** |
+| merged pool | 42,988 | **43,171** |
+| splits | 29,949 / 6,664 / 6,375 | **30,123 / 6,645 / 6,403** |
+| total boxes | 132,434 | **132,903** |
+| ratio invariant | 2.64 | **2.64** |
+| leakage | `[]` | `[]` |
+
+Stairs provenance in the final pool, verified from the labels themselves rather than from config: **open_images 2,630 img / 3,165 boxes · revised_pedestrian_obstacle 297 / 309 · cv_project_hovyc 77 / 87.** No dedicated Roboflow stairs source contributes anything, which was the student's requirement.
+
+The 338→297 shrink for `revised_pedestrian_obstacle` is expected — `merge.py` applies review `exclude` tags and cap selection after the restore, so not every patched image reaches the final pool.
+
+`check_det_dataset()` from `/tmp` re-verified at `nc=15`, correct name order, all three split paths present.
+
+### Also settled this session
+
+`dedup_extend_exact.py --source open_images` was run against the new pool: it hashed all 37,106 open_images files against the merged pool and found **0 new exact-duplicate groups**. The exact-duplicate coverage gap DEC-117 flagged is therefore measured as empty rather than merely assumed small, and `dedup_report.json` was left untouched — DEC-089's RunPod coverage intact. Near-duplicate coverage for the ~6,175 new Open Images images remains genuinely unknown and is accepted as such.
