@@ -51,6 +51,7 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from scripts.acquire.acquire_openimages import get_openimages_targets  # noqa: E402
+from scripts.utils.config_loader import get_class_id  # noqa: E402
 from scripts.utils.bbox_utils import clip_bbox, validate_bbox, xywh_abs_to_yolo  # noqa: E402
 from scripts.utils.file_utils import ensure_dir, processed_dir, raw_dir, reports_dir, safe_copy  # noqa: E402
 
@@ -98,6 +99,71 @@ def collect_class_folder(
         stats["annotations_kept"] += 1
 
     return kept, stats
+
+
+# DEC-115: Bench boxes stacked on a Tables/Chairs box are the same object.
+#
+# Open Images annotates a picnic table as BOTH "Bench" and "Table", and a
+# bench-style seat in a dining set as both "Bench" and "Chair". DEC-052 merges
+# boxes across class folders into one label file, so without this an image
+# carries two contradictory boxes on one object -- exactly the wrong-class-on-
+# top-of-right-class supervision DEC-109/110/111 were written to stop.
+#
+# Measured across all three Open Images splits before implementing: of 7,042
+# post-DEC-043 Bench boxes, 758 (10.8%) collide at IoU >= 0.5. 307 images lose
+# their last Bench box; 3,280 images still carry one, which is 2.2x DEC-042's
+# 1,500 floor. Sensitivity is mild -- IoU 0.3 leaves 3,236 and IoU 0.7 leaves
+# 3,373 -- so the threshold choice does not decide the class's viability. 0.5
+# is used because it matches DEC-109/110/111's existing precedent in this repo.
+#
+# The Bench box is always the one dropped. Tables and Chairs predate this class
+# and their counts must not move.
+BENCH_FURNITURE_IOU = 0.5
+
+
+def _coco_iou(a: list[float], b: list[float]) -> float:
+    """IoU of two COCO [x, y, w, h] boxes in absolute pixels."""
+    ax2, ay2 = a[0] + a[2], a[1] + a[3]
+    bx2, by2 = b[0] + b[2], b[1] + b[3]
+    ix = max(0.0, min(ax2, bx2) - max(a[0], b[0]))
+    iy = max(0.0, min(ay2, by2) - max(a[1], b[1]))
+    inter = ix * iy
+    union = a[2] * a[3] + b[2] * b[3] - inter
+    return inter / union if union > 0 else 0.0
+
+
+def drop_bench_on_furniture(pool: dict[str, dict[str, Any]]) -> dict[str, int]:
+    """Remove Bench boxes overlapping a same-image Tables/Chairs box.
+
+    Mutates `pool` in place. Ids come from config_loader, never hand-copied
+    (AGENTS.md) -- a stale literal here once rendered every Pothole as a
+    Tricycle.
+    """
+    bench_id = get_class_id("Bench")
+    furniture_ids = {get_class_id("Tables"), get_class_id("Chairs")}
+    tally = {"bench_boxes_dropped": 0, "images_affected": 0, "images_emptied_of_bench": 0}
+
+    for entry in pool.values():
+        boxes = entry["boxes"]
+        bench = [(i, bb) for i, (cid, bb) in enumerate(boxes) if cid == bench_id]
+        if not bench:
+            continue
+        furniture = [bb for cid, bb in boxes if cid in furniture_ids]
+        if not furniture:
+            continue
+        drop = {
+            i for i, bb in bench
+            if any(_coco_iou(bb, f) >= BENCH_FURNITURE_IOU for f in furniture)
+        }
+        if not drop:
+            continue
+        entry["boxes"] = [b for i, b in enumerate(boxes) if i not in drop]
+        tally["bench_boxes_dropped"] += len(drop)
+        tally["images_affected"] += 1
+        if len(drop) == len(bench):
+            tally["images_emptied_of_bench"] += 1
+
+    return tally
 
 
 def audit_class_counts(
@@ -203,6 +269,16 @@ def run(dry_run: bool = False) -> dict[str, Any]:
 
     print(f"\n{len(pool)} unique images across all classes "
           f"({sum(len(e['boxes']) for e in pool.values())} total boxes)")
+
+    bench_tally = drop_bench_on_furniture(pool)
+    stats["bench_on_furniture"] = bench_tally
+    if bench_tally["bench_boxes_dropped"]:
+        print(
+            f"\nDEC-115 Bench/furniture filter (IoU >= {BENCH_FURNITURE_IOU}): "
+            f"{bench_tally['bench_boxes_dropped']} Bench box(es) dropped across "
+            f"{bench_tally['images_affected']} image(s); "
+            f"{bench_tally['images_emptied_of_bench']} image(s) lost their last Bench box."
+        )
 
     stats["final_per_class_counts"] = audit_class_counts(pool, targets)
     print("\nFinal per-class counts (images non-exclusive — an image can "

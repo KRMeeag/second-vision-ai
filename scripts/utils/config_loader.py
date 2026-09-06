@@ -60,12 +60,16 @@ CLASSES_YAML: Path = REPO_ROOT / "config" / "classes.yaml"
 DATASETS_YAML: Path = REPO_ROOT / "config" / "datasets.yaml"
 
 # Authoritative class count — must match nc in classes.yaml
-EXPECTED_NC: int = 13
+EXPECTED_NC: int = 15
 
 # Canonical class names in YOLO id order (0-indexed).
 # Must stay in sync with AGENTS.md and config/classes.yaml.
 # ID 2 was "Two Wheeler" until DEC-038 (2026-08-08) split it into
 # Motorcycle (slot reused, ID 2) and Bicycle (new, appended at ID 15).
+# Stairs (13) and Bench (14) appended 2026-09-06 (DEC-115) — APPEND ONLY,
+# no existing id moved, unlike DEC-100's 16->13 which shifted eight classes
+# and produced DEC-101's near-miss. Stairs is a partial restoration of what
+# DEC-100 dropped, from Open Images rather than the benched Roboflow sources.
 CANONICAL_NAMES: list[str] = [
     "Person",
     "Vehicle",
@@ -80,6 +84,8 @@ CANONICAL_NAMES: list[str] = [
     "Potholes",
     "Trash Bins",
     "Bicycle",
+    "Stairs",
+    "Bench",
 ]
 
 
@@ -111,7 +117,7 @@ def load_classes() -> dict[str, Any]:
 
     Validation checks:
       - File exists and parses as a YAML mapping.
-      - 'nc' field matches EXPECTED_NC (13).
+      - 'nc' field matches EXPECTED_NC (15).
       - 'names' field has exactly nc entries.
       - Each canonical name matches the hardcoded CANONICAL_NAMES list.
 
@@ -183,7 +189,7 @@ def load_datasets() -> dict[str, Any]:
 
 def get_canonical_names() -> list[str]:
     """
-    Return the ordered list of 16 canonical class names (0-indexed for YOLO).
+    Return the ordered list of 15 canonical class names (0-indexed for YOLO).
 
     This is the authoritative source for class ordering in training YAML,
     converter scripts, and evaluation scripts.
@@ -396,7 +402,7 @@ if __name__ == "__main__":
         print(f"    {i:2d}: {name}")
 
     print("\n[3] Reverse lookup (get_class_id):")
-    for name in ["Person", "Trash Bins", "Pedestrian Lane"]:
+    for name in ["Person", "Trash Bins", "Stairs", "Bench"]:
         cid = get_class_id(name)
         print(f"    '{name}' → id={cid}")
 
