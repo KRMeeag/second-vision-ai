@@ -4647,3 +4647,175 @@ Three rules, each a silent failure if broken: link per **file** never the `image
 ### Consequences
 
 `dataset/bundle/` is 5.3 GB and ready to upload. The first training run uses **cap4500 only** (the student's call — the other two conditions are kept viable at zero additional upload cost, to be run only if time allows). Nothing under `dataset/merged/` or `dataset/final/` was read-modify-written: the bundle script resolves `dataset/processed/` directly and never invokes `merge.py`/`split.py`, both of which `rmtree` their outputs with no override flag.
+
+---
+
+## DEC-120: The Training Run's Operational Configuration — Compute, Schedule, Tracking, Calibration, and the Two-HEF Export
+
+- **Date:** 2026-09-06
+- **Status:** Accepted (settled; partially executed — bundle and scripts built, no training run yet)
+- **Related:** DEC-026 (training on RunPod), DEC-022 (yolov8s), DEC-003 (COCO-pretrained transfer), DEC-004 (calibration uses val), DEC-066 (`path:`-less data.yaml), DEC-114/116 (Hailo toolchain validated), DEC-119 (the bundle these settings consume), DEC-121 (ablation optionality), DEC-122 (success criterion)
+
+### Context — why this entry exists at all
+
+Every decision below was settled in a full design-tree session, then written **only** into `docs/HANDOFF_training_plan_and_class_addition.md`. `.gitignore:133` matches `docs/HANDOFF*`, so that file is untracked: it is not in any commit, not on GitHub, and therefore not on the training pod either. A single `git clean -xfd` would have destroyed the entire training plan including its literature justification.
+
+This is the same failure mode DEC-107 records for the class schema — a decision living in exactly one place, where that place is not the authoritative one. Handoffs are correctly ignored as session scratch; the **decisions inside them are not scratch** and must be lifted out. Recorded here retrospectively, before the first run rather than after.
+
+### Compute and environment
+
+| | |
+|---|---|
+| Provider | RunPod (DEC-026), **RTX 4090**, A6000 fallback |
+| Storage | 30 GB network volume, **same datacenter as the pod** — volumes are datacenter-scoped |
+| Cost estimate | ~7–8 h per run on a 4090, ~$3–6 per run; three conditions ≈ $30–50 all-in including storage, exports and retries |
+
+**Environment pinning uses two separate venvs, not one.** The Hailo Dataflow Compiler pins TensorFlow 2.18, numpy 1.26.4 and protobuf 3.20.3; none of those can coexist with a modern torch in a single environment. `requirements-train.txt` (GPU pod) and `requirements-compile.txt` (DFC host) are therefore separate files with separate venvs.
+
+`requirements-train.txt` **deliberately does not name torch.** RunPod's PyTorch templates ship a CUDA-matched build; letting pip resolve torch typically substitutes a CPU-only wheel, after which training runs at a fraction of the speed and reports no error at all. DEC-116 records the sharper form of this: torch must come from a driver-matched CUDA index *before* ultralytics, or the DFC import breaks while TensorFlow still looks healthy.
+
+`ultralytics` is pinned **exactly** at `8.4.118`. Every ultralytics source line this project relies on (`data/base.py:257-261`, `augment.py:365`, `data/utils.py:159`, `data/dataset.py:282`, `exporter.py:619,646,976,988`) was read from that version; a minor bump can move any of them and silently change resize, EXIF or NMS behaviour partway through an ablation.
+
+The authoritative record of what actually ran is `pip_freeze.txt`, written by `train.py` into every run directory alongside `provenance.json`. **The paper cites that file, not `requirements-train.txt`.**
+
+### Model and schedule
+
+yolov8s (DEC-022) from COCO-pretrained weights (DEC-003), `imgsz=640`. A 320px variant was considered and **dropped from scope**.
+
+100 epochs, `batch=32`, `close_mosaic=10`, and **early stopping disabled** (`--patience 0` maps to an effectively infinite value).
+
+The patience decision is not a convenience. `close_mosaic` disables mosaic for the final 10 epochs, which reliably produces a mAP bump because the model finally calibrates to un-composited images. If one ablation arm stops at epoch 62 it never receives that phase while an arm running to 100 does — the arms would then differ in **schedule** as well as in data, and the comparison would no longer measure what it claims to. `best.pt` is still selected by fitness, so this costs GPU time, not model quality.
+
+`config/training.yaml` still carries `patience: 20` and `batch: 16` from an earlier phase. `scripts/train/train.py` overrides both, but ultralytics invoked directly with `cfg=config/training.yaml` would silently reintroduce early stopping. **All runs go through `train.py`.**
+
+### Tracking — Comet ML and TensorBoard, independently toggled
+
+Both are enabled, as independent switches (`--no-comet`, `--no-tensorboard`). TensorBoard serves live monitoring during the run; Comet is the persistent record for write-up. API keys are supplied as **pod environment variables only**, never committed.
+
+**Both fail soft**, and that is the trap. A missing package or an unset `COMET_API_KEY` means the run trains perfectly and logs nowhere — discovered at write-up time, after the GPU is gone. `train.py` therefore prints `ARMED` / `NOT ARMED` per logger before training starts, and records the result in `provenance.json`.
+
+Live TensorBoard on RunPod additionally requires TCP port **6006** exposed on the pod, reached at `https://<pod-id>-6006.proxy.runpod.net`.
+
+### Code shape and the mandatory smoke gate
+
+Scripts in `scripts/train/`, with any notebook as a thin importer rather than a copy of the logic.
+
+**No 100-epoch run starts without the smoke gate passing:** `check_det_dataset()` invoked from an unrelated CWD (DEC-066), then a 2-epoch `fraction=0.02` train, then `val` on those weights. Roughly two minutes, and it catches config, dataloader, logger and checkpoint failures before 8 GPU-hours are committed. Real runs launch detached under `tmux`/`nohup` — an SSH drop otherwise kills training.
+
+### Hailo calibration — `fraction=1.0`, and never a bare `fraction`
+
+Calibration uses the **full val split** (DEC-004), passed as `fraction=1.0`.
+
+A bare `fraction` value below 1.0 would be actively wrong here, not merely smaller: it slices the **sorted head** of the split, and the first 20% of val is 716 exdark + 205 road-damage + 164 pothole images with **zero open_images**. Quantization would be calibrated on a source distribution that does not resemble the deployed one.
+
+### Two HEFs, not one
+
+Export produces **two** HEF files from the same weights:
+
+| file | thresholds | purpose |
+|---|---|---|
+| `hef_eval` | `conf=0.001` | measuring the FP32 → INT8 quantization gap |
+| `hef_deploy` | `conf=0.25, iou=0.7` | latency measurement and the demo |
+
+Both must be exported with `name="hailo8"`. The ultralytics default (`exporter.py:646`) is `hailo8l`, which is the wrong part for the 26-TOPS AI HAT+.
+
+Two files are required because **the thresholds are baked into the on-chip NMS at compile time and cannot be changed at runtime.** A single `conf=0.25` HEF cannot produce a valid mAP sweep; a single `conf=0.001` HEF is useless for a latency figure.
+
+### Background / false-positive handling
+
+The dataset contains **zero empty-label (background) images**. This is not being changed — adding background images now would alter the pool that DEC-119's bundle and every nesting guarantee are built on.
+
+Instead, the false-positive rate is reported from the **background column of the confusion matrix**, and the absence of background images is recorded as a stated limitation of the work rather than silently omitted.
+
+---
+
+## DEC-121: The Cap Ablation Is Optional — The cap4500 Baseline Is The Deliverable
+
+- **Date:** 2026-09-06
+- **Status:** Accepted
+- **Related:** DEC-042 (the caps), DEC-119 (frozen eval sets, nested bundle), DEC-120 (schedule that makes arms comparable)
+
+### Context
+
+Three cap conditions were designed — 1,500 / 4,500 / 9,000 — to test whether class imbalance is already measurable at this dataset's scale (box ratios 8.08 / 11.95 / 17.68) rather than only at COCO-scale ratios of hundreds-to-one. The student's time budget cannot be assumed to cover three 7–8 hour runs plus exports.
+
+### Decision
+
+**The cap4500 baseline is the deliverable. The ablation is explicitly optional.**
+
+Priority order, decided in advance so a time-constrained stop is a planned outcome rather than an abandoned experiment:
+
+1. **cap 4500** — baseline, box ratio 11.95. The critical path. Everything downstream (HEF export, Pi deployment, the reported metrics) depends only on this.
+2. **cap 9000** — second, box ratio 17.68. The more informative comparison, because it tests the higher-imbalance direction.
+3. **cap 1500** — last, box ratio 8.08. Least likely to run.
+
+### Why the bundle still carries all three manifests
+
+`prepare_runpod_bundle.py` emits `cap1500.json`, `cap4500.json` and `cap9000.json`, and the uploaded superset is the cap-9000 pool — **even though only cap4500 is committed to.**
+
+This costs nothing extra. The conditions are strictly nested (20,455 ⊂ 43,171 ⊂ 54,515, re-verified in-process on every bundle run), so the 9,000 superset is the same upload either way, and each additional condition is materialised on the pod from a manifest via hardlinks. Deciding to run a second arm later therefore costs GPU time only — **not another 2.2-hour upload.** Foreclosing that option to save nothing would have been the wrong trade.
+
+### What "done" means if only the baseline runs
+
+The thesis reports a single condition and states the cap ablation as **designed and prepared but not executed**, with the manifests and protocol available as future work. That is an honest, complete result. It is *not* reported as a missing or failed experiment, because the deliverable was never three runs.
+
+### What makes the arms comparable if they do run
+
+Recorded here so a later session cannot reintroduce a confound by convenience:
+
+- **val and test are frozen and byte-identical across conditions** (DEC-119) — 6,644 / 6,403. Only train varies.
+- **Identical schedule**: 100 epochs, early stopping off, `close_mosaic=10` (DEC-120).
+- **Identical `batch=32`.**
+
+Any arm run with a different batch size, a different schedule, or a redrawn split is not a comparison and must not be reported as one.
+
+---
+
+## DEC-122: Pre-Registered Success Criterion and Expected-Weak Classes — Documentation Only, No Code Gate
+
+- **Date:** 2026-09-06
+- **Status:** Accepted (pre-registered — declared before the first training run)
+- **Related:** DEC-120 (the run this judges), DEC-121 (which condition it judges), DEC-119 (the frozen test set it is measured on)
+
+### Context
+
+A success threshold chosen *after* seeing results is not a threshold. This entry fixes the target and its justification before any weights exist, so the eventual number can be read against a commitment rather than a rationalisation.
+
+### The criterion
+
+| | target | measured on |
+|---|---|---|
+| **Primary** | **mAP@0.5 ≥ 0.70** | test split, FP32, 640px |
+| **Secondary** | **mAP@0.5 ≥ 0.65** | the INT8 HEF — a 5-point quantization allowance |
+| Per-class floor | Person, Vehicle **≥ 0.75** | test split, FP32 |
+| Per-class floor | Motorcycle, Tricycle, Bicycle **≥ 0.65** | test split, FP32 |
+
+### Expected-weak classes, pre-registered
+
+**Pole and Potholes are declared in advance as expected-weak** and are given no floor.
+
+Pre-registering this matters: without it, a weak Pole result read after the fact is indistinguishable from an excuse. The nearest comparable published system (He & Saha, below) reports **Pole at 0.625 as its own worst class** across 15 BVI obstacle classes — so a low Pole score is a property of the task, not evidence of a broken pipeline. Potholes are declared alongside it on the same reasoning: thin, low-contrast, highly variable geometry against a similar background.
+
+### Justification — 0.70 sits between the two nearest published systems
+
+- **He & Saha 2023**, [arXiv:2312.07571](https://arxiv.org/abs/2312.07571) — YOLOv8 over 15 BVI obstacle classes including Tricycle and Pole: *"a mAP@0.5 at 75.8%"*. Per-class: Tricycle 0.916, **Pole 0.625 (their worst)**.
+- **Zunair et al., RSUD20K**, ICIP 2024, [arXiv:2401.07322](https://arxiv.org/abs/2401.07322) — **YOLOv8-S = 69.4** on 13 classes / 20,334 images. *The paper does not state its IoU threshold; @0.5 is inferred.* This caveat must survive into the thesis.
+
+The 5-point quantization allowance comes from:
+
+- **Anjom et al. 2025**, [arXiv:2507.08165](https://arxiv.org/abs/2507.08165) — *"0.769 mAP50"* after quantization, down from *"an mAP50 of 0.801"* (a 3.2-point drop).
+- **Hailo's own Model Zoo** — yolov8s 44.6 → 43.9 on COCO.
+
+Five points is therefore a deliberately generous budget against two independent measurements of ~1–3 points.
+
+### Honest gaps — record these, do not paper over them
+
+- **No published "deployment-ready" mAP threshold exists** for safety-critical detection. 0.70 is positioned against comparable systems, not against an accepted standard, and must be presented that way.
+- **No study deploys YOLOv8 to a Raspberry Pi 5 + Hailo-8 for BVI assistance and reports mAP.** The nearest points of comparison are RPi4 on CPU at 1.87 FPS ([Noor et al.](https://doi.org/10.32604/cmes.2025.068393) — also the citation for why an accelerator is necessary at all) and Jetson Orin Nano at 28.7 FPS. **That gap is this work's contribution — state it explicitly in the thesis.**
+- **Do not cite the circulating "97% mAP on 60,000 images / 8 classes" claim.** It is a search-engine conflation of separate sources and does not survive checking.
+
+### No code enforces any of this
+
+`evaluate.py` prints a PASS/FAIL line against these numbers **as a report line only**. Nothing stops, rejects, gates or deletes anything on a FAIL, and no script branches on the result.
+
+This is deliberate. The criterion's purpose is to make the eventual number interpretable, not to make the pipeline refuse to produce it. A run that lands under 0.70 is a result to report and discuss, not an error condition.

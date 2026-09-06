@@ -1,8 +1,21 @@
 # RunPod Training Runbook — cap4500 baseline
 
-Operational companion to **DEC-119** (bundle construction) and **DEC-026** (training
-on RunPod). Follow it top to bottom; every step that can fail silently has a check
-attached.
+Operational companion to **DEC-119** (bundle construction), **DEC-120** (run
+configuration) and **DEC-026** (training on RunPod).
+
+> **Drive this with the wizard, not by hand:**
+> ```bash
+> scripts/train/runpod_wizard.sh          # 14 stages, Phases 1-4
+> START_AT=6 scripts/train/runpod_wizard.sh   # resume (e.g. at the upload)
+> ```
+> The wizard opens each console page, captures pod IPs into `.env.runpod`, and
+> **gates** the steps this document can only advise on — it will not offer to
+> terminate the CPU pod until `verify_bundle.py` has passed, and will not let you
+> start a 100-epoch run until `torch.cuda.is_available()` is true.
+>
+> This file stays the reference: read it when something breaks, and cite it in the
+> thesis. Phase 5 (the multi-hour run itself) is manual by design — there is
+> nothing to step through.
 
 **What is being shipped**
 
