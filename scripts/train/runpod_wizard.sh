@@ -193,6 +193,22 @@ BUNDLE_TAR="${REPO_ROOT}/dataset/bundle.tar"
 EXPECT_SHA="f71d355e7d394cbcc1edf5405a04ee2c2f549605b1ef8491c7b6c81cd5d249cc"
 REPO_URL="https://github.com/KRMeeag/second-vision-ai.git"
 
+# Which ablation arm this run materialises and trains. 4500 is the baseline and
+# the only committed condition (DEC-121); 9000 and 1500 are optional follow-ups.
+# A second arm needs no new upload -- the bundle already holds the cap-9000
+# superset -- so re-running from stage 9 is all it takes:
+#     CAP=9000 START_AT=9 scripts/train/runpod_wizard.sh
+CAP="${CAP:-4500}"
+case "$CAP" in 1500|4500|9000) ;; *) echo "CAP must be 1500, 4500 or 9000 (got $CAP)"; exit 2 ;; esac
+# Expected split sizes per condition, from dataset/bundle/bundle_meta.json.
+# val/test are frozen and identical across conditions (DEC-119); only train varies.
+case "$CAP" in
+  1500) EXP_TRAIN=14202 ;;
+  4500) EXP_TRAIN=30123 ;;
+  9000) EXP_TRAIN=41467 ;;
+esac
+COND="final_cap${CAP}"
+
 TOTAL_STAGES=14
 
 # ── authored helpers ──────────────────────────────────────────────────────
@@ -232,7 +248,7 @@ VERIFIED_OK=0   # set to 1 only when verify_bundle.py passes; gates the terminat
 
 # ──────────────────────────────────────────────────────────────────────────
 
-banner "Second Vision — RunPod training, Phases 1-4"
+banner "Second Vision — RunPod training, Phases 1-4 (cap${CAP})"
 
 # ── 1 ─────────────────────────────────────────────────────────────────────
 stage "Preflight — archive, checksum, repo, rsync"
@@ -385,21 +401,21 @@ fi
 fi
 
 # ── 9 ─────────────────────────────────────────────────────────────────────
-stage "Materialise cap4500 — on the cheap pod, not the 4090"
+stage "Materialise cap${CAP} — on the cheap pod, not the 4090"
 if _at; then
-say "~86,000 hardlinks (43,170 images x image + label). Pure metadata I/O, no GPU"
+say "Hardlinks one image + one label per selected file. Pure metadata I/O, no GPU"
 say "involved — doing it here means the 4090 starts with the dataset laid out."
 gate "condition materialised" \
   podssh "$CPU_POD_HOST" "$CPU_POD_PORT" \
-  "python3 /workspace/second-vision-ai/scripts/train/materialize_condition.py --bundle /workspace/bundle --cap 4500 --force"
-gate "split counts are exactly 30123 / 6644 / 6403" \
+  "python3 /workspace/second-vision-ai/scripts/train/materialize_condition.py --bundle /workspace/bundle --cap ${CAP} --force"
+gate "split counts are exactly ${EXP_TRAIN} / 6644 / 6403" \
   podssh "$CPU_POD_HOST" "$CPU_POD_PORT" \
   "python3 -c \"
 import pathlib,sys
-w='/workspace/final_cap4500'
+w='/workspace/${COND}'
 g={s:len(list(pathlib.Path(f'{w}/{s}/images').iterdir())) for s in ('train','val','test')}
 print(g)
-sys.exit(0 if g=={'train':30123,'val':6644,'test':6403} else 1)\""
+sys.exit(0 if g=={'train':${EXP_TRAIN},'val':6644,'test':6403} else 1)\""
 fi
 
 # ── 10 ────────────────────────────────────────────────────────────────────
@@ -418,7 +434,7 @@ fi
 if [[ "${DO_TERMINATE:-1}" -eq 1 ]]; then
 warn "TERMINATE, do not Stop. A stopped pod keeps billing for its container disk."
 say "Terminating destroys the container disk. These all survive on the volume:"
-note "  /workspace/bundle.tar   /workspace/bundle   /workspace/final_cap4500"
+note "  /workspace/bundle.tar   /workspace/bundle   /workspace/${COND}"
 note "  /workspace/second-vision-ai  (including runs/ later)"
 say "Installed pip packages do not survive — expected; the CPU pod needed none."
 open_url "https://console.runpod.io/pods"
@@ -443,8 +459,8 @@ ask GPU_POD_PORT "Pod SSH port:"
 write_env GPU_POD_HOST "$GPU_POD_HOST"
 write_env GPU_POD_PORT "$GPU_POD_PORT"
 gate "SSH to the GPU pod works" podssh "$GPU_POD_HOST" "$GPU_POD_PORT" true
-gate "the volume came across (final_cap4500 is present)" \
-  podssh "$GPU_POD_HOST" "$GPU_POD_PORT" "test -d /workspace/final_cap4500"
+gate "the volume came across (${COND} is present)" \
+  podssh "$GPU_POD_HOST" "$GPU_POD_PORT" "test -d /workspace/${COND}"
 fi
 
 # ── 12 ────────────────────────────────────────────────────────────────────
@@ -487,7 +503,7 @@ gate "check_det_dataset() from /tmp returns nc=15 with canonical names" \
   "cd /tmp && python3 -c \"
 from ultralytics.data.utils import check_det_dataset as c
 import sys
-d=c('/workspace/final_cap4500/data.yaml')
+d=c('/workspace/${COND}/data.yaml')
 names=[d['names'][i] for i in sorted(d['names'])]
 print(d['nc'], names)
 sys.exit(0 if d['nc']==15 and names[0]=='Person' and names[13]=='Stairs' and names[14]=='Bench' else 1)\""
@@ -500,7 +516,7 @@ say "2 epochs on 2% of the data, ~2 minutes. Exercises dataloader, AMP, both"
 say "loggers, checkpoint writing and plots before you commit ~6 GPU-hours."
 gate "smoke run completed" \
   podssh "$GPU_POD_HOST" "$GPU_POD_PORT" \
-  "cd /workspace/second-vision-ai && python3 scripts/train/train.py --data /workspace/final_cap4500/data.yaml --device 0 --smoke"
+  "cd /workspace/second-vision-ai && python3 scripts/train/train.py --data /workspace/${COND}/data.yaml --device 0 --smoke"
 printf '\n'
 step "In that output, confirm: 'schema check: data.yaml agrees with classes.yaml at nc=15'"
 step "and 'logger tensorboard: ARMED'."
@@ -516,8 +532,8 @@ printf '    ssh -p %s -i %s root@%s\n' "$GPU_POD_PORT" "$SSH_KEY" "$GPU_POD_HOST
 printf '    tmux new -s train\n'
 printf '    cd /workspace/second-vision-ai\n'
 printf '    python3 scripts/train/train.py \\\n'
-printf '      --data /workspace/final_cap4500/data.yaml \\\n'
-printf '      --device 0 --batch 32 --name cap4500_yolov8s\n'
+printf '      --data /workspace/${COND}/data.yaml \\\n'
+printf '      --device 0 --batch 32 --name cap${CAP}_yolov8s\n'
 printf '\n'
 say "Live TensorBoard, in a second pod shell:"
 printf '    tensorboard --logdir runs/detect --host 0.0.0.0 --port 6006\n'
@@ -525,7 +541,7 @@ printf '    then open  https://<pod-id>-6006.proxy.runpod.net\n'
 printf '\n'
 warn "Before deleting the volume, pull the results down to your laptop:"
 printf '    rsync -avP -e "ssh -p %s -i %s" \\\n' "$GPU_POD_PORT" "$SSH_KEY"
-printf '      root@%s:/workspace/second-vision-ai/runs/detect/cap4500_yolov8s ./runs/detect/\n' "$GPU_POD_HOST"
+printf '      root@%s:/workspace/second-vision-ai/runs/detect/cap${CAP}_yolov8s ./runs/detect/\n' "$GPU_POD_HOST"
 printf '\n'
 note "Full reference: docs/RUNPOD_TRAINING_RUNBOOK.md"
 pause "Press Enter to finish"
