@@ -1,0 +1,50 @@
+# Training environment — the RunPod GPU pod ONLY.
+#
+# Deliberately separate from requirements.txt (which carries fiftyone, roboflow
+# and the whole curation stack — none of that belongs on a GPU pod) and from the
+# future requirements-compile.txt (the Hailo Dataflow Compiler pins TF 2.18,
+# numpy 1.26.4 and protobuf 3.20.3, which cannot coexist with a modern torch in
+# one venv — see the Hailo toolchain validation).
+#
+# ── DO NOT ADD torch / torchvision TO THIS FILE ──────────────────────────────
+# RunPod's PyTorch templates ship a CUDA-matched torch in the container image.
+# Naming torch here lets pip resolve and replace it, very often with a CPU-only
+# wheel from PyPI. Training then runs on CPU at a fraction of the speed and
+# reports NO error — you find out from the epoch timer, hours in. Install this
+# file ON TOP of the template's torch, then confirm:
+#
+#     python3 -c "import torch; print(torch.__version__, torch.cuda.is_available())"
+#
+# ── WHY ultralytics IS PINNED EXACTLY ────────────────────────────────────────
+# Every ultralytics source line this project cites was read from 8.4.118:
+#   data/base.py:257-261   resize-before-augment (justifies the 640 bundle)
+#   augment.py:365         mosaic routing through the same loader
+#   data/utils.py:159      EXIF transpose only on orientation {6,8}
+#   data/dataset.py:282    labels.cache path (per-condition cache isolation)
+#   exporter.py:619,646    Hailo export needs data=; default target is hailo8l
+#   exporter.py:976,988    calibration reuses the training loader
+# A minor bump can move any of those and silently change resize, EXIF or NMS
+# behaviour partway through an ablation. Pin, don't range.
+ultralytics==8.4.118
+
+# Config loading (scripts/utils/config_loader.py, scripts/train/train.py).
+PyYAML>=6.0.1
+
+# ONNX is the intermediate on the way to a HEF; ultralytics does not pull it in
+# unless an export actually runs, and discovering that at export time wastes a
+# pod session.
+onnx>=1.16.0
+onnxruntime>=1.18.0
+onnxslim>=0.1.31
+
+# Experiment tracking. Both are OPTIONAL and both fail soft — train.py reports
+# whether each actually armed, precisely because a silent no-op logger is only
+# noticed at write-up time. Comet additionally needs COMET_API_KEY exported.
+comet_ml>=3.44.0
+tensorboard>=2.16.0
+
+# NOTE ON REPRODUCIBILITY
+# This file is the intent. The RECORD is `pip_freeze.txt`, which train.py writes
+# into every run directory alongside provenance.json — that captures the exact
+# resolved versions, including the template's torch, for the run that produced
+# the weights. Cite that file in the paper, not this one.

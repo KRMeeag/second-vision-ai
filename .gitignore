@@ -41,6 +41,13 @@ dataset/backups/
 dataset/reports/
 dataset/bundle/
 
+# The RunPod upload archive: ~5.1 GB, far over GitHub's 100 MB push limit, and
+# fully reproducible from dataset/bundle/ by prepare_runpod_bundle.py + tar.
+# Same reasoning as the *.pt rule above -- a stray `git add .` here would build a
+# commit that cannot be pushed and has to be unpicked from history.
+dataset/bundle.tar
+dataset/bundle.tar.*
+
 
 # Keep folder structure
 !dataset/raw/.gitkeep

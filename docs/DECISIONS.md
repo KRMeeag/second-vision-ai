@@ -4589,3 +4589,61 @@ The 338→297 shrink for `revised_pedestrian_obstacle` is expected — `merge.py
 ### Also settled this session
 
 `dedup_extend_exact.py --source open_images` was run against the new pool: it hashed all 37,106 open_images files against the merged pool and found **0 new exact-duplicate groups**. The exact-duplicate coverage gap DEC-117 flagged is therefore measured as empty rather than merely assumed small, and `dedup_report.json` was left untouched — DEC-089's RunPod coverage intact. Near-duplicate coverage for the ~6,175 new Open Images images remains genuinely unknown and is accepted as such.
+
+---
+
+## DEC-119: Training Bundle Built — One Nested Superset Upload, Downscale-Only Resize, and a FROZEN Evaluation Set For The Ablation
+
+- **Date:** 2026-09-06
+- **Status:** Accepted (executed — bundle built and verified locally; not yet uploaded)
+- **Related:** DEC-026 (training runs on RunPod), DEC-089 (upload/rsync lessons), DEC-066 (`path:`-less data.yaml so it resolves off-machine), DEC-042 (the caps being varied), DEC-117/118 (the 15-class pool being bundled), DEC-102 (dedup deliberately skipped)
+
+### Context
+
+Three things had to be solved before a single GPU-hour could be spent: how to avoid re-uploading ~8 GB per ablation condition at ~0.7 MB/s, whether a resized copy is safe, and how to make the conditions comparable at all.
+
+### Decision 1 — one nested superset, uploaded once
+
+cap 1500 / 4500 / 9000 are strictly nested, **re-verified at nc=15 in-process on every bundle run** rather than assumed: 20,455 ⊂ 43,171 ⊂ 54,515, union exactly equal to the 9,000 pool. Uploading the cap-9000 superset therefore covers every condition; each is materialised on the pod from a manifest. The script **aborts** if nesting ever breaks — it is a property of the current `CLASS_PRIORITY_SOURCES` config, and `docs/RUNPOD_DEDUP_PLAN.md` documents a config edit that broke it before.
+
+### Decision 2 — downscale-only resize to 640
+
+Verified against the installed ultralytics 8.4.118, not the docs: `data/base.py:257-261` resizes every image's long side to `imgsz` **before** returning, mosaic routes through the same call (`augment.py:365` → `base.py:410`), and Hailo calibration uses the same loader (`exporter.py:976,988`). Training and calibration therefore never see original resolution, so a 640-bounded copy is lossless *for this pipeline*.
+
+**Downscale only.** `load_image()` would upscale a sub-640 image, but baking that in would inflate the bundle for nothing. Result: **37,179 downscaled, 17,335 copied byte-for-byte** — 12.3 GB → **5.3 GB**, an estimated 4.4 h → ~1.9 h upload. PNGs stay PNG and extensions are never changed, because `dedup_report.json`, `split_report.json` and `roboflow_base_name()` grouping are all filename-keyed.
+
+This diverges from DEC-096, which declined to resize at the **processed** layer. Different layer, different reasoning: that is archival master data, this is a derived, disposable training copy, and full-resolution masters are untouched.
+
+### Decision 3 — the evaluation set is FROZEN across conditions
+
+`split.py:279-292` creates one `random.Random(SEED)` and shuffles per-source rep lists **in sequence**, so changing the pool changes the RNG state entering every later shuffle. Each cap condition would receive a completely different train/val/test partition — four conditions, four different test sets, and an image that is `val` at 4500 can be `train` at 9000. That is not a confound, it is a broken comparison plus leakage.
+
+The nesting property holds for the **cap selection**, not the **split assignment**. Those are different things and conflating them would have invalidated the whole ablation.
+
+**So val and test are pinned to the current verified split and are byte-identical for every condition:**
+
+    train(condition) = pool(condition) − frozen_val − frozen_test
+
+| condition | train | val | test | box ratio |
+|---|---:|---:|---:|---:|
+| cap 1500 | 14,202 | 6,644 | 6,403 | 8.08 |
+| **cap 4500** | **30,123** | 6,644 | 6,403 | **11.95** |
+| cap 9000 | 41,467 | 6,644 | 6,403 | 17.68 |
+
+Verified on the built bundle: **zero `train ∩ eval` overlap in all three manifests, zero missing images or labels.**
+
+### The EXIF gate caught one real defect
+
+A full scan of the superset found **7 images with an orientation tag**. Six carry `orientation=0`, which is not a valid EXIF value; `data/utils.py:159` shows ultralytics transposes only on `{6, 8}` and only for JPEG, so those six are harmless — the first version of the gate rejected them and was over-strict.
+
+**One image, `exdark/2015_05337`, carries orientation=6.** ultralytics reads dimensions through `exif_size()` (which applies rotation) but decodes pixels with `cv2.imdecode` (which does not), so its labels could silently transpose. It is dropped from the bundle. It sat in the **frozen val set**, so it is removed from that too — otherwise the manifest would name a file the bundle does not contain. Val is therefore 6,644, not 6,645. One image against a silent orientation bug is not a close call.
+
+### Materialisation uses hardlinks
+
+`materialize_condition.py` builds `final_cap<N>/` by linking into the single bundle copy. Verified locally end to end: hardlinks confirmed (link count 2), **`du` over both trees together reports 5.3 GB, not 10.6 GB**, split directories are real and writable so `labels.cache` can be written, and `check_det_dataset()` from an unrelated CWD resolves `nc=15` with correct name order and all three paths.
+
+Three rules, each a silent failure if broken: link per **file** never the `images/` directory (a shared directory link makes every condition see identical data and the ablation collapses); `<split>/` must be a real writable directory; and a single link is created and read back before the other ~40,000 are attempted, so an unsupported filesystem fails in a second rather than halfway.
+
+### Consequences
+
+`dataset/bundle/` is 5.3 GB and ready to upload. The first training run uses **cap4500 only** (the student's call — the other two conditions are kept viable at zero additional upload cost, to be run only if time allows). Nothing under `dataset/merged/` or `dataset/final/` was read-modify-written: the bundle script resolves `dataset/processed/` directly and never invokes `merge.py`/`split.py`, both of which `rmtree` their outputs with no override flag.
