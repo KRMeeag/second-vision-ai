@@ -24,7 +24,7 @@ annotation_policy:
     Hidden object extent must not be estimated. See DEC-012.
 
 # --- Number of classes ---
-nc: 13
+nc: 15
 # --- Class names (0-indexed for YOLO training) ---
 names:
   0: "Person"
@@ -40,6 +40,8 @@ names:
   10: "Potholes"
   11: "Trash Bins"
   12: "Bicycle"
+  13: "Stairs"
+  14: "Bench"
 
 # --- Hailo runtime mapping (after background class injection) ---
 # Reference only — used when generating custom label JSON
@@ -58,6 +60,8 @@ hailo_runtime_names:
   11: "Potholes"
   12: "Trash Bins"
   13: "Bicycle"
+  14: "Stairs"
+  15: "Bench"
 
 # --- Per-Class Source Configuration ---
 # Defines primary, secondary, and low-light augmentation providers
@@ -193,7 +197,7 @@ classes:
     cap: 4500
 
   bicycle:
-    id: 15
+    id: 12
     # New class per DEC-038 (2026-08-08), split out of "Two Wheeler."
     # No new acquisition work needed — both sources already label
     # Bicycle separately from Motorcycle/Motorbike.
@@ -235,7 +239,7 @@ classes:
     cap: 4500
 
   shelf:
-    id: 6
+    id: 5
     primary:
       source: open_images
       native_class: "Shelf"
@@ -259,7 +263,7 @@ classes:
     cap: 4500
 
   doors:
-    id: 7
+    id: 6
     primary_providers:
       - source: roboflow
         project: "testspace-xwkgk/cv-project-hovyc"
@@ -270,7 +274,7 @@ classes:
     cap: 4500
 
   chairs:
-    id: 8
+    id: 7
     primary:
       source: open_images
       native_class: "Chair"
@@ -281,7 +285,7 @@ classes:
     cap: 4500
 
   tables:
-    id: 9
+    id: 8
     primary:
       source: open_images
       native_class: ["Table", "Coffee table"]
@@ -296,7 +300,7 @@ classes:
     cap: 4500
 
   tricycle:
-    id: 10
+    id: 9
     status: possible
     primary_providers:
       - source: roboflow
@@ -318,7 +322,7 @@ classes:
     cap: 4500
 
   potholes:
-    id: 11
+    id: 10
     # Combined-source strategy per DEC-034: two co-primary "pure
     # pothole" sources, expected to stay under 3500 combined without
     # needing road-damage-detector's messier multi-class volume.
@@ -358,7 +362,7 @@ classes:
     cap: 4500
 
   trash_bins:
-    id: 12
+    id: 11
     primary:
       source: open_images
       native_class: "Waste container"
@@ -376,3 +380,53 @@ classes:
     secondary_role: diversity
     cap: 4500
 
+  stairs:
+    id: 13
+    primary:
+      source: open_images
+      native_class: "Stairs"
+      note: >
+        Added 2026-09-06 (DEC-115) to partially restore what DEC-100 dropped.
+        Stairs was cut at 16 -> 13 because its Roboflow sources fell below
+        DEC-042's 1,500 floor once DEC-094 revealed augmented copies had been
+        padding the count. This is a different source: Open Images "Stairs",
+        not the benched stair_gaptw / escalator_stairs projects.
+    # DELIBERATE DIVERGENCE FROM THE 4500 CONVENTION ABOVE -- DO NOT "FIX" THIS.
+    #
+    # `cap` controls DOWNLOAD VOLUME ONLY. It is read at acquire_openimages.py
+    # :93,234 as max_samples = ceil(cap * 1.35) and nowhere else that changes
+    # behaviour; cap_per_class.py:393 reads it only to print an override NOTE.
+    # The 4,500 SELECTION ceiling, the 1,500 floor and the 3:1 ratio invariant
+    # (DEC-042) are all enforced separately by `cap_per_class.py --hard-cap 4500`.
+    #
+    # Why it must be high here: 48.8% of Open Images "Stairs" boxes carry
+    # IsGroupOf -- a flight of stairs reads to an annotator as a group of steps
+    # -- and DEC-043 filters those out. Measured across all three splits:
+    # 4,700 images carry any Stairs box, only 2,633 survive the filter (56.0%).
+    # At cap 4500 the pull yields ~1,228 usable images, BELOW the floor, which
+    # is the exact failure that killed this class the first time. At cap 5500
+    # it yields 1,514 -- 14 above the floor, far too thin.
+    #
+    # 10100 means "download everything Open Images has." That is 2,633 usable
+    # images, which is still well under the 4,500 selection ceiling, so Stairs
+    # cannot become the max class and cannot move the ratio invariant.
+    cap: 10100
+
+  bench:
+    id: 14
+    primary:
+      source: open_images
+      native_class: "Bench"
+      note: >
+        Added 2026-09-06 (DEC-115). A genuine new obstacle class for blind
+        navigation rather than a restoration -- park and street benches are
+        waist-height trip/collision hazards. Verified by real pull: 3,555 clean
+        images against 3,583 predicted (0.8% miss).
+
+        Bench boxes overlapping a same-image Tables/Chairs box at IoU >= 0.5 are
+        dropped at conversion (openimages_to_intermediate.py) -- picnic tables
+        get annotated as both, and DEC-052's cross-class-folder merge would
+        otherwise put two contradictory boxes on one object. Measured over all
+        three splits: 758 of 7,042 boxes dropped (10.8%), 307 images lose their
+        last Bench box, 3,280 images remain usable -- 2.2x the DEC-042 floor.
+    cap: 8000
