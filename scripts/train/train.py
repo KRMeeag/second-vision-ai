@@ -76,9 +76,32 @@ def enable_loggers(comet: bool, tensorboard: bool) -> dict[str, bool]:
     if comet:
         settings.update({"comet": True})
         try:
-            import comet_ml  # noqa: F401
             import os
-            state["comet"] = bool(os.environ.get("COMET_API_KEY"))
+            import socket
+
+            import comet_ml
+            key = os.environ.get("COMET_API_KEY")
+            if not key:
+                state["comet"] = False
+            else:
+                # A key that EXISTS is not a key that WORKS. Testing only that the
+                # env var is set reports ARMED for a typo'd or revoked key, and the
+                # run then logs nowhere -- exactly the silent no-op this reporting
+                # exists to prevent. So authenticate for real, with a timeout, and
+                # never let it block training: a network blip downgrades the report,
+                # it does not stop the run.
+                prev = socket.getdefaulttimeout()
+                socket.setdefaulttimeout(15)
+                try:
+                    comet_ml.API(api_key=key).get_workspaces()
+                    state["comet"] = True
+                except Exception as exc:
+                    state["comet"] = False
+                    print(f"  comet: key is present but did NOT authenticate "
+                          f"({type(exc).__name__}). Training will proceed and log "
+                          f"to TensorBoard only.")
+                finally:
+                    socket.setdefaulttimeout(prev)
         except ImportError:
             state["comet"] = False
     return state

@@ -188,6 +188,13 @@ finish() {
 # already gitignored. Set before any write_env call.
 ENV_FILE=".env.runpod"
 
+# Restore values captured on earlier runs. Without this, START_AT=N skips the
+# stages whose `ask` calls define $GPU_POD_HOST etc, and the first use of one
+# dies on `set -u` -- making the resume path useless exactly when it is needed.
+if [[ -f "$ENV_FILE" ]]; then
+  set -a; . "$ENV_FILE"; set +a
+fi
+
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 BUNDLE_TAR="${REPO_ROOT}/dataset/bundle.tar"
 EXPECT_SHA="f71d355e7d394cbcc1edf5405a04ee2c2f549605b1ef8491c7b6c81cd5d249cc"
@@ -469,8 +476,25 @@ if _at; then
 say "requirements-train.txt deliberately does not name torch: the template ships a"
 say "CUDA-matched build, and letting pip resolve torch usually swaps in a CPU-only"
 say "wheel. Training then runs ~50x slower and reports no error at all."
+gate "pinned environment installed" \
+  podssh "$GPU_POD_HOST" "$GPU_POD_PORT" \
+  "cd /workspace/second-vision-ai && git pull --ff-only && \
+   python3 -m pip install --break-system-packages --root-user-action=ignore -q -r requirements-train.txt"
+
+# Pin ultralytics' output paths to the VOLUME and make them CWD-independent.
+# The default runs_dir is the relative string 'runs', so training launched from
+# anywhere but the repo root writes six hours of weights onto the container disk,
+# which is destroyed with the pod.
+say "pinning ultralytics runs_dir to the volume (default is CWD-relative)..."
 podssh "$GPU_POD_HOST" "$GPU_POD_PORT" \
-  "cd /workspace/second-vision-ai && git pull --ff-only && pip install -r requirements-train.txt"
+  "mkdir -p /workspace/.ultralytics && \
+   (grep -q YOLO_CONFIG_DIR /root/.bashrc 2>/dev/null || echo 'export YOLO_CONFIG_DIR=/workspace/.ultralytics' >> /root/.bashrc) && \
+   YOLO_CONFIG_DIR=/workspace/.ultralytics python3 -c \"
+from ultralytics.utils import SETTINGS
+SETTINGS.update({'runs_dir':'/workspace/second-vision-ai/runs',
+                 'weights_dir':'/workspace/second-vision-ai/weights',
+                 'datasets_dir':'/workspace'})\"" >/dev/null 2>&1 || warn "could not pin runs_dir — cd to the repo root before training"
+
 gate "torch sees the GPU and ultralytics is 8.4.118" \
   podssh "$GPU_POD_HOST" "$GPU_POD_PORT" \
   "python3 -c \"
@@ -532,8 +556,8 @@ printf '    ssh -p %s -i %s root@%s\n' "$GPU_POD_PORT" "$SSH_KEY" "$GPU_POD_HOST
 printf '    tmux new -s train\n'
 printf '    cd /workspace/second-vision-ai\n'
 printf '    python3 scripts/train/train.py \\\n'
-printf '      --data /workspace/${COND}/data.yaml \\\n'
-printf '      --device 0 --batch 32 --name cap${CAP}_yolov8s\n'
+printf '      --data /workspace/%s/data.yaml \\\n' "$COND"
+printf '      --device 0 --batch 32 --name cap%s_yolov8s\n' "$CAP"
 printf '\n'
 say "Live TensorBoard, in a second pod shell:"
 printf '    tensorboard --logdir runs/detect --host 0.0.0.0 --port 6006\n'
@@ -541,7 +565,7 @@ printf '    then open  https://<pod-id>-6006.proxy.runpod.net\n'
 printf '\n'
 warn "Before deleting the volume, pull the results down to your laptop:"
 printf '    rsync -avP -e "ssh -p %s -i %s" \\\n' "$GPU_POD_PORT" "$SSH_KEY"
-printf '      root@%s:/workspace/second-vision-ai/runs/detect/cap${CAP}_yolov8s ./runs/detect/\n' "$GPU_POD_HOST"
+printf '      root@%s:/workspace/second-vision-ai/runs/detect/cap%s_yolov8s ./runs/detect/\n' "$GPU_POD_HOST" "$CAP"
 printf '\n'
 note "Full reference: docs/RUNPOD_TRAINING_RUNBOOK.md"
 pause "Press Enter to finish"

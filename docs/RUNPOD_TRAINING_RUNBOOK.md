@@ -75,8 +75,11 @@ can only mount a volume in its own datacenter. Creating the volume somewhere wit
 no RTX 4090 stock means deleting it and re-uploading. Confirm 4090 availability in
 the region *before* creating anything.
 
-**1.2 Create a 30 GB network volume** in that datacenter (~$2.10/month at the
-$3.50/50 GB rate you checked).
+**1.2 Create the network volume** in that datacenter.
+
+**As built: 50 GB** (~$3.50/month), chosen for leeway. 30 GB (~$2.10/month) is the
+minimum that comfortably fits the table below; the extra 20 GB removes any need to
+think about headroom across three ablation arms and both HEF exports.
 
 <details>
 <summary>Where the 30 GB goes</summary>
@@ -91,9 +94,12 @@ $3.50/50 GB rate you checked).
 | ONNX + HAR + HEF, ×2 thresholds | ~0.3 GB |
 | **steady state** | **~11.4 GB** |
 
-20 GB would fit, but 30 GB leaves room for all three ablation arms plus exports
-for $0.70/month more. Python packages do **not** count — they live in the
-container image, not the volume.
+20 GB would fit; 30 GB leaves room for all three ablation arms plus exports. The
+50 GB actually provisioned is ~4x the steady-state need. Python packages do **not**
+count — they live in the container image, not the volume.
+
+Note that `df` on the pod reports the **MooseFS cluster** (petabytes), not your
+quota, so it is useless for judging your own headroom. Use `du -sh /workspace/*`.
 </details>
 
 **1.3 Deploy a pod with the volume attached.** The volume mounts at `/workspace`.
