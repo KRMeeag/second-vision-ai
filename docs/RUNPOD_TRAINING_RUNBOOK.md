@@ -151,7 +151,31 @@ costs seconds instead of an afternoon.
 volume. A repo — and therefore a `runs/` directory full of trained weights — placed
 anywhere else is on the container disk and is destroyed when the pod is terminated.
 
-Then terminate the CPU pod. The volume, the archive and the bundle persist.
+**3.1 Materialise the condition here, on the cheap pod.**
+
+```bash
+python3 second-vision-ai/scripts/train/materialize_condition.py \
+  --bundle /workspace/bundle --cap 4500
+```
+
+`verify_bundle.py` and `materialize_condition.py` are both **stdlib-only** — argparse,
+hashlib, json, os, shutil, sys, pathlib — so the CPU pod needs nothing installed.
+
+This creates **~86,000 hardlinks** (43,170 images × image + label). It is pure
+metadata I/O on network-attached storage, the slowest kind, and it needs no GPU at
+all. Doing it here rather than on the 4090 means the GPU pod starts with the dataset
+already laid out. Verifying here also means that if something is wrong, you debug it
+on the cheap pod.
+
+**3.2 TERMINATE the CPU pod — do not Stop it.**
+
+A *stopped* pod keeps billing for its container disk. Terminate destroys the container
+disk; the network volume, the archive, the bundle, the repo clone and `final_cap4500/`
+all persist. When you deploy the 4090, attach the **existing** volume in the **same
+datacenter** — it mounts at `/workspace` again, so every path below still resolves.
+
+Installed pip packages do **not** survive, which is expected: the CPU pod needed none,
+and `requirements-train.txt` is installed on the GPU pod against its CUDA-matched torch.
 
 ---
 
@@ -172,8 +196,15 @@ name torch: the template ships a CUDA-matched build, and letting pip resolve tor
 usually swaps in a CPU-only wheel — training then runs on CPU with no error message
 at all, and you find out from the epoch timer.
 
-**4.3 Materialise the condition** (hardlinks into the single bundle copy — no image
-bytes are duplicated):
+**4.3 The condition is already materialised** (step 3.1, on the CPU pod). Confirm it
+survived termination — it lives on the volume, so it should:
+
+```bash
+ls /workspace/final_cap4500/{train,val,test}/images | head
+python3 -c "import pathlib; print({s: len(list(pathlib.Path(f'/workspace/final_cap4500/{s}/images').iterdir())) for s in ('train','val','test')})"
+```
+
+Expect `{'train': 30123, 'val': 6644, 'test': 6403}`. If you skipped 3.1, run it now:
 
 ```bash
 python3 scripts/train/materialize_condition.py --bundle /workspace/bundle --cap 4500
@@ -251,5 +282,6 @@ rsync -avP -e "ssh -p <PORT> -i ~/.ssh/id_ed25519" \
 | `Permission denied (publickey)` | key added after pod start | restart the pod (1.4) |
 | Training is ~50× slower than expected | pip replaced CUDA torch with a CPU wheel | check `torch.cuda.is_available()` (4.2) |
 | `runs/` gone after terminating the pod | repo cloned outside `/workspace` | clone into `/workspace` (Phase 3) |
+| Still being billed for a pod you finished with | pod was **Stopped**, not **Terminated** — stopped pods keep billing for container disk | Terminate it (3.2) |
 | `nc=13` or wrong class order | stale clone or stale `data.yaml` | `git pull`, re-run 4.3, then 4.4 |
 | Early stopping fired mid-ablation | ultralytics invoked directly with `cfg=config/training.yaml`, which still carries `patience: 20` and `batch: 16` | always go through `scripts/train/train.py` |
