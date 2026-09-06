@@ -74,7 +74,7 @@ The AI must avoid recommendations that increase risk of:
 
 2. **Background class injection**: Hailo inserts `0: Background` at runtime, shifting all class IDs by +1.
 
-3. **Custom labels**: This project uses 16 custom classes, not COCO defaults. Always use the canonical class list from `config/classes.yaml`.
+3. **Custom labels**: This project uses 13 custom classes, not COCO defaults. Always use the canonical class list from `config/classes.yaml`.
 
 4. **GPU compilation**: GPU-accelerated Hailo compilation is required for production. Do not recommend CPU-only compilation unless explicitly requested.
 
@@ -82,7 +82,7 @@ The AI must avoid recommendations that increase risk of:
 
 ## Canonical Class List
 
-The authoritative 16-class schema (0-indexed for YOLO):
+The authoritative **13-class** schema (0-indexed for YOLO):
 
 ```
 0: Person
@@ -90,20 +90,44 @@ The authoritative 16-class schema (0-indexed for YOLO):
 2: Motorcycle
 3: Pole
 4: Animals
-5: Stairs
-6: Escalator
-7: Doors
-8: Chairs
-9: Tables
-10: Tricycle
-11: Potholes
-12: Trash Bins
-13: Elevator
-14: Pedestrian Lane
-15: Bicycle
+5: Shelf
+6: Doors
+7: Chairs
+8: Tables
+9: Tricycle
+10: Potholes
+11: Trash Bins
+12: Bicycle
 ```
 
 Do not add, remove, or reorder classes unless the user explicitly requests it.
+
+**Never hand-copy this list into a tool.** It is a convenience copy and it has been wrong
+before: this section sat at 16 classes — still naming `Escalator`, renamed to `Shelf` back in
+DEC-083 — long after both changes landed, and a stale copy of it pasted into the FiftyOne App's
+annotation schema silently rendered every Pothole as a Tricycle (index 10 in the old list is
+`Tricycle`; in the current one it is `Potholes`). Read the schema from
+`config/classes.yaml`'s `names:` field, or from `get_canonical_names()`, which is what the
+pipeline actually uses.
+
+### Reduced from 16 classes — the other three can still come back
+
+`Stairs`, `Elevator` and `Pedestrian Lane` were dropped 2026-09-04 (DEC-100), all three for
+sitting below DEC-042's 1,500-image floor. **This is reversible, not permanent.** A complete,
+verified revert procedure is recorded in **DEC-105** — note that the 16-class backup at
+`dataset/backups/pre_class_drop_20260904_023304/` is *not* sufficient on its own, because
+`config_loader.py`'s hardcoded schema comes from git (`2ac3cde`), not the backup.
+
+If the classes are wanted again, the blocker is data, not tooling: each needs a source that
+clears the 1,500 floor. `Escalator` is a separate matter — its slot was reused for `Shelf`
+(DEC-083), so returning it means a genuinely new class, not a restore.
+
+Two costs to weigh before deciding, both real:
+
+- **Returning a class means a full retrain, not a fine-tune** — a changed class count is a new
+  detection head (DEC-100, accepted explicitly by the student).
+- **There is no inverse migration script**, so any review work done under the 13-class schema
+  must be reconciled with restored 16-class label files by hand.
 
 ---
 
@@ -143,7 +167,7 @@ The **dataset is the primary performance lever**. Always prioritize:
 
 ## Dataset Curation Rules
 
-1. **Single canonical class list** — Every source dataset maps into the 16-class schema
+1. **Single canonical class list** — Every source dataset maps into the 13-class schema
 2. **Annotation consistency** — Identify inconsistent boxes, conflicting labeling policies, invalid/missing labels
 3. **No data leakage** — No duplicated or near-identical images across train/val/test splits
 4. **Source diversity** — Multiple lighting conditions, camera angles, environments, backgrounds

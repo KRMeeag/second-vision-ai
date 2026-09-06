@@ -38,6 +38,9 @@ dataset/curated/
 dataset/merged/
 dataset/final/
 dataset/backups/
+dataset/reports/
+dataset/bundle/
+
 
 # Keep folder structure
 !dataset/raw/.gitkeep
@@ -62,6 +65,15 @@ tensorboard/
 # ==========================
 # Models
 # ==========================
+
+# Downloaded COCO checkpoints used as PROXY MODELS for FiftyOne review overlays
+# (DEC-106) -- not training outputs, and reproducible in seconds by ultralytics
+# on first use. Ignored because notebooks/yolov8x.pt is 136 MB and GitHub rejects
+# any file over 100 MB on push, so a stray `git add .` would create a commit that
+# cannot be pushed and has to be unpicked from history.
+*.pt
+*.onnx
+*.hef
 
 models/weights/
 models/onnx/
@@ -105,3 +117,11 @@ content/
 # ==========================
 
 runpod_dedup_wizard.sh
+runpod_hailo_validate_wizard.sh
+hailo_out/
+hailo_validation_report.txt
+
+hailo_dataflow_compiler-3.34.0-py3-none-linux_x86_64.whl
+
+docs/HANDOFF*
+
