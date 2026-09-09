@@ -4819,3 +4819,219 @@ Five points is therefore a deliberately generous budget against two independent 
 `evaluate.py` prints a PASS/FAIL line against these numbers **as a report line only**. Nothing stops, rejects, gates or deletes anything on a FAIL, and no script branches on the result.
 
 This is deliberate. The criterion's purpose is to make the eventual number interpretable, not to make the pipeline refuse to produce it. A run that lands under 0.70 is a result to report and discuss, not an error condition.
+
+---
+
+## DEC-123: Ultralytics Repaired 6 Truncated JPEGs In Place During Training — Bundle Digest Re-Baselined, Hardlinks Verified Intact
+
+- **Date:** 2026-09-07
+- **Status:** Accepted (observed during the cap4500 baseline run; digest re-baselined on the pod)
+- **Related:** DEC-119 (the bundle and its original digest), DEC-121 (arms must see identical data), DEC-120 (background-image limitation, independently confirmed here)
+
+### What happened
+
+During the first epoch of the cap4500 baseline run, ultralytics' dataset scan reported:
+
+    train: .../exdark__2015_03095.jpg: corrupt JPEG restored and saved
+    train: .../exdark__2015_03651.jpg: corrupt JPEG restored and saved
+    train: .../exdark__2015_04507.jpg: corrupt JPEG restored and saved
+    val:   .../exdark__2015_01610.jpg: corrupt JPEG restored and saved
+    val:   .../exdark__2015_03579.jpg: corrupt JPEG restored and saved
+    val:   .../exdark__2015_05388.jpg: corrupt JPEG restored and saved
+
+Six truncated exdark JPEGs were **rewritten on disk**. Two open_images files also had `1 duplicate labels removed` (in-memory only; label files untouched).
+
+### Why this needed investigating rather than ignoring
+
+`final_cap4500/` is built from **hardlinks into `bundle/`** (DEC-119). A rewrite could therefore have done one of two very different things:
+
+- replaced the file → the link breaks, `bundle/` keeps the corrupt original, and the two trees silently diverge; or
+- truncated and rewritten the same inode → the fix propagates to `bundle/` and the link survives.
+
+**Measured: `nlink=2` and `same_inode=True` on all six.** It is the second case. The bundle copy received the repair, the hardlink is intact, and every ablation arm drawing on those files sees the identical repaired image. No divergence, no duplicated storage.
+
+### Consequence — the DEC-119 digest is now stale, and that is expected
+
+The six files changed size, so the name+size digest changed:
+
+| | |
+|---|---|
+| DEC-119 | `2ced061ddfe60069c90fce5e7900fef2d412ce1f7e530c48ee8dd435f1fa90f7` |
+| after repair | `91c5adb2bd5b32dcd6bb49305eedb84bd051fcdfedcfe3e231db55603483be76` |
+
+Left alone, the next `verify_bundle.py` run reports `FAILED — image digest does not match CHECKSUM`, which reads exactly like data corruption and invites a needless 2.2-hour re-upload. The pod's `CHECKSUM` has therefore been **re-baselined to the new digest**, with the original preserved as `CHECKSUM.orig_dec119_<date>` and the reason written into the file itself. Verification passes again.
+
+**`bundle.tar` still contains the ORIGINAL truncated JPEGs.** Re-extracting reintroduces them, and ultralytics simply repairs them again on the next scan. This is recorded so a future re-extraction plus a digest check is not mistaken for a fault.
+
+### Also confirmed by the same scan
+
+- **`30123 images, 0 backgrounds, 0 corrupt`** — an independent confirmation of DEC-120's recorded limitation that the dataset contains zero empty-label images. The false-positive rate must therefore continue to come from the confusion matrix's background column.
+- **`Remapped 4/15 cls head rows from pretrained weights by class name`** — ultralytics matched 4 of the 15 class names to COCO classes and transferred those detection-head rows, rather than reinitialising the whole head. A small free head start for those classes.
+- **`optimizer=auto` resolved to `MuSGD(lr=0.01, momentum=0.9)`.** Checked against `engine/trainer.py`: the rule is `("MuSGD", 0.01, 0.9) if iterations > 10000 else ("AdamW", lr_fit, 0.9)`. All three arms clear the threshold by a wide margin — cap1500 44,400, cap4500 94,200, cap9000 129,600 iterations — so **every arm receives the same optimizer and learning rate**, and `auto` is not an ablation confound. It *would* become one for any short run under ~10,600 iterations, which would silently switch to AdamW; pin `optimizer` explicitly for exploratory runs.
+
+---
+
+## DEC-124: The cap4500 Shortfall Diagnosed — Sparse Annotation, Not Model Capacity. Density Predicts Failure, Frequency Does Not, and Higher Resolution Is Ruled Out On Evidence
+
+- **Date:** 2026-09-09
+- **Status:** Accepted (diagnosis complete; remediation is DEC-125/126)
+- **Related:** DEC-122 (the criterion this misses), DEC-119 (frozen eval set used throughout), DEC-120 (background-image limitation), DEC-052/083 (the Open Images acquisition design being critiqued), DEC-107 (the schema-shift incident this raises the stakes for)
+
+### Context
+
+`cap4500_yolov8s` reached **mAP@0.5 = 0.6695** on the frozen test split against the
+pre-registered 0.70 (DEC-122). The adviser asked three things: why we fell short, why
+comparable published systems did better, and — specifically — why Tables and Chairs were
+beaten by Doors and Trash Bins, which were expected to be harder.
+
+All three are answered from artefacts already on disk. **The shortfall is not a model,
+hyperparameter or capacity problem.** It is a measurable annotation defect.
+
+### Finding 1 — the failure is pure recall, with almost no inter-class confusion
+
+From the test confusion matrix, reading the `background` row (missed detections) against
+the diagonal:
+
+| class | correct | missed | confused with another class |
+|---|---:|---:|---:|
+| Shelf | 0.23 | **0.76** | ~0.01 |
+| Pole | 0.36 | **0.64** | ~0.00 |
+| Chairs | 0.45 | **0.53** | 0.02 |
+| Tables | 0.55 | **0.40** | 0.04 |
+| Doors | 0.81 | 0.19 | ~0.00 |
+| Trash Bins | 0.87 | 0.12 | ~0.00 |
+
+Chairs and Tables are **not** mistaken for each other, nor for Bench. This kills the first
+hypothesis — that DEC-117's Bench addition introduced furniture confusion. Cross-class
+confusion is 1–4% everywhere. The model simply does not fire.
+
+Confirmed visually on the eval crops: `exdark__2015_04402` has 2 ground-truth Chairs and
+the model predicts **zero**; `open_images__c9183bdb786a2fc9` has 3 Poles and the model
+predicts **zero**. Where it does fire in clutter, confidence is 0.3–0.5 against 0.8–0.9 on
+clean single-object frames. That is the signature of conflicting supervision, not of a
+decision boundary in the wrong place.
+
+### Finding 2 — instance density predicts failure; class frequency does not
+
+Spearman over the 15 classes on the test split, with partial correlations to separate the
+two candidate drivers:
+
+| predictor | raw ρ | partial ρ | p (raw) |
+|---|---:|---:|---:|
+| 90th-percentile instances per image | −0.650 | **−0.593** | 0.009 |
+| instances per image | −0.621 | **−0.570** | 0.013 |
+| Open Images share of boxes | −0.545 | **−0.476** | 0.036 |
+| median box area | +0.471 | **−0.124** | 0.043 |
+| raw instance count | −0.425 | — | 0.114 (n.s.) |
+| number of contributing sources | +0.265 | — | 0.341 (n.s.) |
+
+Density and Open-Images share survive as **independent** drivers (collinearity between
+them is only ρ = +0.305). **Median box area does not survive** — its raw correlation
+collapses from +0.471 to −0.124 once density is controlled, so object size was density in
+disguise and is not an independent cause. Source *count* predicts nothing, so this is not
+a generic "merged dataset" penalty.
+
+**This answers the adviser's question directly:**
+
+| | inst/image | max in one image | median box area | mAP50 |
+|---|---:|---:|---:|---:|
+| Doors | 1.13 | **3** | 0.125 | 0.769 |
+| Trash Bins | 1.57 | 8 | 0.102 | 0.884 |
+| Tables | 1.84 | 15 | 0.065 | 0.550 |
+| Chairs | 3.66 | **85** | 0.025 | 0.436 |
+| Shelf | 4.36 | **119** | 0.026 | 0.190 |
+
+A door is one large near-field object filling 12.5% of the frame. A chair is one of up to
+85 mutually occluding objects at 2.5% of frame. Within every class, Open Images annotates
+*denser* than the other sources — 10 of 11 classes, with the extremes being exactly the
+weak ones (Chairs 4.57 vs 1.91; Shelf 3.97 vs 1.20; Pole 3.86 vs 1.42).
+
+### Finding 3 — the root cause is missing annotations, and it is partly self-inflicted
+
+**Open Images is non-exhaustively annotated by design.** Each image carries positive and
+negative image-level labels, and only positively-labelled categories receive boxes; the
+dataset's own guidance is that unannotated classes must be **ignored**, not treated as
+negatives. Our pipeline never used those image-level labels.
+
+On top of that, `scripts/convert/openimages_to_intermediate.py:14-21` keeps only each
+class-folder's own native class and **discards every other annotation that was already
+downloaded** — 359,760 dropped against 95,659 kept, a 79% discard rate. Boxes thrown away
+that belong to our own schema:
+
+| folder | discarded label | count | belongs to |
+|---|---|---:|---|
+| tables | **Chair** | **8,489** | `chairs` |
+| tables | Person / Man / Woman | 9,141 | `person` |
+| person | Chair | 3,028 | `chairs` |
+| person | **Man** | 2,849 | `person` |
+| chairs | Table | 3,204 | `tables` |
+| chairs | Person / Man / Woman | 7,203 | `person` |
+| shelf | Chair / Table / Desk | 1,622 | `chairs` / `tables` |
+| pole | Car / Land vehicle | 1,632 | `vehicle` |
+
+**8,489 chairs sit unlabelled inside the `tables` folder and train as background for the
+Chairs class.** Chairs' miss rate is 53%. Separately, `config/classes.yaml` maps `person`
+to Open Images `Person` alone while Open Images labels most humans `Man`/`Woman`/`Boy`/
+`Girl` — those were discarded too, and Person recall is 0.657.
+
+This is the sparse-annotation / missing-label degradation documented in the detection
+literature: unlabelled foreground treated as negative during training suppresses the
+classifier, and the damage concentrates in recall.
+
+**Shelf is a distinct, worse case.** The student confirmed by inspection that Shelf boxes
+alternate between the whole shelving unit and individual rows. The data agrees — 119 boxes
+in a single image, 76% missed. That is not sparsity but *contradictory granularity*: two
+incompatible definitions of the same object. Handled in DEC-125.
+
+### Finding 4 — against the literature we are close, not far
+
+**RSUD20K** (ICIP 2024, [arXiv:2401.07322](https://arxiv.org/abs/2401.07322)) reports
+**YOLOv8-S = 69.4** on 13 classes at the same 640×640 and the same 11.2M-parameter model.
+Ours is 66.95 — a **2.5-point gap**. Their per-class spread is **13.6–88.5**, *wider* than
+our 19.0–88.4, so large per-class variance is normal in this domain rather than a defect
+of this work.
+
+Their differentiator is annotation protocol, stated explicitly: one professional team at
+48 s/image then refinement at 8 s/image, with written rules for the exact two things that
+break our data — *"if an object is occluded by more than roughly 50%, it is omitted"* and
+*"tight bounding box constraints were relaxed in dense and cluttered scenes."*
+
+**He & Saha** ([arXiv:2312.07571](https://arxiv.org/abs/2312.07571)) is also a merged
+dataset (VOC + COCO + TT100K + field images) but covers **outdoor roads and sidewalks
+only** — it contains no Chairs, Tables or Shelf, so it never meets our hardest classes.
+Its worst class was Pole at 0.625, which is why DEC-122 pre-registered Pole as weak.
+
+Decision-relevant for capacity: RSUD20K measured **YOLOv8-M at 71.8 (+2.4 over S)** and
+**YOLOv8-L at 70.4 — worse than M**. Backbone scaling in this domain is modest and
+non-monotonic, so it is not the first lever.
+
+### Finding 5 — higher input resolution is ruled out on evidence
+
+Sampling 2,500 originals across all 26 sources in `dataset/processed/`:
+
+| long side | share of originals |
+|---|---:|
+| ≥ 640 px | 64.3% |
+| ≥ 960 px | 12.5% |
+| ≥ 1280 px | **6.2%** |
+
+**Median long side is exactly 640 px.** Training at 1280 would upscale 94% of the corpus,
+inventing pixels. The published "+25% from 640→1280" result comes from aerial and UAV
+corpora where 1280 reveals genuine detail; this dataset has none to reveal.
+
+Independently, train and deploy resolution must **match** — a HEF compiles for one fixed
+input size, so training at 1280 and running 640 on-device would *reduce* accuracy. This
+vindicates DEC-119's downscale-only bundle and removes a ~3 h re-upload plus a wasted
+training run from the option set.
+
+### What this establishes
+
+The remediation is data, not modelling: recover the discarded annotations, fix the Person
+hierarchy, resolve Shelf. Because every recovered box lands on an image already in the
+pool, the image set and the frozen splits can be held **fixed**, making v1 versus v2 a
+controlled measurement of annotation completeness rather than a confounded comparison —
+and requiring only ~11 MB of label files to reach the pod instead of a 2.2 h re-upload.
+
+Recorded as a finding in its own right: this is a quantified account of sparse-annotation
+degradation when training on merged detection corpora, and it belongs in the thesis as a
+methodological contribution rather than an apology.

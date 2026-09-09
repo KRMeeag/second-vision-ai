@@ -25,7 +25,7 @@ across all cap conditions (DEC-119). Rows are therefore directly comparable.
 
 | run | precision | split | mAP@0.5 | mAP@0.5:0.95 | FP vs background | criterion |
 |---|---|---|---:|---:|---:|---|
-| _no runs yet_ | | | | | | |
+| `cap4500_yolov8s` | fp32 | test | 0.6695 | 0.4530 | 6,193 | FAIL (target 0.70) |
 
 `FP vs background` is the sum of the confusion matrix's background column at **conf 0.25**
 — not the mAP threshold. The dataset contains zero background images by design (DEC-120),
