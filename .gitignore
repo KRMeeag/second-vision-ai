@@ -90,6 +90,13 @@ models/archived/
 !models/current/
 !models/current/README.md
 
+# Deployment kits: a frozen best.pt plus its full INT8 calibration set (~715 MB
+# of JPEGs for cap4500). Same reasoning as the *.pt and bundle.tar rules -- far
+# too large for git, and fully reproducible from the run directory plus
+# dataset/bundle. models/current/README.md carries the tracked pointer to where
+# each kit actually lives (GitHub Release asset + network volume).
+models/current/deployment_kit_*/
+
 # ==========================
 # Secrets
 # ==========================
