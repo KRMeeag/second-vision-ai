@@ -522,15 +522,22 @@ stage "GATE — data.yaml resolves from an unrelated directory"
 if _at; then
 say "This is what DEC-066 exists for. A data.yaml that only resolves from its own"
 say "directory works locally and fails on the pod."
-gate "check_det_dataset() from /tmp returns nc=15 with canonical names" \
+# DEC-130/132: never hardcode the schema here. Derive it from the pod's own
+# checked-out repo, so this gate cannot go stale across a class-count change
+# AND it fails loudly if the pod was not `git pull`ed (a stale pod would still
+# say nc=15 and would train a 15-class head against 14-class labels).
+gate "check_det_dataset() from /tmp matches the repo's canonical schema" \
   podssh "$GPU_POD_HOST" "$GPU_POD_PORT" \
   "cd /tmp && python3 -c \"
-from ultralytics.data.utils import check_det_dataset as c
 import sys
+sys.path.insert(0, '/workspace/second-vision-ai')
+from scripts.utils.config_loader import EXPECTED_NC, CANONICAL_NAMES
+from ultralytics.data.utils import check_det_dataset as c
 d=c('/workspace/${COND}/data.yaml')
 names=[d['names'][i] for i in sorted(d['names'])]
-print(d['nc'], names)
-sys.exit(0 if d['nc']==15 and names[0]=='Person' and names[13]=='Stairs' and names[14]=='Bench' else 1)\""
+print('data.yaml :', d['nc'], names)
+print('repo      :', EXPECTED_NC, CANONICAL_NAMES)
+sys.exit(0 if d['nc']==EXPECTED_NC and names==CANONICAL_NAMES else 1)\""
 fi
 
 # ── 14 ────────────────────────────────────────────────────────────────────
@@ -542,7 +549,8 @@ gate "smoke run completed" \
   podssh "$GPU_POD_HOST" "$GPU_POD_PORT" \
   "cd /workspace/second-vision-ai && python3 scripts/train/train.py --data /workspace/${COND}/data.yaml --device 0 --smoke"
 printf '\n'
-step "In that output, confirm: 'schema check: data.yaml agrees with classes.yaml at nc=15'"
+step "In that output, confirm: 'schema check: data.yaml agrees with classes.yaml at nc=<N>'"
+step "where <N> is the repo's current class count (14 for v2 after the Shelf drop, DEC-126)"
 step "and 'logger tensorboard: ARMED'."
 note "Multiply its epoch time by ~50 for a full-epoch estimate (it trained on 2%),"
 note "then by 100 epochs. Expect roughly 5-7 h."

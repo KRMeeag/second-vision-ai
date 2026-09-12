@@ -4874,7 +4874,7 @@ Left alone, the next `verify_bundle.py` run reports `FAILED — image digest doe
 ## DEC-124: The cap4500 Shortfall Diagnosed — Sparse Annotation, Not Model Capacity. Density Predicts Failure, Frequency Does Not, and Higher Resolution Is Ruled Out On Evidence
 
 - **Date:** 2026-09-09
-- **Status:** Accepted (diagnosis complete; remediation is DEC-125/126)
+- **Status:** Accepted (diagnosis complete; remediation is DEC-125/126 — **Finding 5 partially superseded 2026-09-09**, see the blockquote under it)
 - **Related:** DEC-122 (the criterion this misses), DEC-119 (frozen eval set used throughout), DEC-120 (background-image limitation), DEC-052/083 (the Open Images acquisition design being critiqued), DEC-107 (the schema-shift incident this raises the stakes for)
 
 ### Context
@@ -4978,6 +4978,45 @@ This is the sparse-annotation / missing-label degradation documented in the dete
 literature: unlabelled foreground treated as negative during training suppresses the
 classifier, and the damage concentrates in recall.
 
+> **Corrected 2026-09-09 (DEC-125's Phase 2 inventory) — the mechanism holds, two numbers
+> above do not.** Both were counted without deduplicating across class-folders, which the
+> converter's own DEC-052 cross-folder merge already handles.
+>
+> **(a) "8,489 chairs sit unlabelled inside the `tables` folder" overstates by ~6x.** 8,489
+> Chair boxes are indeed physically present in `tables/labels.json`, but **7,071 of them sit
+> on images that also appear in `chairs/`**, where the cross-folder aggregation already writes
+> them into the same label file. They are labelled today. Only **1,418** — those on images
+> unique to `tables/` — are genuinely missing. The sentence should read: *1,418 chairs sit
+> unlabelled in the tables folder.* Chairs' 53% miss rate is measured and unaffected, but this
+> table is no longer its explanation, and Chairs' per-source gap was in any case later
+> **excluded as density-confounded** (ratio 2.61) in DEC-125's Finding 3.
+>
+> **(b) "359,760 dropped against 95,659 kept, a 79% discard rate" is true but misleading as a
+> measure of the defect.** Deduplicated to unique (image, native class, bbox) triples the pool
+> is **389,686**, of which **95,688** are kept. The bulk of the discard is categories outside
+> our schema entirely and correctly dropped — Wheel 35,122, Clothing 27,562, Tire 17,386,
+> Footwear 15,748, Tree 14,144, and 440 others. **The actionable recovery is 51,858 boxes
+> (+54%), not 359,760.**
+>
+> Recoverable unique boxes, measured against `dataset/raw/open_images/` (12 folders, 455,449
+> raw annotations, 454 distinct native names):
+>
+> | class | kept today | schema-wide filter | + extended mappings | factor |
+> |---|---:|---:|---:|---:|
+> | **Person** | 14,346 | 29,677 | **55,117** | **3.84x** |
+> | Tables | 8,074 | 9,760 | 11,622 | 1.44x |
+> | Vehicle | 12,543 | 15,912 | 16,335 | 1.30x |
+> | Chairs | 12,992 | 15,526 | 16,227 | 1.25x |
+> | Pole / Animals / Bicycle / Motorcycle | — | — | — | 1.01–1.02x |
+> | Shelf / Trash Bins / Stairs / Bench | — | — | — | **1.00x** |
+> | **total** | **95,688** | **119,120** | **147,546** | 1.54x |
+>
+> **The Person finding is the one that survives and strengthens** — and it is the same class
+> DEC-125 independently measured at a **-0.79** per-source mAP penalty, the largest of any
+> class. Note also that every class whose mapping is already a hierarchy *leaf* recovers
+> essentially nothing (1.00–1.02x), which is exactly what DEC-125's Finding 3 predicted from
+> the other direction. The two analyses were run independently and agree.
+
 **Shelf is a distinct, worse case.** The student confirmed by inspection that Shelf boxes
 alternate between the whole shelving unit and individual rows. The data agrees — 119 boxes
 in a single image, 76% missed. That is not sparsity but *contradictory granularity*: two
@@ -5024,6 +5063,68 @@ input size, so training at 1280 and running 640 on-device would *reduce* accurac
 vindicates DEC-119's downscale-only bundle and removes a ~3 h re-upload plus a wasted
 training run from the option set.
 
+> **Superseded (partial), 2026-09-09 — the 1280 conclusion stands, the 960 one does not.**
+> Finding 5 sampled `dataset/processed/`, which is the wrong population. `processed/` holds
+> every acquired image from all 26 sources weighted by raw count; the model is trained on
+> `dataset/final/`, where Open Images — median long side 1024 — is ~56% of images. Re-measured
+> on the actual corpus (n=1,500 per split, seed 42, PIL header reads):
+>
+> | long side | `processed/` (as recorded above) | `final/` test | `final/` train |
+> |---|---:|---:|---:|
+> | median | 640 | **1024** | **1024** |
+> | ≥ 640 px | 64.3% | 88.7% | 89.2% |
+> | ≥ 960 px | 12.5% | **60.9%** | **62.9%** |
+> | ≥ 1280 px | 6.2% | 4.8% | 5.6% |
+>
+> **What survives:** 1280 is still unjustified — only ~5% of the corpus reaches it, so ~95%
+> would be upscaled. The aerial/UAV provenance of the "+25%" figure is unaffected, and the
+> train/deploy-must-match constraint is unaffected.
+>
+> **What fails:** "median long side is exactly 640 px" is false for the training corpus, and
+> ≥960 is 61%, not 12.5%. **960 was therefore excluded on a bad number and re-enters the
+> option set** — most of the corpus genuinely carries that detail. Confirmed that the detail
+> is currently being discarded rather than absent: `dataset/bundle/images/` (what the cap4500
+> run actually trained on) sampled n=800 is **max 640 px, 90.9% exactly 640, 0% above** — the
+> bundle build downscales ~61% of images below the resolution they arrived at.
+>
+> **Before acting on this, three costs must be checked, none of which apply to 1280:** the
+> Hailo-8 must compile a 960×960 HEF and still meet the RPi5 latency budget (2.25x the pixels
+> of 640); train and deploy resolution must still match, so this is a both-or-neither change;
+> and the bundle is 640-capped, so a 960 run needs a full re-bundle and re-upload (~3 h at the
+> measured uplink) — the very cost Finding 5 claimed to have removed.
+>
+> This also explains an artefact seen while running Phase 1 locally: the pod measured
+> mAP@0.5 = 0.6695 on `bundle/`-derived images while the same weights measured 0.6629 locally
+> on `dataset/final/` full-resolution images. The gap is a different resampling path (one
+> downscale versus two), not MPS-versus-CUDA arithmetic as first assumed.
+
+> **Closed 2026-09-09 (same day) — 960 is ruled OUT again, on the deployment budget rather
+> than on the data.** The student supplied the binding constraint when this was put to them:
+> **the on-device budget is 640 because monocular depth estimation runs concurrently on the
+> same Hailo-8**, and the classes were chosen to complement depth (see this file's
+> "Classes were selected to complement depth estimation" note) — so the two models share one
+> accelerator by design, not by accident.
+>
+> Since a HEF compiles for one fixed input size and train/deploy resolution must match,
+> training at 960 forces a choice between blowing the compute budget the constraint exists to
+> protect, and taking a train/deploy mismatch that costs accuracy. Both are worse than 640.
+> **960 is therefore closed, and 640 stands.**
+>
+> **The distinction is worth preserving for the write-up, because the two reasons are not
+> equally defensible.** Finding 5's original claim — *the corpus has no detail above 640* — is
+> measurably FALSE (61% of `dataset/final/` is >=960px). The correct justification is a
+> systems one: *train and deploy resolution must match, and the deployment budget is 640 to
+> allow concurrent depth estimation.* State the second, never the first.
+>
+> Prior to this, the 640 choice was recorded only as `config/training.yaml:35`
+> ("imgsz: 640 # Standard, Hailo-compatible") and DEC-119's downscale-only bundle — neither of
+> which gives the actual reason. **This blockquote is now the record of why 640.**
+>
+> If the budget is ever revisited (e.g. a lighter depth model, or accepting a lower frame
+> rate), the *data* would support 960 — DEC-114 measured stock yolov8n at 318 FPS on this
+> accelerator, so headroom exists in principle. That is a hardware-budget decision, not a
+> dataset one, and nothing in the corpus blocks it.
+
 ### What this establishes
 
 The remediation is data, not modelling: recover the discarded annotations, fix the Person
@@ -5035,3 +5136,749 @@ and requiring only ~11 MB of label files to reach the pod instead of a 2.2 h re-
 Recorded as a finding in its own right: this is a quantified account of sparse-annotation
 degradation when training on merged detection corpora, and it belongs in the thesis as a
 methodological contribution rather than an apology.
+
+## DEC-125: Phase 1 Free Experiments — NMS and `max_det` Ruled Out, the Open Images Annotation Defect Measured Directly, and an F2 Operating Point Worth +8.5 Recall
+
+- **Date:** 2026-09-09
+- **Status:** Accepted
+- **Related:** DEC-124 (the diagnosis this tests, and whose Finding 5 it partially supersedes), DEC-122 (the criterion), DEC-119 (frozen test split), DEC-120 (designates the background column as the FP metric — qualified below), DEC-107 (schema-shift incident), DEC-123 (in-place JPEG repair, recurred here)
+- **Note on numbering:** `docs/HANDOFF_v2_accuracy_plan.md` reserved DEC-125 for the Shelf drop and DEC-126 for the v2 label rebuild. Phase 1 produced decision-relevant results of its own, so it takes DEC-125 and those two shift to **DEC-126** and **DEC-127**.
+
+All runs are local (Apple MPS, ultralytics 8.4.118 — the same pin as the pod) against
+`runs/detect/cap4500_yolov8s/weights/best.pt` on the frozen test split, which was confirmed
+identical by name to `dataset/bundle/manifests/cap4500.json` before any measurement.
+
+### Determinism was established before anything was concluded
+
+Two runs at identical settings returned mAP@0.5 = **0.662855** and FP = **6806** both times —
+exact to six decimals. Every delta below is therefore signal, not run-to-run variance.
+
+Local default (0.6629) sits below the pod-published 0.6695 for a systematic reason, now
+recorded in DEC-124's Finding 5 blockquote: the pod evaluated `bundle/` images already
+downscaled to 640, while local evaluation reads full-resolution `dataset/final/` images and
+downscales at load. Different resampling paths, not different arithmetic. **Cross-machine
+absolute numbers are not comparable; within-sweep deltas are.**
+
+### Finding 1 — NMS tuning is not a lever, and the plan's hypothesis was backwards
+
+The plan predicted gains ABOVE the 0.7 default, on the premise that NMS merges genuine
+adjacent objects in crowded scenes. The measured curve is monotone in the opposite direction:
+
+| NMS iou | mAP@0.5 | mAP@0.5:0.95 | FP vs background |
+|---:|---:|---:|---:|
+| 0.5 | **0.6672** | 0.4438 | **6109** |
+| 0.6 | 0.6671 | 0.4473 | 6359 |
+| 0.7 *(default)* | 0.6629 | **0.4484** | 6806 |
+| 0.8 | 0.6516 | 0.4463 | 8014 |
+| 0.9 | 0.6127 | 0.4299 | 13795 |
+
+Raising the threshold retains duplicates rather than recovering neighbours. The best available
+gain is **+0.0043** against a **0.033** shortfall, and it costs 0.0046 of mAP@0.5:0.95 — the two
+metrics disagree on the optimum, since mAP@0.5:0.95 peaks at the 0.7 default. Not a lever.
+
+### Finding 2 — `max_det` never binds, and the FP metric is not monotone in it
+
+At iou 0.6, 0.7 and 0.8, raising `max_det` from 300 to 600 produced **bit-identical** mAP and
+FP counts. Crowded images are not being truncated at 300.
+
+At iou = 0.5 the pair did differ, and the mechanism is worth recording: **FP fell by 37 while
+misses rose by 52, simultaneously.** `ConfusionMatrix.process_batch` (`metrics.py:402-449`)
+matches one-to-one by sorting all (GT, detection) IoU pairs descending and de-duplicating on
+both sides, so introducing detections reshuffles assignments — freeing some background-FPs into
+class matches while stranding other GT unmatched. **Consequence: the background-column FP
+count, which DEC-120 designates as this project's false-positive figure, is not monotone in
+`max_det` and must not be compared across differing NMS settings.** It remains valid at fixed
+settings, which is how DEC-120 uses it.
+
+### Finding 3 — the annotation defect, measured directly instead of correlationally
+
+DEC-124 established Open Images share as a predictor at partial rho = -0.476. The plan proposed
+confirming it by comparing Open-Images-only against Roboflow-only mAP. **That comparison is
+confounded and was redesigned:** Doors, Tricycle and Potholes have *zero* Open Images instances
+and Bench has zero Roboflow ones, so a raw gap would measure class composition, not annotation
+quality. Instead each class was compared against itself across sources, with per-group instance
+density computed to mark which pairs are density-controlled.
+
+Open Images minus other-source mAP@0.5, same class, density-controlled pairs only:
+
+| class | Open Images mapping in `config/classes.yaml` | d mAP@0.5 |
+|---|---|---:|
+| Person | `Person` only — Man/Woman/Boy/Girl discarded | **-0.79** |
+| Vehicle | `Car, Bus, Truck` — Van/Taxi/Land vehicle discarded | **-0.52** |
+| Tables | `Table, Coffee table` — Desk/Kitchen table discarded | -0.15 |
+| Trash Bins | `Waste container` — near-leaf | -0.14 |
+| Animals | `Dog, Cat` — leaf nodes | -0.00 |
+| Motorcycle | `Motorcycle` — leaf node | +0.02 |
+| Stairs | `Stairs` — leaf node | +0.04 |
+
+**Every class whose mapping is a leaf node of the Open Images hierarchy shows no penalty.
+Every class whose mapping discards hierarchy children shows a large one.** The effect is not
+"Open Images is worse" — it is "Open Images is worse exactly where our own mapping throws its
+labels away." Mean over the 9 density-controlled comparisons: **-0.3145**.
+
+Supporting counts: only **143 of 3,581** Open Images test images (**4.0%**) carry a Person box
+at all. Person on that subset scores precision **0.094** / recall **0.143** / mAP@0.5 **0.052**,
+against 0.84 on Roboflow and 0.82 on the remaining sources.
+
+Chairs (-0.33), Bicycle (-0.16) and Motorcycle-vs-other were **excluded as density-confounded**
+(density ratios 2.61, 1.52 and 0.64) rather than counted toward the mean.
+
+**Two honest limits.** Person's figure rests on 143 images / 512 instances — the effect is far
+too large to be sampling noise, but the point estimate is loose. And part of this is a *test-time*
+artefact, not only a training defect: on Open Images images the model's correct detections of
+unlabelled people score as false positives, which is why precision collapses to 0.094.
+
+**This overturns a stated assumption in the plan's Phase 3.** The plan asserts v1 will score
+below its published 0.6695 on v2 ground truth "because there is more to miss." But recovered
+Person and Vehicle boxes will also convert many of v1's current false positives into true ones.
+The direction of v1-on-v2-GT is **genuinely uncertain and must be reported as measured**, not
+predicted.
+
+### Finding 4 — an F2 operating point is worth +8.5 recall, free
+
+`metrics.py:892` selects the reported operating point as `smooth(f1_curve.mean(0), 0.1).argmax()`
+— maximum mean **F1**, which weights precision and recall equally. For a device where a missed
+obstacle is an injury and a spurious one is an annoyance, that is the wrong objective.
+
+| objective | conf | precision | recall |
+|---|---:|---:|---:|
+| F1 (ultralytics default) | 0.336 | 0.6975 | 0.6211 |
+| **F2 (recall-weighted)** | 0.148 | 0.5454 | **0.7062** |
+
+**+0.0850 mean recall for -0.1522 mean precision**, from a threshold change alone. It lands
+hardest on exactly the failing classes: Chairs +0.133, Pole +0.125, Potholes +0.116,
+Tables +0.110, Shelf +0.110, Stairs +0.106.
+
+This is a deployment-threshold choice, not a training change, and it interacts with the Hailo
+export: conf is baked into on-chip NMS at compile time (DEC-114/116), so `hef_deploy` should be
+compiled at **0.148**, not the 0.25 currently assumed.
+
+### Finding 5 — Shelf cannot reach usable precision at any confidence
+
+Recall subject to a precision floor, Shelf: **R@P>=0.5 = 0.057, R@P>=0.7 = 0.013,
+R@P>=0.9 = 0.000.** No confidence threshold makes Shelf useful. This is independent
+quantitative support for the drop already planned in DEC-126, and it is a stronger argument
+than the annotation-inconsistency one because it is measured rather than observed.
+
+### Consequences
+
+- NMS and `max_det` are closed as levers. Neither is pursued further.
+- The v2 label rebuild (DEC-127) is confirmed as the primary remediation, with the mapping
+  extension targeted by measured penalty: Person first, then Vehicle, then Tables.
+- 960 training resolution re-enters the option set (DEC-124 Finding 5 blockquote).
+- `hef_deploy` conf should be 0.148, pending confirmation that F2 is the accepted objective.
+- Two more truncated JPEGs (`exdark__2015_02633`, `exdark__2015_02639`) were repaired in place
+  by the local run — the DEC-123 phenomenon recurring in `dataset/final/`, which DEC-123 did not
+  cover. `dataset/bundle/` was already clean and `verify_bundle.py` still PASSES on all three
+  manifests. The pre-v2 backup predates the rewrite and retains the original bytes.
+
+### Artefacts
+
+`runs/detect/cap4500_yolov8s/phase1/` — 11 sweep/subset eval dirs, `operating_point_test_per_class.csv`,
+`operating_point_test_summary.json`. New: `scripts/train/operating_point.py` (self-test 10/10),
+`--iou`/`--max-det` on `scripts/train/evaluate.py` (self-test still 15/15),
+`dataset/reports/v1_per_class_reference.json` (the DEC-126 off-by-one baseline).
+
+## DEC-127: v2 Label Rebuild — Schema-Wide Open Images Filter, Extended Mappings, Box Dedup; +53% Annotations and the v1 Baseline Re-Measured at 0.6417
+
+- **Date:** 2026-09-09
+- **Status:** Accepted (labels built and verified; Shelf drop is DEC-126, still pending)
+- **Related:** DEC-124 (diagnosis, Finding 3 corrected by this work), DEC-125 (Phase 1 measurements this acts on), DEC-052 (cross-folder merge this had to be made safe against), DEC-115 (Bench/furniture filter, whose behaviour changes here), DEC-083 (stale-output bug, checked for), DEC-107 (never hardcode ids), DEC-119 (frozen splits preserved)
+
+### What changed
+
+**1. `config/classes.yaml` — Open Images mappings extended.** Person gains
+`Man`/`Woman`/`Boy`/`Girl`; Vehicle gains `Van`/`Taxi`; Chairs gains
+`Couch`/`Stool`/`Sofa bed`; Tables gains `Desk`/`Kitchen & dining room table`.
+
+Three large candidates were **deliberately excluded**, with the reasoning recorded inline in
+the file so it is not re-litigated:
+
+| excluded | boxes | why |
+|---|---:|---|
+| `Land vehicle` | 3,418 | Open Images SUPERCLASS spanning Car/Truck/Bus *and* Motorcycle/Bicycle — would merge three canonical classes this schema separates |
+| `Furniture` | 3,936 | SUPERCLASS spanning Chairs/Tables/Shelf/Bench — the exact overlapping-box failure DEC-115 exists to prevent |
+| `Human body` | 7,965 | a body-PART annotation of the Human arm/Human face family, not a whole person — would stack partial boxes on Person |
+
+**2. `scripts/convert/openimages_to_intermediate.py` — schema-wide filter.** The converter
+kept only each folder's own native classes and discarded the rest. It now keeps any annotation
+mapping to **any** canonical class, via a new `build_native_to_canonical()` that also raises if
+`classes.yaml` ever maps one native class to two canonical ids. Ids come from the config, never
+literals (DEC-107).
+
+**3. Box-level deduplication — required by the widening, not in the original plan.** Under the
+old per-folder filter a box could only ever be collected once, so the pool appended blindly.
+With the schema-wide filter the *same* annotation arrives from every folder whose export
+contains that image — 7,071 of the 8,489 Chair boxes in `tables/` are also in `chairs/`.
+Appending blindly would have written duplicate identical boxes into every affected label file.
+Dedup key is `(class_id, bbox rounded to 0.1px)`. **Verified: 0 label files contain duplicate
+lines.**
+
+### Result
+
+`dataset/processed/open_images/`: **95,659 -> 146,752 boxes (+53%)**, 37,106 -> 38,370 images.
+
+| class | v1 | v2 | factor |
+|---|---:|---:|---:|
+| **Person** | 14,346 | **55,105** | **3.84x** |
+| Tables | 8,074 | 11,621 | 1.44x |
+| Vehicle | 12,543 | 16,329 | 1.30x |
+| Chairs | 12,992 | 16,223 | 1.25x |
+| Pole / Animals / Bicycle / Motorcycle | — | — | 1.01–1.02x |
+| Shelf / Trash Bins / Stairs | — | — | 1.00x |
+| Bench | 6,952 | 6,212 | **0.89x** |
+
+**Bench is the one class that lost boxes (-740, -10.6%).** DEC-115 drops a Bench box that
+overlaps a Tables/Chairs box at IoU >= 0.5 as the same object; with more furniture recovered
+the filter finds more collisions. This is the filter working as designed on better input, and
+the removed boxes were contradictory supervision — but it is a real reduction in Bench
+supervision and must be watched in v2.
+
+### Verification
+
+- **v1 label set is a strict subset of v2** — 0 stale orphans. The converter has no `rmtree`,
+  so the DEC-083 stale-output failure was a live risk here; it did not occur.
+- **0 label files with duplicate lines.**
+- Per-class counts match an independently-computed prediction (Person 55,105 measured vs 55,117
+  predicted; Bench 6,982 - 770 DEC-115 drops = 6,212 exactly).
+- `open_images` carries **no `labels_reviewed/`** — confirmed before writing, so regenerating
+  its labels could not destroy manual review work. All 15,280 reviewed files belong to Roboflow
+  and dataset_ninja sources and were untouched.
+
+### `dataset/final_v2a/` — the controlled-comparison tree
+
+The plan's Phase 3 asks for "v1 on v2 GT" as the controlled comparison, but that is **not
+runnable as specified**: v1's head has 15 outputs, and a 14-class Shelf-dropped v2 does not
+align with it — any delta would conflate annotation recovery with the schema change. Split into
+two artefacts instead:
+
+- **`final_v2a`** — 15 classes, recovered boxes, **Shelf still present**. Directly comparable to v1.
+- **`final_v2b`** — 14 classes, Shelf dropped and renumbered (DEC-126). The training target.
+
+`final_v2a` was built by **pinning** to `bundle/manifests/cap4500.json` rather than re-running
+the cap/merge/split cascade. `merge.py` copies labels verbatim from `processed/`, so for a fixed
+image set the final label *is* the processed label — pinning is exact, avoids two destructive
+scripts, and makes the identical image set a property of construction rather than something to
+check afterwards. **Verified: image set identical to the manifest across all three splits, 0
+missing.** This also sidesteps the selection drift the +1,264 new images would otherwise have
+caused in `cap_per_class.py`.
+
+Consequently the plan's step 2a (adding `--out` to `merge.py`/`split.py`) was **not needed and
+not done** — those scripts are not run at all on this path.
+
+### The measurement: v1 re-scored on corrected ground truth
+
+Same weights, same images, same NMS settings; only the labels differ.
+
+| | v1 GT | v2a GT | delta |
+|---|---:|---:|---:|
+| mAP@0.5 | 0.6629 | **0.6417** | -0.0212 |
+| mAP@0.5:0.95 | 0.4484 | 0.4326 | -0.0158 |
+| false positives vs background | 6,806 | **6,040** | **-766** |
+| ground-truth instances | 20,310 | 25,185 | +4,875 |
+
+**Internal control:** every class whose GT did not change — Shelf, Doors, Tricycle, Potholes,
+Trash Bins, Stairs — moved by **exactly 0.0000**. The evaluation is sound and nothing leaked
+between classes.
+
+**The mechanism, confirmed from the opposite direction to DEC-125.** For every recovered class
+precision ROSE while false positives FELL: Person 0.7106 -> 0.7774 (-362 FP), Tables 0.6358 ->
+0.6845 (-78 FP), Chairs 0.5713 -> 0.6154 (-114 FP), Vehicle 0.7565 -> 0.7846 (-104 FP). Those
+detections were correct all along; the ground truth was wrong, and v1 was being penalised for
+finding real objects. mAP still falls because recall falls — there is far more to find (Person
+GT 4,041 -> 7,656) and v1 was trained to suppress exactly those objects.
+
+**DEC-125 flagged the direction of this as genuinely uncertain rather than predicted. It is now
+measured: down 0.0212, for a reason that is good news.**
+
+### Consequence for the write-up
+
+**The published 0.6695 was inflated by missing annotations.** On corrected ground truth the same
+weights score **0.6417**. That is the honest v1 baseline and the number v2 must beat. DEC-122's
+0.70 criterion was pre-registered against the flattering figure; the gap to close is 0.058, not
+0.033. This should be reported plainly — it is a measurement of the defect, not a moved goalpost.
+
+### Rollback
+
+`dataset/processed/open_images/labels/` was regenerated in place. v1's version exists only in
+`dataset/backups/pre_v2_20260909/processed/open_images/labels/` (37,106 files, verified present
+before the write). `dataset/final/`, `dataset/merged/` and `dataset/bundle/` are untouched, and
+`verify_bundle.py` still passes. Pre-edit copies of `config/classes.yaml` and the converter are
+in the session scratchpad.
+
+## DEC-126: Shelf Dropped, 15 -> 14 Classes — Every Id Above 5 Shifted Down, Verified Two Ways Against the DEC-107 Signature
+
+- **Date:** 2026-09-09
+- **Status:** Accepted (labels and schema rebuilt and verified; **training gated on the student's FiftyOne visual check**)
+- **Related:** DEC-107 (the shift incident whose signature this reproduces structurally), DEC-115 (the append-only change this is the opposite of), DEC-125 (the measurement that justifies the drop), DEC-127 (the v2 labels this transforms), DEC-120 (zero-background-images property, now changed), DEC-083 (Shelf's introduction, now reversed)
+
+### Why Shelf goes
+
+DEC-124 recorded that Shelf's annotation is *self-contradictory* — boxes alternate between
+the whole shelving unit and individual rows, confirmed by the student visually and by 119
+boxes in a single image. DEC-125 added the decisive quantitative argument:
+
+**Shelf recall subject to a precision floor: R@P>=0.5 = 0.057, R@P>=0.7 = 0.013,
+R@P>=0.9 = 0.000.** No confidence threshold makes Shelf usable. It is not weak, it is
+unreachable — and it was the worst class in v1 at mAP@0.5 = 0.184 with 76% of instances
+missed. It is dropped because it is *demonstrably* broken, not because it was inconvenient,
+and the 15-class number stays reported alongside (DEC-125's write-up guidance).
+
+### The renumbering, and why it is the project's highest-risk edit
+
+Dropping id 5 shifts every class above it down by one, so each lands on its neighbour's
+former id:
+
+```
+ 6 Doors      -> 5 (Shelf's old id)     10 Potholes   ->  9 (Tricycle's old id)
+ 7 Chairs     -> 6 (Doors' old id)      11 Trash Bins -> 10 (Potholes' old id)
+ 8 Tables     -> 7 (Chairs' old id)     12 Bicycle    -> 11 (Trash Bins' old id)
+ 9 Tricycle   -> 8 (Tables' old id)     13 Stairs     -> 12 (Bicycle's old id)
+                                        14 Bench      -> 13 (Stairs' old id)
+```
+
+**Potholes lands exactly on Tricycle's old id 9 — DEC-107's incident verbatim.** An
+off-by-one here produces labels that are *structurally valid*: every id in range, file counts
+correct, `check_det_dataset()` passing. No range assertion can catch it.
+
+### Verification — the plan's count heuristic FAILED, and was replaced
+
+The approved plan specified: *"flag any class whose v2 count is closer to a different v1
+class's count than to its own."* Run as written it flagged **three false positives** —
+Chairs, Tables and Bench — because DEC-127's annotation recovery legitimately changed counts
+(Chairs 1.21x, Tables 1.36x, Bench 0.89x), so "nearest v1 class by count" is meaningless once
+counts move for good reasons. This ambiguity was predicted before the run.
+
+Two sharper tests were used instead, both of which pass:
+
+**Test A (decisive).** For every old class `c`, `count(v2a, c) == count(v2b, remap[c])`
+**exactly**, all 14 classes. This is a direct proof of correct remapping, not an inference
+from magnitudes — a shift would break it immediately.
+
+**Test B (the DEC-107 signature).** A shift makes an id hold its *predecessor's* boxes, so
+the count would match the old owner's exactly. Checked every id: **0 of 14 hold a
+predecessor's count.** Doors=2,280 not Shelf's 9,477; Tables=11,372 not Chairs' 12,631;
+Potholes=6,122 not Tricycle's 3,160.
+
+Also passing: **0 out-of-range ids across all 43,170 label files** (exactly the manifest
+count); `evaluate.py --self-test` 15/15 and `operating_point.py --self-test` 10/10 at the new
+nc; `check_det_dataset()` from an unrelated CWD resolves nc=14 with the correct name order
+(DEC-066). The map is recorded at `dataset/reports/v2b_renumber_map.json`.
+
+### The five schema locations (DEC-107)
+
+| # | location | change |
+|---|---|---|
+| 1 | `config/classes.yaml` | `nc: 14`, `shelf:` block removed, every `id:` renumbered, `names` and `hailo_runtime_names` regenerated |
+| 2 | `scripts/utils/config_loader.py` | `EXPECTED_NC = 14`, `CANONICAL_NAMES` minus Shelf |
+| 3 | `scripts/preprocess/cap_per_class.py` | **no renumbering needed** — `CLASS_PRIORITY_SOURCES` is keyed by class NAME, not id. The plan was inaccurate here. Stale `"Elevator"` key removed as planned. |
+| 4 | every label file | rebuilt into `dataset/final_v2b/` |
+| 5 | generated `data.yaml` | `dataset/final_v2b/data.yaml` at nc=14 |
+
+Verified programmatically that all five agree at nc=14 with an identical name order.
+
+### Background images — a deliberate change to DEC-120
+
+Images whose only boxes were Shelf now have empty labels: **888 train / 196 val / 216 test
+(~2.95%)**. DEC-120 recorded "zero background images" as a property of this dataset and
+declined to add any. That property no longer holds. This is **beneficial and intended** —
+they are genuine negatives, and DEC-120's stated reason for the background column being the
+only available FP proxy was precisely their absence. v1 produced 6,806 false positives with
+no negatives in training; these should reduce that.
+
+`hef_deploy` and evaluation reporting both assume the DEC-120 framing, so both need revisiting
+once v2 is measured.
+
+### Consequence: v1 can no longer be evaluated against the live config
+
+`evaluate.py` compares the model head against `classes.yaml` and will now reject v1's 15-class
+head — by design, since a 15-class model scored against a 14-class schema is exactly the
+silent-mislabelling failure this check exists to stop. v1 remains fully reproducible via
+`models/current/deployment_kit_v1_cap4500/`, which carries its own `classes.yaml.frozen` and a
+self-contained `data.yaml`. **The v1-versus-v2 comparison runs on `final_v2a` (15-class), which
+is why that tree was built and kept.**
+
+### Not yet done
+
+**Training must not start until the student's FiftyOne visual gate passes** — the plan requires
+confirming by eye that Potholes boxes are on road damage and not tricycles, that Shelf returns
+zero results, that recovered Open Images boxes are really present, and that the reviewed
+Roboflow sources are unchanged. Every automated check above can pass on a schema-shifted
+dataset in principle; that is the point of the human gate.
+
+## DEC-128: 1,087 Hand-Labelled Boxes Existed Only in FiftyOne and Were Never Exported to Disk — Restored Into v2
+
+- **Date:** 2026-09-11
+- **Status:** Accepted (restored and verified)
+- **Related:** DEC-127 (the v2 labels this corrects), DEC-126 (the 14-class trees re-derived), DEC-087/088 (the review passes whose output this recovers), DEC-100 (the class drop that explains the obsolete labels), DEC-119 (frozen splits, preserved)
+
+### What happened
+
+The student noticed that some hand-drawn boxes on `roboflow_trashcan_detection_pihfn` "didn't
+get reflected". They were right, and it was not isolated.
+
+The pipeline was **not** at fault — trashcan carried 902 boxes identically at every stage
+(`processed/labels` -> post-class-drop -> `final`), nothing lost in cap/merge/split. **The loss
+was upstream of the pipeline entirely: boxes drawn in the FiftyOne App were never exported to
+disk.** The review datasets are `persistent=True` MongoDB state, so the edits survived in
+FiftyOne indefinitely while the `.txt` files they were supposed to produce never changed.
+
+**Why this was not caught earlier.** The obvious check — comparing `labels/` against
+`labels_reviewed/` — passes cleanly (byte-identical, 559/559 for trashcan). Both are *on disk*,
+so both are equally missing the un-exported edits. Only a FiftyOne-versus-disk comparison can
+see it. That check did not exist.
+
+### Scope
+
+| source | images | boxes restored | notes |
+|---|---:|---:|---|
+| `roboflow_cv_project_hovyc` | 1,262 | **+531** | |
+| `roboflow_trashcan_detection_pihfn` | 559 | **+486** | incl. 36 Doors and 3 Stairs absent entirely |
+| `roboflow_revised_pedestrian_obstacle` | 1,505 | +43 | plus 4 deliberate Stairs deletions propagated |
+| `roboflow_pothole_voxrl` | 665 | +2 | |
+| **total** | **3,991** | **+1,062** into the v2 trees | |
+
+Two other active sources (`dataset_ninja_pothole_detection`, `dataset_ninja_road_damage_detector`)
+matched disk exactly. `crowdhuman` and `dlsu_d_vehicle_type_detection` show disk > FiftyOne, which
+is **not** a loss: their review datasets cover only a subset of the processed tree, and dlsu
+additionally gained boxes on disk from DEC-109/111's yolov8x pass *after* review.
+
+### Two corrections to the first estimate
+
+**(a) The raw gap was 1,762 boxes; only 1,087 are recoverable.** The remaining **671 are
+`Pedestrian Lane` (670) and `Elevator` (1)** — classes DEC-100 deliberately dropped. They have no
+id in the current schema and were correctly skipped, exactly as the class drop did on disk. The
+first figure reported to the student overstated the loss by counting them.
+
+**(b) The 4 "conflicts" were not conflicts.** Four boxes existed on disk but not in FiftyOne, all
+of them a single `Stairs` box on four different images — deliberate review *deletions* that had
+never propagated. They are review work too, and were applied.
+
+One degenerate box (zero area, `cv_project_hovyc`) was skipped — almost certainly a stray click
+in the App.
+
+### What was written
+
+FiftyOne `ground_truth` was exported to `processed/<src>/labels/` and `labels_reviewed/` in the
+**15-class schema**, which is what every non-`open_images` processed tree still uses (only
+`open_images` was regenerated by DEC-127, and the 14-class renumber lives in `final_v2b`, not in
+`processed/`). `final_v2a` was updated from the new processed labels and `final_v2b` re-derived
+from it by the DEC-126 transform.
+
+**`dataset/final/` (v1) was deliberately NOT updated.** It is the frozen comparison baseline; its
+0.6417-on-v2a measurement stays valid. The consequence is that the v1->v2 delta now bundles two
+distinct label improvements — DEC-127's Open Images recovery and this restoration — both of which
+are annotation completeness, and neither of which changes the image set.
+
+### Verification
+
+`final_v2a` 43,170 files / 167,708 boxes; `final_v2b` 43,170 files / 158,190 boxes; **0
+out-of-range ids**; the DEC-126 remap still exact for all 14 classes; Shelf's 9,518 boxes dropped;
+image sets byte-identical to `bundle/manifests/cap4500.json` across all three splits. Backup of the
+four sources' pre-export labels at `dataset/backups/pre_review_reexport_20260911/` (9,065 files).
+
+### Recurrence
+
+Nothing in the pipeline detects this class of loss, and the review datasets are persistent, so it
+can recur silently on any future review pass. **A FiftyOne-versus-disk audit should run before any
+training bundle is built.** Not yet written.
+
+---
+
+> ## RETRACTED 2026-09-11 — the premise was wrong and the change was reverted
+>
+> **DEC-128 assumed the `review_*` FiftyOne datasets were NEWER than disk. They are older.**
+> The student caught it: after the export, `roboflow_trashcan_detection_pihfn` carried duplicate
+> boxes they had deleted by hand during review.
+>
+> ### What actually happened
+>
+> The `review_*` datasets are **frozen pre-dedup snapshots**, and the timestamps prove it:
+>
+> | dataset | created | last modified | |
+> |---|---|---|---|
+> | `review_roboflow_trashcan_detection_pihfn` | 2026-08-20 07:37 | **2026-08-20 08:06** | 6 days BEFORE the dedup |
+> | `review_roboflow_cv_project_hovyc` | 2026-08-19 10:53 | **2026-08-19 10:53** | never edited after creation |
+>
+> A dedup pass on **2026-08-26** (`labels_pre_dedup_bak_20260826_035316`, which exists for exactly
+> these two sources) removed 420 + 554 exact-duplicate lines from disk. FiftyOne was never updated,
+> so it still held them. **The export rolled that dedup back.**
+>
+> Decisive counter-evidence that disk is authoritative: `cv_project_hovyc` has **1,738** unique
+> boxes in FiftyOne versus **2,104** on disk — FiftyOne is missing 366 boxes that disk has. It
+> cannot be the newer record.
+>
+> ### Damage and revert
+>
+> **974 exact-duplicate lines reintroduced** (trashcan 420, cv_project_hovyc 554) and **1 unique
+> box lost**. Reverted from `dataset/backups/pre_review_reexport_20260911/` (taken before the
+> write, which is the only reason this was cheap to undo). Verified after revert: all four sources
+> **byte-identical** to their pre-export state; every one of the 25 processed sources matches the
+> pre-v2 backup except the intentional `open_images` regeneration; `final_v2a` 166,646 boxes and
+> `final_v2b` 157,128 boxes, **0 duplicate lines** in either; upload payload rebuilt to match.
+>
+> ### The "1,087 missing boxes" figure was an artefact
+>
+> It decomposes into pre-dedup duplicates still present in FiftyOne, 671 boxes for classes DEC-100
+> deliberately dropped, and — for the per-line comparison — float round-trip noise from
+> reconstructing YOLO strings out of FiftyOne's stored floats, which makes exact line matching
+> unreliable. **Only the count comparisons in this note should be trusted.**
+>
+> ### What is still OPEN
+>
+> The student's original report — that hand-reviewed boxes on `trashcan_detection_pihfn` are
+> missing from the final dataset — is **not explained and not resolved**. It is not this export,
+> which has been undone. The authoritative record is `processed/<src>/labels_reviewed/`, written by
+> `fiftyone_review_processed.ipynb`'s export cell; whether that cell was run for every source and
+> every session is unverified.
+>
+> ### Rule going forward
+>
+> **The `review_*` FiftyOne datasets are not a source of truth and must not be exported to disk.**
+> They are stale App state that predates later pipeline stages (dedup, class drops). Disk is
+> authoritative. Any future recovery must reconcile against `labels_reviewed/` and the
+> `*_excluded.json` reports, never by bulk-writing FiftyOne detections over label files.
+
+---
+
+## DEC-129: ExDark `Bus` Mapped to Vehicle — Applied Additively to Pooled Images Only, 240 Bus-Only Images Deliberately Excluded
+
+**Date:** 2026-09-12
+**Status:** Applied
+
+ExDark annotates a `Bus` class that `exdark_to_canonical_class_map` previously dropped on the
+grounds that Open Images already covers Vehicle. That reasoning holds for *class coverage* but
+not for *annotation completeness*: an ExDark image already in the training pool that contains an
+unlabelled bus trains that bus as background, which is the exact defect DEC-124 diagnosed.
+
+`Bus: vehicle` is now in the map. It was **not** applied by re-running the converter.
+
+| | images | boxes |
+|---|---:|---:|
+| ExDark images containing a Bus box | 570 | 706 |
+| already in the frozen pool -> **applied** | **330** | **+413** |
+| not in the pool -> **excluded** | 240 | 293 skipped |
+
+The 240 excluded images were excluded on instruction: admitting them would grow the image set,
+break the v1-vs-v2 controlled comparison that the entire v2 experiment rests on, and force a
+~3 h image re-upload. Only boxes landing on images already in `final_v2a` were written.
+
+ExDark annotation files list every object in an image regardless of which class folder the file
+sits in, so Bus boxes were collected across all 12 folders, not just `Bus/`.
+
+**Hazard recorded in `config/datasets.yaml`:** re-running `scripts/acquire/acquire_exdark.py`
+with this mapping present *will* pull the 240 excluded images into `processed/exdark/`. The
+pooled-only behaviour is reproducible via `scripts/preprocess/exdark_bus_additive.py`, which is
+idempotent (a Bus line already present is counted, not appended twice).
+
+---
+
+## DEC-130: The CrowdHuman Promote Wrote 14-Class Ids Into the 15-Class `processed/` Tree — 56 Boxes Silently Mislabelled, Caught Visually
+
+**Date:** 2026-09-12
+**Status:** Fixed
+
+**This is DEC-107 recurring, and no automated gate caught it.** It was found by a human looking
+at boxes in FiftyOne: tables displaying as chairs, chairs as doors, bikes as trash bins.
+
+The CrowdHuman promote wrote **v2b (14-class) ids** into `dataset/processed/crowdhuman/labels/`,
+which is a **15-class (v1-schema)** tree. Because ids 0-4 are identical in both schemas, Person,
+Vehicle, Motorcycle and Animals survived intact — every id >= 5 landed one class low:
+
+| written id | read as (15-class) | count | true class |
+|---:|---|---:|---|
+| 6 | Doors | 34 | **Chairs** |
+| 7 | Chairs | 8 | **Tables** |
+| 11 | Trash Bins | 14 | **Bicycle** |
+
+Every one of the 56 boxes was structurally valid: ids in range, counts plausible,
+`check_det_dataset()` clean. The labels were wrong and nothing but a human eye could tell.
+
+**Blast radius measured, not assumed.** The pre-promote backup proves all 194 non-Person boxes
+in CrowdHuman came from this promote (the backup held 1,118 boxes across the 375 reviewed files,
+**all Person**), so the remap `{6->7, 7->8, 11->12}` is unambiguous. A repo-wide check comparing
+FiftyOne label *names* against disk *ids* for all 22 reviewed sources confirmed the defect is
+**CrowdHuman-only** — the trashcan write-back used 15-class ids and was correct.
+
+**Root cause:** `processed/` is the 15-class tree; the 14-class renumber exists only in
+`final_v2b`. Any writer touching `processed/` must use `dataset/final/data.yaml` ids. The
+trashcan write-back did this correctly; the CrowdHuman promote did not.
+
+**Standing rule:** the FiftyOne-names-vs-disk-ids comparison is now the cheapest available
+detector for this failure class, because it compares two representations that a schema shift
+cannot corrupt in the same direction. Run it after any write to `processed/`.
+
+---
+
+## DEC-131: Two Reported Data Losses Investigated — hovyc Was Clean, and the Pooled-But-Never-Reviewed Set Measured
+
+**Date:** 2026-09-12
+**Status:** Closed, no action needed on hovyc
+
+A hovyc image appeared to be missing hand-reviewed Chair and Person boxes, matching the
+trashcan failure mode. It was not the same problem.
+
+**Finding 1 - hovyc lost nothing.** Its `review_*` dataset (Aug 19) predates the Aug 26 dedup,
+so FiftyOne shows 481 Person / 149 Chairs / 133 Vehicle against disk's 169 / 60 / 47. Geometric
+IoU comparison (>= 0.9, same label) over all 1,039 samples found **every FiftyOne box has a twin
+in current `labels_reviewed/`** except 4 `Pedestrian Lane` (a dropped class) and 1 malformed box.
+The gap is entirely the dedup: all 312 dropped Person lines were **byte-identical duplicate
+copies of a line that was kept** — the worst file carried every box in triplicate.
+
+**Finding 2 - the real explanation.** The flagged image was **never hand-reviewed at all**. Of
+1,262 hovyc images in the pool, **297 have no `labels_reviewed/` entry**. Objects visible in
+them but unannotated are the DEC-124 non-exhaustive-annotation defect, not lost work.
+
+**Method note.** The sample ids reported were stale — `final_dataset_browse` had been
+repopulated, reassigning every id. They were recovered through MongoDB ObjectId counter
+arithmetic: both populations came from the same mongod process, so the 3-byte counter is
+monotonic across them, and the two ids' counter delta (14,589) pinned a unique candidate pair
+that resolved to the same base offset (4,712,212) from both directions.
+
+**Also fixed:** a Bicycle box on `dataset_ninja_pothole_detection/potholes126` removed from
+`labels/`, `labels_reviewed/`, the FiftyOne review dataset (so a future promote cannot reinstate
+it), and both v2 trees.
+
+---
+
+## DEC-132: The Open Images Dedup Key Had a 0.1-Pixel Tolerance — 798 Near-Duplicate Boxes Reached the v2 Pool, Removed Geometrically
+
+**Date:** 2026-09-12
+**Status:** Applied
+
+DEC-127's cross-folder merge added a dedup guard because the schema-wide filter makes the same
+annotation arrive from every folder whose export contains that image. The guard worked on
+identical boxes — it removed 33,202 — but it used the wrong comparison:
+
+```python
+key = (class_id, tuple(round(v, 1) for v in bbox))   # bbox is COCO [x,y,w,h] in PIXELS
+```
+
+`ann["bbox"]` is **absolute pixels**, not normalised. Rounding to 1 decimal place is therefore a
+**0.1-pixel tolerance** — it only ever caught bit-identical copies. The key was written as if the
+coordinates were normalised, where 1 dp would have been a coarse bin.
+
+Open Images boxes the same physical object slightly differently in each class-folder export.
+Measured on `3e726f9f8393dcfe` (1024x683), three surviving twins:
+
+| pair | IoU | key equal? |
+|---|---:|---|
+| chair A vs A' | **0.9789** | no — differ by ~5 px |
+| chair B vs B' | 0.9057 | no |
+| chair C vs C' | 0.8696 | no |
+
+**798 near-duplicate boxes (IoU >= 0.90, same class) reached the training pool** — 0.505% of
+158,128, against 113 pairs in the v1 tree. Concentrated in `open_images` (744 of 798) and, by
+class, in Person (327) and Tables (288), not Chairs (59) as first assumed from a single file.
+
+**Found by the visual gate, not by any automated check** — the same way DEC-130 was found. The
+student flagged that `ground_truth_v1` boxes looked identical to `ground_truth` and asked whether
+the pool could double. It could not (the notebook has no disk writes), but the question surfaced
+a genuine defect that every structural gate passes: duplicate boxes are valid YOLO lines.
+
+**Resolution.** Threshold 0.90, chosen after reviewing the IoU distribution of the flagged pairs
+(294 pairs at 0.98-1.00, 241 at 0.95-0.98, 178 at 0.92-0.95, 85 at 0.90-0.92) — the judgement
+band is small and the bulk are near-certain. Two changes:
+
+1. `scripts/preprocess/dedupe_geometric.py` — geometric pass over every
+   `dataset/processed/<source>/{labels,labels_reviewed}/`, same class, IoU >= 0.90, **keep the
+   first occurrence**. Keeping the first preserves the v1 box wherever one exists, so the
+   v1-vs-v2 comparison is not perturbed by which twin survived. Removed **2,225** boxes
+   corpus-wide, of which **798** were in the pool. Idempotent — a second pass removes 0.
+2. `scripts/convert/openimages_to_intermediate.py` — the key is now `coco_iou(...) >= DEDUP_IOU`.
+   Verified against the real surviving twin above: 0.9789 now deduplicates.
+
+| tree | before | after |
+|---|---:|---:|
+| `final_v2a` | 167,646 | **166,848** |
+| `final_v2b` | 157,330 + 798 | **157,330** |
+| geometric dup pairs in v2a/v2b | 801 | **0** |
+
+`dataset/final/` (v1) is **deliberately left at 113 pairs** — it is the frozen comparison
+baseline and must not move.
+
+**Standing gate:** cell 5 of `notebooks/fiftyone_final_dataset.ipynb` tags `dup_pair` /
+`dup_would_drop` and now reports PASS/FAIL. On a clean tree it must report zero.
+
+---
+
+## DEC-133: Open Images Hierarchy Collapse Put 824 Duplicate Boxes in the v2 Pool — the Raw Native Label, Not IoU, Is the Discriminator
+
+**Date:** 2026-09-12
+**Status:** Applied
+
+DEC-132 deduplicated geometrically at IoU >= 0.90 and reported the pool clean. It was not.
+The student found `ground_truth` boxes sitting on one object at IoU 0.84 — below the cut.
+
+**Root cause: DEC-127's extended mappings collapse the Open Images hierarchy.**
+
+    Person <- Person, Man, Woman, Boy, Girl
+    Tables <- Table, Desk, Kitchen & dining room table, Coffee table
+    Chairs <- Chair, Couch, Stool, Sofa bed
+    Vehicle <- Car, Van, Taxi, Bus, Truck
+
+Open Images routinely annotates ONE object under several of these at once. After mapping,
+that is two boxes on one object. Traced back to raw native labels:
+
+| raw pair | count |
+|---|---:|
+| Desk + Table | 229 |
+| Girl + Woman | 161 |
+| Man + Person | 72 |
+| Man + Woman | 54 |
+| Kitchen & dining room table + Table | 33 |
+| Chair + Couch | 30 |
+| Car + Taxi | 15 |
+| Cat + Dog | 11 |
+
+**A lower IoU threshold is the WRONG fix.** Bucketing every overlapping pair by IoU *and*
+provenance showed v2-introduced overlaps concentrate high and v1-native overlaps concentrate
+low, crossing at ~0.70 — but a plain 0.70 cut would still have deleted genuine neighbours
+(bicycles in a rack, chairs in a row, people in a crowd).
+
+**The rule, in two parts:**
+
+1. **Different native labels + IoU >= 0.70** -> one object under two names. Drop one. (728)
+2. **Same native label + IoU >= 0.70 + IoMin >= 0.90** -> one object annotated at two extents.
+   Drop the nested one. (96)
+
+`IoMin` = intersection over the *smaller* box. This is the part plain IoU cannot do: genuine
+occlusion puts a SMALL box inside a large one and scores low, whereas a re-annotation puts two
+*similarly sized* boxes on top of each other and scores ~1.0. Across all 96 nested drops the
+minimum area ratio is 0.703 — not one has the small-inside-large geometry occlusion produces.
+
+**Validated against 6 hand-checked cases, all correct:**
+
+| pair | IoU | IoMin | call | truth |
+|---|---:|---:|---|---|
+| Girl + Girl | 0.703 | 1.000 | drop | duplicate |
+| Table + Table | 0.747 | 0.997 | drop | duplicate |
+| Bicycle + Bicycle | 0.750 | 1.000 | drop | duplicate |
+| Table + Table | 0.737 | 0.946 | drop | duplicate |
+| Table + Table | 0.764 | 0.951 | drop | duplicate |
+| **Man + Man** | 0.704 | **0.854** | **keep** | **two real people, side by side** |
+
+**Applied:** 824 boxes removed from `dataset/processed/open_images/labels`, 694 files.
+31 side-by-side pairs deliberately kept.
+
+| tree | before | after |
+|---|---:|---:|
+| `final_v2a` | 166,848 | **166,024** |
+| `final_v2b` | 157,330 | **156,506** |
+
+**Why it mattered more than 0.52% suggests.** A duplicate GT box is an unmatchable false
+negative by construction — a prediction can only claim one box of the pair. Tables carried
+307 duplicates against 11,092 instances: **2.77% of its ground truth could never be matched**,
+on a class whose v1 miss rate was 40%. That floor would have been measured as model failure.
+
+**Correction recorded.** Two claims of mine were wrong and were caught by visual review:
+DEC-132's "0 duplicate pairs remain" (true only at 0.90), and the first version of this rule,
+which protected all same-native pairs — about 100 of those 131 were duplicates.
+
+**Converter divergence — READ BEFORE RE-RUNNING THE CONVERTER.**
+`openimages_to_intermediate.py` now carries the DEC-133 rule, but re-running it does **not**
+reproduce the shipped tree: `shelf` goes 9,518 -> 0 (classes.yaml no longer has Shelf, DEC-126,
+which would gut the 15-class `final_v2a` measurement tree) and a further ~2,939 boxes drop
+because converter-stage dedup sees the raw stream. The shipped tree is the old converter plus
+two validated post-passes (`dedupe_geometric.py`, `find_hierarchy_duplicates.py`). A warning
+block is at the top of the converter.

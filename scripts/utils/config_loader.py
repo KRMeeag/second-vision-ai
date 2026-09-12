@@ -60,7 +60,7 @@ CLASSES_YAML: Path = REPO_ROOT / "config" / "classes.yaml"
 DATASETS_YAML: Path = REPO_ROOT / "config" / "datasets.yaml"
 
 # Authoritative class count — must match nc in classes.yaml
-EXPECTED_NC: int = 15
+EXPECTED_NC: int = 14
 
 # Canonical class names in YOLO id order (0-indexed).
 # Must stay in sync with AGENTS.md and config/classes.yaml.
@@ -70,13 +70,19 @@ EXPECTED_NC: int = 15
 # no existing id moved, unlike DEC-100's 16->13 which shifted eight classes
 # and produced DEC-101's near-miss. Stairs is a partial restoration of what
 # DEC-100 dropped, from Open Images rather than the benched Roboflow sources.
+# Shelf REMOVED 2026-09-09 (DEC-126). Unlike DEC-115's append-only change, this
+# SHIFTED every id above 5 down by one -- Doors 6->5 ... Bench 14->13 -- so each
+# class landed on its neighbour's former id and Potholes landed exactly on
+# Tricycle's old id 9, the DEC-107 incident's signature. The rebuilt labels were
+# verified two ways before this constant moved: every surviving class's box count
+# matched exactly across the remap, and no id holds its predecessor's count.
+# See dataset/reports/v2b_renumber_map.json.
 CANONICAL_NAMES: list[str] = [
     "Person",
     "Vehicle",
     "Motorcycle",
     "Pole",
     "Animals",
-    "Shelf",
     "Doors",
     "Chairs",
     "Tables",
@@ -117,7 +123,7 @@ def load_classes() -> dict[str, Any]:
 
     Validation checks:
       - File exists and parses as a YAML mapping.
-      - 'nc' field matches EXPECTED_NC (15).
+      - 'nc' field matches EXPECTED_NC (14).
       - 'names' field has exactly nc entries.
       - Each canonical name matches the hardcoded CANONICAL_NAMES list.
 

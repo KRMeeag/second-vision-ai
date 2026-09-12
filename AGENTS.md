@@ -82,23 +82,23 @@ The AI must avoid recommendations that increase risk of:
 
 ## Canonical Class List
 
-The authoritative **13-class** schema (0-indexed for YOLO):
+The authoritative **14-class** schema (0-indexed for YOLO):
 
 ```
-0: Person
-1: Vehicle
-2: Motorcycle
-3: Pole
-4: Animals
-5: Shelf
-6: Doors
-7: Chairs
-8: Tables
-9: Tricycle
-10: Potholes
-11: Trash Bins
-12: Bicycle
+0: Person       7: Tables
+1: Vehicle      8: Tricycle
+2: Motorcycle   9: Potholes
+3: Pole        10: Trash Bins
+4: Animals     11: Bicycle
+5: Doors       12: Stairs
+6: Chairs      13: Bench
 ```
+
+**This copy was stale twice over when it was last corrected (2026-09-09), which is the whole
+reason for the warning below.** It still said "13-class" and omitted `Stairs` and `Bench`
+three days after DEC-115 appended them at ids 13-14, and it still listed `Shelf` at id 5 after
+DEC-126 removed it and shifted every id above 5 down by one. Treat any hand-maintained copy of
+this list as wrong until checked against `config/classes.yaml`.
 
 Do not add, remove, or reorder classes unless the user explicitly requests it.
 
@@ -110,10 +110,18 @@ annotation schema silently rendered every Pothole as a Tricycle (index 10 in the
 `config/classes.yaml`'s `names:` field, or from `get_canonical_names()`, which is what the
 pipeline actually uses.
 
-### Reduced from 16 classes — the other three can still come back
+### Class history — what was dropped, what came back, what is gone for cause
 
 `Stairs`, `Elevator` and `Pedestrian Lane` were dropped 2026-09-04 (DEC-100), all three for
-sitting below DEC-042's 1,500-image floor. **This is reversible, not permanent.** A complete,
+sitting below DEC-042's 1,500-image floor. **`Stairs` was since restored** from Open Images
+(DEC-115, id 12 today), alongside a new `Bench` (id 13). `Elevator` and `Pedestrian Lane`
+remain dropped.
+
+**`Shelf` was dropped 2026-09-09 (DEC-126) and is a different case from all of the above** — not
+a volume shortfall but a demonstrably broken annotation: its boxes alternate between the whole
+shelving unit and individual rows, and DEC-125 measured that it cannot reach *any* usable
+precision (recall at precision >= 0.5 is 0.057; at >= 0.9 it is 0.000). Restoring it would
+require re-annotating the source, not just re-including it. **This is reversible, not permanent.** A complete,
 verified revert procedure is recorded in **DEC-105** — note that the 16-class backup at
 `dataset/backups/pre_class_drop_20260904_023304/` is *not* sufficient on its own, because
 `config_loader.py`'s hardcoded schema comes from git (`2ac3cde`), not the backup.
@@ -216,6 +224,22 @@ The AI must:
 - Record every material decision (scope, architecture, dataset sourcing, tooling choices, schema changes) in `docs/DECISIONS.md` using the established DEC-XXX format, at the time the decision is made — not deferred to later
 - Reflect completed code, config, or documentation artifacts by updating the relevant checklist items in `TASKS.md` and `PLAN.md` as soon as the work is finished
 - Never make these updates silently — always tell the student, in the same turn, what was recorded and where (e.g. "Logged this as DEC-025 in DECISIONS.md; marked X done in TASKS.md")
+
+### Result notebooks are immutable snapshots (student instruction, 2026-09-09)
+
+`notebooks/results_cap4500_report.ipynb` is a **frozen record of the cap4500 training run**.
+The AI must **never edit, re-execute, or regenerate it** — not to fix a typo, not to refresh a
+figure, not to add a comparison against a later run. It is checked in read-only (`chmod 444`);
+if a write is ever attempted and fails, that is the guard working, not a problem to route
+around.
+
+**Every subsequent training run gets its OWN report notebook**, named for its run:
+`results_<run_name>_report.ipynb` (e.g. `results_cap4500_v2_report.ipynb`). Cross-run
+comparisons belong in the newer notebook, which may read the older run's artefacts from
+`runs/detect/<run>/` — never by modifying the older notebook.
+
+The reason is that a report notebook is evidence tied to one set of weights and one dataset
+state. Editing it after the fact silently changes what the record claims was measured.
 
 ---
 

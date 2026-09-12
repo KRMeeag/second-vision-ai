@@ -42,6 +42,28 @@ All three were read out of the installed ultralytics 8.4.118, not inferred.
    DEC-120 says to report. So conf is left UNSET by default. 0.25 is also the
    threshold baked into `hef_deploy`, so the reported FP rate matches what ships.
 
+4. `--iou` AND `--max-det` ARE SAFE TO SWEEP -- `--conf` IS NOT. DIFFERENT COUPLING.
+   This distinction is the whole reason the sweep flags exist and conf still does not.
+   `val.py:118-125` feeds BOTH thresholds into NMS itself:
+
+       outputs = nms.non_max_suppression(preds, self.args.conf, self.args.iou,
+                                         ..., max_det=self.args.max_det, ...)
+
+   so iou/max_det change the DETECTION SET, and mAP and the confusion matrix then
+   both consume that same changed set -- consistently. Meanwhile `val.py:197` calls
+
+       self.confusion_matrix.process_batch(predn, pbatch, conf=self.confusion_matrix_conf)
+
+   passing ONLY conf, so the matrix's own GT-matching threshold stays pinned at its
+   `metrics.py:407` default of iou_thres=0.45 and its gate at conf 0.25 regardless of
+   what --iou is set to. False-positive counts therefore stay comparable across every
+   sweep point. `--conf` is the opposite: it leaves mAP on the full PR curve at 0.001
+   while moving the matrix's gate, so the two stop describing the same operating point.
+
+   NOTE ON DIRECTION: NMS suppresses boxes overlapping MORE than the threshold, so a
+   LOWER --iou suppresses MORE. The crowded-scene hypothesis -- that NMS merges genuine
+   adjacent objects -- predicts improvement ABOVE the 0.7 default, not below it.
+
 WHY FALSE POSITIVES COME FROM THE CONFUSION MATRIX AT ALL
 ---------------------------------------------------------
 The dataset contains zero empty-label (background) images, and DEC-120 declined to
@@ -217,6 +239,14 @@ def main() -> int:
     ap.add_argument("--conf", type=float, default=None,
                     help="LEAVE UNSET. Setting it also moves the confusion matrix off 0.25 "
                          "and corrupts the false-positive count -- see the module docstring.")
+    ap.add_argument("--iou", type=float, default=None,
+                    help="NMS IoU threshold (ultralytics val default 0.7). Safe to sweep: it "
+                         "changes the detection set, which mAP and the confusion matrix both "
+                         "consume -- unlike --conf. LOWER suppresses MORE.")
+    ap.add_argument("--max-det", type=int, default=None, dest="max_det",
+                    help="max detections per image (ultralytics val default 300). Safe to sweep, "
+                         "same reason as --iou. Raise it to test whether crowded images are "
+                         "being truncated.")
     ap.add_argument("--self-test", action="store_true",
                     help="run synthetic checks on the reindexing logic and exit")
     ap.add_argument("--strict", action="store_true",
@@ -237,6 +267,14 @@ def main() -> int:
     out_dir = Path(args.out) if args.out else weights.parents[1]
     out_dir.mkdir(parents=True, exist_ok=True)
     tag = args.tag or ("int8" if args.int8 else "fp32")
+    # A sweep runs this script many times into ONE run dir. Without a distinct tag per
+    # point, `name=f"eval_{tag}"` + exist_ok=True silently overwrites the previous
+    # point's plots and CSV, and the sweep would report the last point N times.
+    if args.tag is None:
+        if args.iou is not None:
+            tag += f"_iou{args.iou:g}"
+        if args.max_det is not None:
+            tag += f"_md{args.max_det}"
 
     if args.conf is not None:
         print("WARNING: --conf was set explicitly. The confusion matrix is now built at "
@@ -265,6 +303,10 @@ def main() -> int:
         val_kwargs["device"] = args.device
     if args.conf is not None:
         val_kwargs["conf"] = args.conf
+    if args.iou is not None:
+        val_kwargs["iou"] = args.iou
+    if args.max_det is not None:
+        val_kwargs["max_det"] = args.max_det
 
     print(f"\nevaluating {weights.name} on split='{args.split}' ...")
     m = model.val(**val_kwargs)
@@ -355,6 +397,9 @@ def main() -> int:
         "classes_absent_from_split": missing,
         "false_positives_vs_background": total_fp,
         "confusion_matrix_conf": args.conf if args.conf is not None else 0.25,
+        "confusion_matrix_iou_thres": 0.45,   # metrics.py:407 default; --iou does NOT move it
+        "nms_iou": args.iou if args.iou is not None else 0.7,
+        "max_det": args.max_det if args.max_det is not None else 300,
         "ground_truth_instances": total_inst,
         "verdict": verdict,
         "speed_ms": dict(m.speed) if hasattr(m, "speed") else None,

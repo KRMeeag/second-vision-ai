@@ -24,7 +24,7 @@ annotation_policy:
     Hidden object extent must not be estimated. See DEC-012.
 
 # --- Number of classes ---
-nc: 15
+nc: 14
 # --- Class names (0-indexed for YOLO training) ---
 names:
   0: "Person"
@@ -32,16 +32,15 @@ names:
   2: "Motorcycle"
   3: "Pole"
   4: "Animals"
-  5: "Shelf"
-  6: "Doors"
-  7: "Chairs"
-  8: "Tables"
-  9: "Tricycle"
-  10: "Potholes"
-  11: "Trash Bins"
-  12: "Bicycle"
-  13: "Stairs"
-  14: "Bench"
+  5: "Doors"
+  6: "Chairs"
+  7: "Tables"
+  8: "Tricycle"
+  9: "Potholes"
+  10: "Trash Bins"
+  11: "Bicycle"
+  12: "Stairs"
+  13: "Bench"
 
 # --- Hailo runtime mapping (after background class injection) ---
 # Reference only — used when generating custom label JSON
@@ -52,16 +51,15 @@ hailo_runtime_names:
   3: "Motorcycle"
   4: "Pole"
   5: "Animals"
-  6: "Shelf"
-  7: "Doors"
-  8: "Chairs"
-  9: "Tables"
-  10: "Tricycle"
-  11: "Potholes"
-  12: "Trash Bins"
-  13: "Bicycle"
-  14: "Stairs"
-  15: "Bench"
+  6: "Doors"
+  7: "Chairs"
+  8: "Tables"
+  9: "Tricycle"
+  10: "Potholes"
+  11: "Trash Bins"
+  12: "Bicycle"
+  13: "Stairs"
+  14: "Bench"
 
 # --- Per-Class Source Configuration ---
 # Defines primary, secondary, and low-light augmentation providers
@@ -90,7 +88,17 @@ classes:
     id: 0
     primary:
       source: open_images
-      native_class: "Person"
+      native_class: ["Person", "Man", "Woman", "Boy", "Girl"]
+      note: >
+        DEC-127: Man/Woman/Boy/Girl added 2026-09-09. Open Images labels most
+        humans with these hierarchy CHILDREN, not the parent "Person" — mapping
+        the parent alone kept 14,346 of 55,117 recoverable boxes and left the
+        rest training as background. DEC-125 measured Person at -0.79 mAP@0.5
+        on Open Images images versus every other source at matched density,
+        the largest per-source penalty of any class.
+        DELIBERATELY EXCLUDED: "Human body" (7,965) — a body-PART annotation of
+        the same family as Human arm/Human face, not a whole person; mapping it
+        would stack partial boxes on top of Person.
     secondary:
       source: crowdhuman
       box_type: vbox
@@ -105,7 +113,13 @@ classes:
     id: 1
     primary:
       source: open_images
-      native_class: ["Car", "Bus", "Truck"]
+      native_class: ["Car", "Bus", "Truck", "Van", "Taxi"]
+      note: >
+        DEC-127: Van/Taxi added 2026-09-09 (+486 boxes). DEC-125 measured
+        Vehicle at -0.52 mAP@0.5 on Open Images at matched density.
+        DELIBERATELY EXCLUDED: "Land vehicle" (3,418) — an Open Images
+        SUPERCLASS spanning Car/Truck/Bus *and* Motorcycle/Bicycle. Mapping it
+        to Vehicle would merge three canonical classes this schema separates.
     secondary_providers:
       - source: roboflow
         project: "machine-exercise-5/me5-u6rvg"
@@ -197,7 +211,7 @@ classes:
     cap: 4500
 
   bicycle:
-    id: 12
+    id: 11
     # New class per DEC-038 (2026-08-08), split out of "Two Wheeler."
     # No new acquisition work needed — both sources already label
     # Bicycle separately from Motorcycle/Motorbike.
@@ -238,32 +252,9 @@ classes:
       guaranteed_floor: true
     cap: 4500
 
-  shelf:
-    id: 5
-    primary:
-      source: open_images
-      native_class: "Shelf"
-      note: >
-        Replaces Escalator 2026-08-20 (DEC-083) — escalator_stairs (the
-        only Escalator source) failed direct visual review (DEC-082) and
-        no replacement with adequate data could be found (public options
-        surveyed clustered around ~500 images). Escalator's id-6 slot is
-        reused rather than the schema renumbered to 15 classes, per the
-        student's explicit "reserve first, only renumber if nothing
-        suitable is found" call (DEC-082) — a suitable replacement was
-        found, so renumbering was never needed. Shelf chosen over Cart
-        (rejected — mostly horse-drawn carts on visual inspection, no
-        clean way to filter to shopping carts) and Countertop (rejected
-        — mostly residential kitchen countertops) after browsing all
-        three in fiftyone_preview.ipynb's new ad-hoc candidate section.
-        Open Images "Shelf": 22,899 boxes / 6,011 images in the cached
-        train split — genuinely common mall/retail/grocery obstacle
-        (aisle end-caps, protruding shelving) not covered by anything
-        else in the schema.
-    cap: 4500
 
   doors:
-    id: 6
+    id: 5
     primary_providers:
       - source: roboflow
         project: "testspace-xwkgk/cv-project-hovyc"
@@ -274,10 +265,17 @@ classes:
     cap: 4500
 
   chairs:
-    id: 7
+    id: 6
     primary:
       source: open_images
-      native_class: "Chair"
+      native_class: ["Chair", "Couch", "Stool", "Sofa bed"]
+      note: >
+        DEC-127: Couch/Stool/Sofa bed added 2026-09-09 (+1,010 boxes). All are
+        genuine seating obstacles a VI user encounters.
+        DELIBERATELY EXCLUDED: "Furniture" (3,936) — an Open Images SUPERCLASS
+        spanning Chairs/Tables/Shelf/Bench. Mapping it would put contradictory
+        overlapping boxes on single objects, the exact failure DEC-115's
+        Bench-on-furniture filter exists to prevent.
     lowlight_augment:
       source: exdark
       native_class: "Chair"
@@ -285,10 +283,10 @@ classes:
     cap: 4500
 
   tables:
-    id: 8
+    id: 7
     primary:
       source: open_images
-      native_class: ["Table", "Coffee table"]
+      native_class: ["Table", "Coffee table", "Desk", "Kitchen & dining room table"]
       note: >
         Coffee table added alongside Table per DEC-029 — mall/lounge
         deployment environments commonly feature coffee tables, not
@@ -300,7 +298,7 @@ classes:
     cap: 4500
 
   tricycle:
-    id: 9
+    id: 8
     status: possible
     primary_providers:
       - source: roboflow
@@ -322,7 +320,7 @@ classes:
     cap: 4500
 
   potholes:
-    id: 10
+    id: 9
     # Combined-source strategy per DEC-034: two co-primary "pure
     # pothole" sources, expected to stay under 3500 combined without
     # needing road-damage-detector's messier multi-class volume.
@@ -362,7 +360,7 @@ classes:
     cap: 4500
 
   trash_bins:
-    id: 11
+    id: 10
     primary:
       source: open_images
       native_class: "Waste container"
@@ -381,7 +379,7 @@ classes:
     cap: 4500
 
   stairs:
-    id: 13
+    id: 12
     primary:
       source: open_images
       native_class: "Stairs"
@@ -413,7 +411,7 @@ classes:
     cap: 10100
 
   bench:
-    id: 14
+    id: 13
     primary:
       source: open_images
       native_class: "Bench"

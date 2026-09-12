@@ -135,8 +135,20 @@ exdark:
     Cat: animals
     Chair: chairs
     Table: tables
-    # ExDark classes NOT in our schema (ignored):
-    # Boat, Bottle, Bus (covered by Open Images Vehicle)
+    Bus: vehicle
+    # ExDark classes NOT in our schema (ignored): Boat, Bottle, Cup
+    #
+    # Bus -> vehicle was added after the v1 pool was frozen (DEC-129).
+    # It was applied ADDITIVELY to the 330 ExDark images already in the
+    # pool (+413 boxes), NOT by re-running this converter. 240 further
+    # ExDark images carry Bus boxes but are not in the pool; admitting
+    # them would grow the image set, break the v1-vs-v2 controlled
+    # comparison, and force a ~3 h image re-upload.
+    #
+    # WARNING: re-running scripts/acquire/acquire_exdark.py with this
+    # mapping present WILL pull those 240 images into processed/exdark.
+    # To reproduce the pooled-only behaviour use
+    # scripts/preprocess/exdark_bus_additive.py instead.
 
 # ========================
 # Dataset Ninja Sources

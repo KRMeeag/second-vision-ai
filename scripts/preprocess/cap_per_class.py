@@ -169,7 +169,6 @@ CLASS_PRIORITY_SOURCES: dict[str, list[str]] = {
     "Person": ["exdark", "roboflow_revised_pedestrian_obstacle", "crowdhuman", "open_images"],
     "Vehicle": ["roboflow_dlsu_d_vehicle_type_detection", "exdark", "roboflow_revised_pedestrian_obstacle", "open_images"],
     "Motorcycle": ["roboflow_dlsu_d_vehicle_type_detection", "exdark", "open_images"],
-    "Elevator": ["roboflow_elevator_awvus"],
 }
 
 # Optional per-(class, source) instance sub-budget, for priority sources whose extreme

@@ -32,7 +32,13 @@ patience: 20   # Early stopping: halt if val metrics don't improve for 20
                # epochs. Not a DECISIONS.md entry yet — a conventional
                # starting point (~20% of epochs). Revisit in Phase 6 if
                # baseline runs stop too early or too late.
-imgsz: 640     # Standard, Hailo-compatible (README.md, PLAN.md)
+imgsz: 640     # Standard, Hailo-compatible (README.md, PLAN.md).
+               # NOT arbitrary and NOT a data limitation: the on-device budget is 640
+               # because monocular depth estimation runs CONCURRENTLY on the same
+               # Hailo-8, and a HEF compiles for one fixed input size, so train and
+               # deploy resolution must match. 61% of dataset/final/ is >=960px, so
+               # the detail exists and is deliberately not used. See DEC-124 Finding 5
+               # (both its 2026-09-09 blockquotes) before proposing a change.
 batch: 16      # PLAN.md baseline — lower if you hit GPU out-of-memory,
                # raise if GPU memory allows faster training.
 

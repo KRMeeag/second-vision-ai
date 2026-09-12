@@ -37,6 +37,8 @@ dataset/processed/
 dataset/curated/
 dataset/merged/
 dataset/final/
+dataset/final_v2a/
+dataset/final_v2b/
 dataset/backups/
 dataset/reports/
 dataset/bundle/
@@ -46,6 +48,7 @@ dataset/bundle/
 # Same reasoning as the *.pt rule above -- a stray `git add .` here would build a
 # commit that cannot be pushed and has to be unpicked from history.
 dataset/bundle.tar
+dataset/v2b_labels.tar.gz
 dataset/bundle.tar.*
 
 
