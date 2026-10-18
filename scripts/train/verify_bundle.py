@@ -133,8 +133,17 @@ def main() -> int:
         return 1
 
     print("\nPASS - bundle is intact and every manifest resolves.")
-    print("Next: python3 scripts/train/materialize_condition.py "
+    # Two different downstream flows, and suggesting the wrong one is expensive.
+    # v1/v2 materialise a condition by hardlinking images into their own tree.
+    # v3 does NOT: the MooseFS quota counts directory entries, so 43,170 hardlinks
+    # cost ~4 GiB per arm rather than the ~0 they would cost on a normal
+    # filesystem (DEC-142). v3 arms are symlink+txt roots laid out by
+    # setup_pod_v3.sh, so nothing here needs materialising.
+    print("\nNext, depending on which flow you are in:")
+    print(f"  v1/v2 : python3 scripts/train/materialize_condition.py "
           f"--bundle {bundle} --cap 4500")
+    print("  v3    : bash scripts/train/setup_pod_v3.sh   "
+          "(do NOT materialise -- entries cost quota, DEC-142)")
     return 0
 
 

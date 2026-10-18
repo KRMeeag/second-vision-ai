@@ -641,6 +641,15 @@ gate "bundle intact: digest matches, counts match, all three manifests resolve" 
 note "If that FAILS, the volume lost or corrupted images and the 5.1 GB bundle must"
 note "be re-uploaded — scripts/train/runpod_wizard.sh stages 4-8 do that, and it is"
 note "a ~2.2 h job. Do not train on a bundle that failed this."
+printf '\n'
+# verify_bundle.py ends by suggesting materialize_condition.py. That is correct
+# for the v1/v2 flow it was written for and WRONG here, so it is contradicted
+# right where the human just read it.
+warn "IGNORE the 'Next: materialize_condition.py' line that script just printed."
+say "That is the v1/v2 path. It hardlinks 43,170 images into a condition directory,"
+say "and on this MooseFS volume directory entries are NOT free — it would cost ~4 GiB"
+say "of a 50 GB quota for images that are already there (DEC-142)."
+say "The v3 arms are symlink+txt roots instead; stage 7 lays them out for nothing."
 pause "Press Enter to continue"
 fi
 
