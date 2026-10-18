@@ -200,6 +200,7 @@ REPO_URL="https://github.com/KRMeeag/second-vision-ai.git"
 STAGING="${REPO_ROOT}/dataset/staging"
 REMOTE_STAGING="/workspace/staging_v3"
 REPO_ON_POD="/workspace/second-vision-ai"
+REMOTE_PROJECT="/workspace/runs_v3"
 
 # Scratch for the check scripts the gates run. They are written to FILES rather
 # than passed as heredocs for a specific reason: a heredoc attached to `gate` is
@@ -255,15 +256,142 @@ gate() {
   done
 }
 
+# ── talking to a pod over a lossy path ────────────────────────────────────
+# RunPod's network is not reliable and the failure is not graceful. A euro-3
+# pod measured 36.7% ICMP loss on 2026-10-18 with a clean 1500-byte path MTU
+# and an idle, healthy pod at the far end: plain loss, not fragmentation and
+# not load. TCP survives it, SSH does not. A key-exchange packet that drops
+# leaves the client parked at "expecting SSH2_MSG_KEX_ECDH_REPLY" with no
+# application-level timeout to end it, which surfaces as the "Connection to
+# <ip> port <port> timed out" that looks like the pod is gone when it is not.
+#
+# ConnectTimeout does NOT cover this -- it bounds the TCP connect only, which
+# is why raising it never helped. What does:
+#   ConnectionAttempts   ssh re-sends a SYN that dropped, before giving up
+#   ServerAliveInterval  strands die in ~15 s instead of hanging for minutes
+#   retry on rc 255      ssh's own transport failures get another go
+# Measured on that path: ~60% of single attempts succeed, so 5 tries makes a
+# lost call a near-impossibility while adding nothing when the link is clean.
+SSH_OPTS=(
+  -o StrictHostKeyChecking=accept-new
+  -o ConnectTimeout=15
+  -o ConnectionAttempts=3
+  -o ServerAliveInterval=5
+  -o ServerAliveCountMax=3
+)
+SSH_TRIES="${SSH_TRIES:-5}"
+
+# _ssh_retry tries -- cmd... — retry ONLY on ssh transport failure (rc 255).
+# The distinction matters: a remote command that exits non-zero has actually
+# run and its status is a real answer, so retrying it would re-run work and
+# could turn a clean failure into a mess. ssh reserves 255 for its own errors,
+# so that is the only code retried here. (A remote command exiting 255 itself
+# is indistinguishable and would be retried -- rare, and harmless for the
+# read-only and idempotent commands this wizard sends.)
+_ssh_retry() {
+  local tries="$1"; shift
+  local n=1 rc=0
+  while :; do
+    "$@" && return 0
+    rc=$?
+    [[ $rc -ne 255 ]] && return "$rc"
+    [[ $n -ge $tries ]] && return "$rc"
+    printf '  %sssh transport failed (%s/%s) — retrying in %ss%s\n' \
+      "$DIM" "$n" "$tries" "$((n * 3))" "$RESET" >&2
+    sleep "$((n * 3))"
+    n=$((n + 1))
+  done
+}
+
 # podssh cmd... — run a command on the GPU pod over the direct TCP SSH.
 # A function, not a POD="-p ... -i ..." variable: in bash an unquoted $POD
 # word-splits into separate arguments, but zsh passes it as ONE argument and ssh
 # then reads everything after -p as the port ("Bad port"). "$@" is clean in both.
 podssh() {
-  ssh -p "$GPU_POD_PORT" -i "$SSH_KEY" \
-      -o StrictHostKeyChecking=accept-new -o ConnectTimeout=20 \
-      -o ServerAliveInterval=15 -o ServerAliveCountMax=4 \
-      root@"$GPU_POD_HOST" "$@"
+  _ssh_retry "$SSH_TRIES" \
+    ssh -p "$GPU_POD_PORT" -i "$SSH_KEY" "${SSH_OPTS[@]}" \
+        root@"$GPU_POD_HOST" "$@"
+}
+
+# podsync SRC... DEST — rsync over the same path, resumable. Either side may be
+# root@host:path. Replaces scp everywhere in this wizard because scp restarts a
+# broken transfer from byte zero, and on a 37%-loss link a retried scp can lose
+# more work than it completes.
+#
+# --partial-dir (not --append-verify) is the safe resume: rsync keeps the partial
+# aside and uses it as a delta basis on the next attempt, re-sending only the
+# blocks that differ. --append-verify would be faster but assumes the partial is
+# a prefix of the source and SKIPS any file whose destination size already
+# matches -- which would silently decline to re-pull a result file that changed
+# without changing length.
+podsync() {
+  local n=1
+  while :; do
+    rsync -az --partial --partial-dir=.rsync-partial --timeout=60 \
+          -e "ssh -p $GPU_POD_PORT -i $SSH_KEY ${SSH_OPTS[*]}" "$@" && return 0
+    [[ $n -ge $SSH_TRIES ]] && return 1
+    printf '  %stransfer interrupted (%s/%s) — resuming in %ss%s\n' \
+      "$DIM" "$n" "$SSH_TRIES" "$((n * 5))" "$RESET" >&2
+    sleep "$((n * 5))"
+    n=$((n + 1))
+  done
+}
+
+# _wait_for_arm — block until $ARM finishes, then return 0. Returns 1 if the
+# driver died without producing a marker, 2 if the cap elapsed.
+#
+# The whole point is that a poll which cannot reach the pod proves nothing: on
+# this link an unreachable pod is the expected case, not evidence about the run.
+# So only two things count as signal -- the arm's .done marker, and the driver
+# being absent. And "driver absent, no marker" must be seen 3 polls running
+# before it is believed, because run_v3.sh is legitimately between phases (and
+# between arms) for stretches with no training process alive.
+_wait_for_arm() {
+  local interval="${POLL_SECONDS:-300}" cap="${WAIT_HOURS:-14}"
+  local deadline=$(( SECONDS + cap * 3600 )) gone=0 out last=""
+  printf '\n'
+  note "polling every $((interval / 60)) min — Ctrl-C is safe, resume with START_AT=9 $0"
+  while :; do
+    out=$(podssh "test -f $REMOTE_PROJECT/$ARM.done && echo MARKER; \
+                  pgrep -f 'train_one_arm.py|scripts/train/train.py' >/dev/null && echo ALIVE; \
+                  tail -1 $REMOTE_PROJECT/STATUS 2>/dev/null" 2>/dev/null) || out="UNREACHABLE"
+
+    if [[ "$out" == *MARKER* ]]; then
+      printf '\n  %s✓ %s finished — marker present on the pod%s\n' \
+        "$GREEN" "$ARM" "$RESET"
+      return 0
+    fi
+
+    if [[ "$out" == "UNREACHABLE" ]]; then
+      gone=0                         # no information, so no conclusion
+    elif [[ "$out" == *ALIVE* ]]; then
+      gone=0
+    else
+      gone=$((gone + 1))
+      if [[ $gone -ge 3 ]]; then
+        printf '\n'
+        warn "no training process and no $ARM.done marker, 3 polls running."
+        warn "The driver has stopped. Read the log before spending more:"
+        note "  podssh \"tail -40 $REMOTE_PROJECT/logs/driver.log\""
+        return 1
+      fi
+    fi
+
+    # Only reprint when the status line actually moved, so an overnight wait
+    # leaves a readable trail instead of hundreds of identical lines.
+    local tail_line="${out//MARKER/}"; tail_line="${tail_line//ALIVE/}"
+    tail_line="$(printf '%s' "$tail_line" | tr -d '\n' | cut -c1-70)"
+    if [[ "$tail_line" != "$last" ]]; then
+      printf '  %s[%s] %s%s\n' "$DIM" "$(date +%H:%M)" "${tail_line:-waiting}" "$RESET"
+      last="$tail_line"
+    fi
+
+    if [[ $SECONDS -ge $deadline ]]; then
+      printf '\n'; warn "gave up after ${cap} h — the pod is still up and still charging."
+      return 2
+    fi
+    sleep "$interval"
+  done
 }
 
 RETRIEVED_OK=0   # set to 1 only when results are verified on this Mac; gates the terminate
@@ -436,9 +564,8 @@ printf '\n'
 podssh "mkdir -p $REMOTE_STAGING" || warn "could not create $REMOTE_STAGING"
 for a in "${ARMS[@]}"; do
   say "uploading ${a}.tar.gz ..."
-  scp -P "$GPU_POD_PORT" -i "$SSH_KEY" -o StrictHostKeyChecking=accept-new \
-      "$STAGING/${a}.tar.gz" "root@${GPU_POD_HOST}:${REMOTE_STAGING}/" \
-    || warn "scp of ${a}.tar.gz failed — the gate below will catch it"
+  podsync "$STAGING/${a}.tar.gz" "root@${GPU_POD_HOST}:${REMOTE_STAGING}/" \
+    || warn "upload of ${a}.tar.gz failed — the gate below will catch it"
 done
 printf '\n'
 # Compare the sha256 computed on BOTH sides. A truncated transfer produces a
@@ -449,9 +576,21 @@ cat > "$WIZ_TMP/check_upload.sh" <<'SH'
 staging="$1"; remote="$2"; key="$3"; host="$4"; port="$5"; shift 5
 for a in "$@"; do
   L=$(shasum -a 256 "$staging/${a}.tar.gz" | awk '{print $1}')
-  R=$(ssh -p "$port" -i "$key" -o StrictHostKeyChecking=accept-new \
-      -o ConnectTimeout=20 "root@${host}" \
-      "sha256sum ${remote}/${a}.tar.gz 2>/dev/null | cut -d' ' -f1")
+  # Retried, and for the same reason as podssh: on a lossy path an unreachable
+  # pod returns an empty $R, which would read as a checksum mismatch and send
+  # the human chasing a corrupt upload that is actually fine.
+  R=""
+  for _try in 1 2 3 4 5; do
+    R=$(ssh -p "$port" -i "$key" -o StrictHostKeyChecking=accept-new \
+        -o ConnectTimeout=15 -o ConnectionAttempts=3 \
+        -o ServerAliveInterval=5 -o ServerAliveCountMax=3 "root@${host}" \
+        "sha256sum ${remote}/${a}.tar.gz 2>/dev/null | cut -d' ' -f1") && break
+    sleep $((_try * 3))
+  done
+  if [ -z "$R" ]; then
+    printf '    %s: could not reach the pod to verify after 5 tries\n' "$a"
+    exit 1
+  fi
   if [ "$L" != "$R" ]; then
     printf '    %s: MISMATCH  local=%s  pod=%s\n' "$a" "${L:0:16}" "${R:0:16}"
     exit 1
@@ -548,12 +687,35 @@ printf '    ssh -p %s -i %s root@%s "tail -f /workspace/runs_v3/logs/driver.log"
 printf '\n'
 note "Or source scripts/train/podenv.sh and use:  podssh \"...\""
 printf '\n'
-say "The next two stages retrieve the results and terminate the pod. Leave this"
-say "wizard sitting here until the run finishes, or Ctrl-C and come back with:"
+say "The next two stages retrieve the results and terminate the pod."
 printf '\n'
-printf '    START_AT=9 %s\n' "$0"
+say "This wizard can wait for the run itself rather than you watching it. It"
+say "polls the marker file every 5 minutes and tolerates the link dropping —"
+say "an unreachable poll is a lost packet, not a lost run, so it keeps waiting."
 printf '\n'
-pause "Press Enter when the run has finished"
+note "  POLL_SECONDS=300  how often to poll      WAIT_HOURS=14  when to give up"
+printf '\n'
+if confirm "Wait here until ${ARM} finishes, then continue automatically?"; then
+  _wait_for_arm; _wait_rc=$?
+  if [[ $_wait_rc -eq 1 ]]; then
+    warn "Not continuing to retrieval — the run did not finish."
+    say "The pod is left up on purpose so you can read the log. Resume with:"
+    printf '\n    START_AT=9 %s\n\n' "$0"
+    pause "Press Enter to exit"
+    exit 1
+  elif [[ $_wait_rc -eq 2 ]]; then
+    say "Resume whenever you like with:"
+    printf '\n    START_AT=9 %s\n\n' "$0"
+    pause "Press Enter to exit"
+    exit 1
+  fi
+else
+  say "Fine — come back when it is done with:"
+  printf '\n'
+  printf '    START_AT=9 %s\n' "$0"
+  printf '\n'
+  pause "Press Enter when the run has finished"
+fi
 fi
 
 # ── 9 ─────────────────────────────────────────────────────────────────────
@@ -573,14 +735,12 @@ if ! confirm "Has the run finished? (No = leave the pod up and come back)"; then
 fi
 printf '\n'
 mkdir -p "$REPO_ROOT/runs"
-say "Pulling /workspace/runs_v3 (markers, logs, result JSONs)..."
-scp -r -P "$GPU_POD_PORT" -i "$SSH_KEY" -o StrictHostKeyChecking=accept-new \
-    "root@${GPU_POD_HOST}:/workspace/runs_v3" "$REPO_ROOT/runs/" \
-  || warn "scp of runs_v3 failed"
+say "Pulling $REMOTE_PROJECT (markers, logs, result JSONs)..."
+podsync -r "root@${GPU_POD_HOST}:${REMOTE_PROJECT}" "$REPO_ROOT/runs/" \
+  || warn "pull of runs_v3 failed"
 say "Pulling runs/detect (weights, results.csv, args.yaml, provenance, eval CSV)..."
-scp -r -P "$GPU_POD_PORT" -i "$SSH_KEY" -o StrictHostKeyChecking=accept-new \
-    "root@${GPU_POD_HOST}:${REPO_ON_POD}/runs/detect" "$REPO_ROOT/runs/" \
-  || warn "scp of runs/detect failed"
+podsync -r "root@${GPU_POD_HOST}:${REPO_ON_POD}/runs/detect" "$REPO_ROOT/runs/" \
+  || warn "pull of runs/detect failed"
 printf '\n'
 # Two locations on purpose, and BOTH must be here: runs_v3 holds the result JSON
 # the comparison reads, runs/detect holds the weights and the per-class eval the
