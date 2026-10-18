@@ -403,17 +403,33 @@ podsync() {
 # The whole point is that a poll which cannot reach the pod proves nothing: on
 # this link an unreachable pod is the expected case, not evidence about the run.
 # So only two things count as signal -- the arm's .done marker, and the driver
-# being absent. And "driver absent, no marker" must be seen 3 polls running
-# before it is believed, because run_v3.sh is legitimately between phases (and
-# between arms) for stretches with no training process alive.
+# being absent. "Driver absent, no marker" is still required 3 polls running
+# before it is believed, but no longer because of between-phase gaps: driver.pid
+# is held for the driver's whole life, phases and arms included, so a gap is not
+# a thing any more. The 3-poll tolerance now covers only the case where the pod
+# answers but answers wrongly -- a half-open connection, or the volume briefly
+# unreadable so the pid file cannot be stat'ed.
 _wait_for_arm() {
   local interval="${POLL_SECONDS:-300}" cap="${WAIT_HOURS:-14}"
   local deadline=$(( SECONDS + cap * 3600 )) gone=0 out last=""
   printf '\n'
   note "polling every $((interval / 60)) min — Ctrl-C is safe, resume with START_AT=9 $0"
   while :; do
+    # Liveness comes from `run_v3.sh --alive`, which is the driver's OWN check
+    # against the pid file it writes -- not from a pattern evaluated here.
+    #
+    # This used `pgrep -f 'train_one_arm.py|scripts/train/train.py'`. That pattern
+    # is sent to the pod as part of an ssh command STRING, and sshd runs the string
+    # via `bash -c '<string>'` -- so the enclosing shell's own command line
+    # contains the pattern and pgrep, which matches full command lines, matched
+    # itself. The poll reported ALIVE on every tick, including long after the
+    # driver had died, so the dead-driver branch below could never fire and a
+    # failed run waited out the full WAIT_HOURS cap instead of saying so.
+    # run_v3.sh's own --status block had already rejected pattern matching for
+    # this exact reason and solved it with driver.pid; this calls that check
+    # instead of re-deriving it on this side.
     out=$(podssh "test -f $REMOTE_PROJECT/$ARM.done && echo MARKER; \
-                  pgrep -f 'train_one_arm.py|scripts/train/train.py' >/dev/null && echo ALIVE; \
+                  bash $REPO_ON_POD/scripts/train/run_v3.sh --alive && echo ALIVE; \
                   tail -1 $REMOTE_PROJECT/STATUS 2>/dev/null" 2>/dev/null) || out="UNREACHABLE"
 
     if [[ "$out" == *MARKER* ]]; then
@@ -764,13 +780,22 @@ fi
 fi
 
 # ── 7 ─────────────────────────────────────────────────────────────────────
-stage "GATE — pod setup (the tried-and-tested stage 12, scripted)"
+stage "GATE — setup, pre-flight and the smoke run, all in the foreground"
 if _at; then
-say "This is scripts/train/runpod_wizard.sh stage 12, lifted into a script so it"
-say "can run unattended and be re-run after a pod restart. It checks the volume,"
-say "installs requirements-train.txt, puts YOLO_CONFIG_DIR on the volume, pins"
-say "runs_dir there, gates on CUDA + ultralytics 8.4.118, extracts all three arms,"
-say "makes the images symlink, and moves any stale labels.cache aside."
+say "Setup is scripts/train/runpod_wizard.sh stage 12, lifted into a script. It"
+say "checks the volume, installs requirements-train.txt, puts YOLO_CONFIG_DIR on"
+say "the volume, pins runs_dir there, gates on CUDA + ultralytics 8.4.118, extracts"
+say "all three arms, makes the images symlink, and moves stale labels.cache aside."
+printf '\n'
+say "Pre-flight and the smoke run follow, HERE, as part of this gate — not inside"
+say "the detached driver. They are the two checks that decide whether three"
+say "GPU-hours are worth spending, and the proven v1/v2 wizard gated on its smoke"
+say "run for exactly that reason. Run detached, their failure lands in a log that"
+say "nobody is reading yet and surfaces only as a poll that stops advancing."
+printf '\n'
+note "  setup       ~2 min   volume, pip, CUDA, arm layout, stale caches"
+note "  pre-flight  ~4 min   every staged arm verified; full label scan"
+note "  smoke       ~4 min   2 epochs on 2%, then a real test-split eval"
 printf '\n'
 note "A surviving labels.cache is a correctness bug, not a stale file: ultralytics"
 note "keys it on the image+label PATH LIST, not contents, so re-staged labels under"
@@ -784,28 +809,59 @@ say "Make sure the pod has the current code..."
 gate "repo present on the pod and up to date" podssh \
   "{ [ -d $REPO_ON_POD/.git ] && git -C $REPO_ON_POD pull --ff-only; } || git clone $REPO_URL $REPO_ON_POD"
 printf '\n'
-gate "setup_pod_v3.sh passes every check" podssh \
+# `run_v3.sh --gates-only` runs setup as its phase 0, then pre-flight, then the
+# smoke run, and STOPS before the first GPU-hour without detaching. Each phase
+# drops its marker, so stage 8 skips both and this gate is cheap to re-check.
+#
+# That marker behaviour is also what makes a dropped link harmless here: this is a
+# ~10 minute foreground command on a path that loses packets, and pressing Enter
+# to re-check resumes from the last phase that finished rather than restarting.
+#
+# Setup runs ONCE, inside this. It used to run here AND again as run_v3.sh's
+# phase 0 at launch -- idempotent, but two minutes spent twice for no reason.
+gate "setup, pre-flight and the smoke run all pass" podssh \
   "cd $REPO_ON_POD && COMET_API_KEY='${COMET_API_KEY:-}' COMET_PROJECT_NAME='${COMET_PROJECT_NAME:-}' \
-   bash scripts/train/setup_pod_v3.sh"
+   bash scripts/train/run_v3.sh --gates-only $ARM"
+printf '\n'
+step "In that output, confirm 'schema check: data.yaml agrees with classes.yaml at nc=13'"
+step "and 'logger comet: ARMED' (or accept TensorBoard-only logging)."
+note "Multiply the smoke run's epoch time by ~50 for a full epoch — it trained on 2%."
+pause "Press Enter when you have read the smoke output"
 fi
 
 # ── 8 ─────────────────────────────────────────────────────────────────────
-stage "Launch — ${ARM_LABEL}, detached, ~3.2 h"
+stage "Launch — ${ARM_LABEL}, detached, ~3.0 h"
 if _at; then
-say "run_v3.sh runs pre-flight and a smoke run before it spends a single real"
-say "GPU-hour, then re-execs itself under setsid and returns."
+say "Everything that can fail cheaply has already failed or passed in stage 7."
+say "run_v3.sh re-execs itself under setsid and returns, so a dropped connection"
+say "cannot SIGHUP it. All output goes to the volume, never the container disk."
 printf '\n'
-note "  pre-flight  ~4 min   every staged arm verified; full label scan"
-note "  smoke       ~4 min   2 epochs on 2%, then a real test-split eval"
+note "  pre-flight  SKIPPED  marker written in stage 7"
+note "  smoke       SKIPPED  marker written in stage 7"
 note "  baseline    ~2 min   v2 weights on the new test labels, remapped by name"
 note "  ${ARM}         ~3.0 h   ${ARM_LABEL}, ${ARM_BOXES} train boxes"
 printf '\n'
-warn "If pre-flight or the smoke run fails, it STOPS and nothing is spent. That is"
-warn "the design: the smoke run exercises the same path that then runs for 3 hours."
+note "The baseline is a reference point, not a gate: if it fails the driver logs it"
+note "and trains anyway, because the arms stay comparable to each other regardless."
 printf '\n'
 pause "Press Enter to launch"
+# --no-setup: stage 7 already ran it. Pre-flight and smoke are skipped by their
+# own markers, so this goes straight to the baseline and then the arm.
+_launch_rc=0
 podssh "cd $REPO_ON_POD && COMET_API_KEY='${COMET_API_KEY:-}' COMET_PROJECT_NAME='${COMET_PROJECT_NAME:-}' \
-        bash scripts/train/run_v3.sh $ARM" || warn "launch returned non-zero — read the output above"
+        bash scripts/train/run_v3.sh --no-setup $ARM" || _launch_rc=$?
+# run_v3.sh now PROVES the detached child came up before it prints "Safe to
+# disconnect", so a non-zero exit here means nothing is training. Stop on it
+# rather than falling through to the poller, which would otherwise spend 15
+# minutes rediscovering the same fact.
+if [[ $_launch_rc -ne 0 ]]; then
+  printf '\n'
+  warn "LAUNCH FAILED (rc=$_launch_rc) — nothing is training. Read the output above."
+  say "No GPU time has been spent. Fix the cause, then re-run this stage:"
+  printf '\n    START_AT=8 %s\n\n' "$0"
+  pause "Press Enter to exit"
+  exit 1
+fi
 printf '\n'
 say "Watch it from any terminal — source podenv.sh first, so the commands retry"
 say "instead of hanging when the link drops a packet:"
@@ -829,7 +885,12 @@ printf '\n'
 note "  POLL_SECONDS=300  how often to poll      WAIT_HOURS=14  when to give up"
 printf '\n'
 if confirm "Wait here until ${ARM} finishes, then continue automatically?"; then
-  _wait_for_arm; _wait_rc=$?
+  # `_wait_for_arm; _wait_rc=$?` looks equivalent and is not: under `set -e` a
+  # function returning non-zero as a standalone command exits the script, so the
+  # wizard died before reading _wait_rc -- losing the resume instructions on the
+  # one path that most needs them. `|| _wait_rc=$?` suppresses set -e.
+  _wait_rc=0
+  _wait_for_arm || _wait_rc=$?
   if [[ $_wait_rc -eq 1 ]]; then
     warn "Not continuing to retrieval — the run did not finish."
     say "The pod is left up on purpose so you can read the log. Resume with:"

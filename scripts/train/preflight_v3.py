@@ -267,6 +267,9 @@ for arm in arm_ok:
     issues = Counter()
     first_issue = {}
     cls_hist = Counter()
+    edge_rounding = 0
+    first_edge = {}
+    no_newline = 0
     for split in ("train", "val", "test"):
         p = ROOT / arm / f"{split}.txt"
         stems = [Path(l).name.rsplit(".", 1)[0]
@@ -289,9 +292,13 @@ for arm in arm_ok:
             h.update(b)
             if scan is not None and stem not in scan:
                 continue
+            # Cosmetic only -- ultralytics reads labels with splitlines() and is
+            # indifferent to a final newline. Counted, never fatal: the audit of
+            # this script found a hard [0,1] coord bound blocking a run the
+            # trainer would have accepted, and this was the same mistake waiting
+            # to happen. A gate must not be stricter than what it guards.
             if b and not b.endswith(b"\n"):
-                issues["no trailing newline"] += 1
-                first_issue.setdefault("no trailing newline", str(f))
+                no_newline += 1
             for ln, line in enumerate(b.decode("utf-8", "replace").splitlines(), 1):
                 if not line.strip():
                     continue
@@ -311,9 +318,28 @@ for arm in arm_ok:
                 if not 0 <= c < EXPECTED_NC:
                     issues[f"class id out of range (0..{EXPECTED_NC-1})"] += 1
                     first_issue.setdefault("class id out of range", f"{f}:{ln} id={c}")
-                if any(not 0.0 <= v <= 1.0 for v in xywh):
-                    issues["coord outside [0,1]"] += 1
-                    first_issue.setdefault("coord outside [0,1]", f"{f}:{ln} {xywh}")
+                # MATCH ULTRALYTICS' OWN TOLERANCE, not a stricter ideal. 8.4.118
+                # data/utils.py verify_image_label asserts:
+                #     points.max() <= 1.01      (coords)
+                #     lb.min()     >= -0.01     (coords AND class)
+                # i.e. a +-0.01 band, because Roboflow exports routinely normalize
+                # a box drawn flush to the image edge to 1.0000x. v2b carries 18
+                # such boxes and v1 and v2 BOTH TRAINED WITH THEM; v3 has 6, the
+                # difference being Pole boxes dropped with the class.
+                #
+                # An earlier version of this check used a hard [0,1] bound and
+                # FAILED pre-flight on a 0.003 overshoot -- a gate stricter than
+                # the trainer it guards, blocking a run on data ultralytics
+                # accepts without comment (verified: the real loader scanned all
+                # 43,170 labels with "0 corrupt").
+                if any(v > 1.01 or v < -0.01 for v in xywh):
+                    issues["coord outside ultralytics' +-0.01 tolerance"] += 1
+                    first_issue.setdefault("coord outside ultralytics' +-0.01 tolerance",
+                                           f"{f}:{ln} {xywh}")
+                elif any(not 0.0 <= v <= 1.0 for v in xywh):
+                    # Inside the tolerance: reported, never fatal.
+                    edge_rounding += 1
+                    first_edge.setdefault("edge", f"{f}:{ln} {xywh}")
                 if xywh[2] <= 0 or xywh[3] <= 0:
                     issues["zero or negative w/h"] += 1
                     first_issue.setdefault("zero or negative w/h", f"{f}:{ln} {xywh}")
@@ -331,6 +357,14 @@ for arm in arm_ok:
                + (" (train sampled, --quick)" if QUICK else "")
                + f"; class ids {min(cls_hist)}..{max(cls_hist)}, "
                  f"{sum(cls_hist.values()):,} boxes scanned")
+        if no_newline:
+            print(f"  INFO  {arm}: {no_newline} label file(s) lack a trailing newline "
+                  f"(cosmetic; ultralytics uses splitlines())", flush=True)
+        if edge_rounding:
+            print(f"  INFO  {arm}: {edge_rounding} box(es) overshoot the image edge by "
+                  f"<=0.01 (Roboflow rounding; inside ultralytics' tolerance, v2 "
+                  f"trained with 18 such boxes). first: {first_edge.get('edge')}",
+                  flush=True)
 
 for split in ("val", "test"):
     vals = {a: digests[a][split] for a in arm_ok if a in digests}

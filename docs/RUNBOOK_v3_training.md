@@ -22,7 +22,9 @@ scripts/train/runpod_v3_wizard.sh
 ```
 
 Ten stages, each one screen, with gates that refuse to advance until the check
-passes. It opens every RunPod and Comet URL, captures the pod IP and your Comet key
+passes. Stage 7 runs setup, pre-flight and the smoke run **in the foreground** as
+one gate, so you watch them pass; stage 8 then launches only the phases that cost
+GPU time. It opens every RunPod and Comet URL, captures the pod IP and your Comet key
 into `.env.runpod`, uploads and checksum-verifies all three arms, runs
 `setup_pod_v3.sh` and launches the run — then, after training, pulls the results down
 and **refuses to let you terminate the pod until they are verified on this laptop**.
@@ -104,17 +106,36 @@ uncommitted does not exist there.
 ssh -p <port> -i ~/.ssh/id_ed25519 root@<host>
 export COMET_API_KEY=...            # from .env.runpod on your Mac
 export COMET_PROJECT_NAME=...
-/workspace/second-vision-ai/scripts/train/run_v3.sh
+
+# 1. the free checks, in the FOREGROUND -- watch these pass or fail
+/workspace/second-vision-ai/scripts/train/run_v3.sh --gates-only v3p
+
+# 2. the paid run, detached. Close the laptop.
+/workspace/second-vision-ai/scripts/train/run_v3.sh --no-setup v3p
 ```
 
-That is it. The driver runs setup in the foreground so you see it pass or fail, then
-prints `Detached. Safe to disconnect.` and returns. **Close the laptop.**
+**Two commands, not one, and the split is the point.** Setup, pre-flight and the
+smoke run decide whether three GPU-hours are worth spending; run inside the detached
+driver their failure lands in a log nobody is reading yet. `--gates-only` runs all
+three in the foreground and stops before the first real GPU-hour. Each drops its
+`.done` marker, so the second command skips them and goes straight to the baseline.
+
+The second command prints `Detached. Safe to disconnect.` — and only after it has
+**proved** the detached child is actually running. If the launch failed (no `setsid`,
+an unwritable volume, a syntax error) it prints `LAUNCH FAILED` with the tail of the
+driver log and exits non-zero instead, because "Safe to disconnect" over a pod doing
+nothing is the worst thing this script could say.
+
+`run_v3.sh v3p` on its own still does the whole sequence end to end, gates included —
+it just detaches before the gates run, so prefer the split form when you are at the
+keyboard anyway.
 
 | phase | what | time | on failure |
 |---|---|---|---|
 | 0 setup | `setup_pod_v3.sh` — volume check, `requirements-train.txt`, `YOLO_CONFIG_DIR`, pinned `runs_dir`, CUDA + version gate, arms laid out, stale caches moved aside | ~2 min | stops, foreground, nothing detached |
 | 1 pre-flight | 12 sections, **every staged arm** verified; full label scan | ~4 min | stops, nothing spent |
 | 2 smoke | `train.py --smoke` — 2 epochs on 2%, then a real test-split eval | ~4 min | **stops** — the same path runs for 3 h next |
+| | *phases 0–2 are what `--gates-only` runs, in the foreground* | *~10 min* | *nothing detached, nothing spent* |
 | 3 baseline | v2 weights scored on the new test labels, remapped into v2's schema | ~2 min | continues (reference point, not a gate) |
 | 4 `v3p` | **PERMISSIVE** — 118,279 train boxes | ~3.0 h | logs and stops |
 | 5 compare | summary table, and what is still untrained | instant | — |
@@ -164,6 +185,14 @@ disk and takes pip and `~/.bashrc` with it, is the intended way to use it.
 
 Phases done, the results table so far, whether a training process is alive, and GPU
 utilisation. Safe at any time — it only reads.
+
+Liveness comes from a **pid file** the driver writes, not from a process-name
+pattern. `run_v3.sh --alive` exposes the same check as a bare exit code (0 alive,
+1 not) for anything polling from off-pod, which is what the wizard uses. A pattern
+is wrong here for a specific reason: `pgrep -f` matches full command lines, so a
+pattern sent to the pod inside an SSH command string is carried in the command line
+of the shell running it and **matches itself** — reporting a run alive forever,
+including long after it died.
 
 ```bash
 tail -f /workspace/runs_v3/logs/driver.log   # the whole run

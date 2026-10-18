@@ -29,8 +29,16 @@
 #   ./run_v3.sh v3s             # strict later, if Comet says it is worth it
 #   ./run_v3.sh v3p v3l v3s     # all three in one go (~9.5 h)
 #   ./run_v3.sh --status        # print progress and exit (safe any time)
+#   ./run_v3.sh --alive         # exit 0 if the detached driver is running, else 1
 #   ./run_v3.sh --setup-only    # just run the pod setup, in the foreground
+#   ./run_v3.sh --gates-only    # setup + preflight + smoke in the FOREGROUND, then stop
 #   ./run_v3.sh --no-smoke      # skip the smoke run (only if one already passed)
+#
+# --gates-only EXISTS SO A HUMAN WATCHES THE GATES FAIL. Pre-flight and the smoke
+# run are the two checks that decide whether three GPU-hours are worth spending,
+# and when they run inside the detached driver their failure lands in a log that
+# nobody is reading yet. The wizard runs them with this flag as a gate it cannot
+# advance past, then launches the real run, which skips both via their markers.
 #
 set -uo pipefail
 
@@ -47,13 +55,16 @@ say() { printf '%s  %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" | tee -a "$STATU
 
 DO_SETUP=1
 DO_SMOKE=1
+GATES_ONLY=0
 POSITIONAL=()
 for a in "$@"; do
     case "$a" in
         --no-setup)   DO_SETUP=0 ;;
         --no-smoke)   DO_SMOKE=0 ;;
         --setup-only) DO_SETUP=2 ;;
+        --gates-only) GATES_ONLY=1 ;;
         --status)     POSITIONAL=("--status") ;;
+        --alive)      POSITIONAL=("--alive") ;;
         -*)           echo "unknown flag: $a" >&2; exit 2 ;;
         *)            POSITIONAL+=("$a") ;;
     esac
@@ -111,6 +122,34 @@ if [ "${POSITIONAL[0]:-}" = "--status" ]; then
     exit 0
 fi
 
+# ---- --alive: liveness as an EXIT CODE, for a remote poller --------------------
+# ONE implementation of this check, in the file that writes the pid, consumed by
+# status code. The wizard polls this while it waits for an arm.
+#
+# It is a flag rather than something the wizard asks the pod directly because
+# reimplementing it on the far side is what put a `pgrep -f` self-match in the
+# wizard: pgrep matches FULL COMMAND LINES, and an ssh command string containing
+# the pattern is itself carried in the cmdline of the `bash -c` that sshd runs to
+# execute it -- so the poll matched its own enclosing shell and reported ALIVE
+# forever, including long after the driver had died. Parsing --status output would
+# be no better: that is a scraping contract across a process boundary.
+if [ "${POSITIONAL[0]:-}" = "--alive" ]; then
+    [ -f "$PROJECT/driver.pid" ] || exit 1
+    dpid=$(tr -d '[:space:]' < "$PROJECT/driver.pid" 2>/dev/null)
+    [ -n "$dpid" ] || exit 1
+    kill -0 "$dpid" 2>/dev/null || exit 1
+    # Same recycling guard as --status, but applied ONLY where it can actually be
+    # evaluated. On the pod (Linux) /proc/<pid>/cmdline is there. Anywhere it is
+    # not, an unreadable cmdline must not be reported as "dead": that would tell
+    # the wizard's poller a healthy three-hour run had stopped, and it would
+    # abandon the wait on the strength of a missing file.
+    if [ -r "/proc/$dpid/cmdline" ]; then
+        dcmd=$(tr '\0' ' ' < "/proc/$dpid/cmdline")
+        case "$dcmd" in *run_v3*) exit 0 ;; *) exit 1 ;; esac
+    fi
+    exit 0
+fi
+
 # ---- phase 0: pod setup, in the FOREGROUND -------------------------------------
 # Deliberately not detached: a failure here means nothing can work, and you want to
 # see it on your terminal rather than find it in a log after walking away. It is
@@ -133,8 +172,16 @@ if [ "${V3_DETACHED:-}" != "1" ] && [ "$DO_SETUP" -ne 0 ]; then
 fi
 
 # ---- re-exec detached ----------------------------------------------------------
-if [ "${V3_DETACHED:-}" != "1" ]; then
+# Not in --gates-only: the entire point of that mode is that the human is still
+# sitting there when pre-flight or the smoke run fails.
+if [ "${V3_DETACHED:-}" != "1" ] && [ "$GATES_ONLY" -eq 0 ]; then
     export V3_DETACHED=1
+    # Line count BEFORE this launch writes anything, so the completion check below
+    # reads only the lines THIS launch produced. STATUS is appended to across runs,
+    # so grepping it wholesale would let a previous run's "complete" line mask a
+    # launch that just failed.
+    _status_before=$( { wc -l < "$STATUS"; } 2>/dev/null | tr -d ' ' )
+    [ -n "$_status_before" ] || _status_before=0
     say "launching detached; follow with: tail -f $LOGS/driver.log"
     # NOT `$!`. setsid FORKS when it is already a process-group leader -- which
     # is exactly the case for a background job under job control -- so `$!` is the
@@ -142,7 +189,23 @@ if [ "${V3_DETACHED:-}" != "1" ]; then
     # the driver as dead one second after launch. The detached child records its
     # own $$ instead (below), which is correct however setsid behaves.
     setsid nohup "$0" --no-setup "$@" >>"$LOGS/driver.log" 2>&1 </dev/null &
-    sleep 1
+    sleep 2
+    # PROVE THE CHILD IS UP BEFORE CLAIMING IT. The detached driver writes
+    # driver.pid as its first act, so if --alive says no and the run has not
+    # simply finished already, the launch failed -- `setsid` absent, an
+    # unwritable volume, a syntax error -- and printing "Safe to disconnect"
+    # there sends you away from a pod that is doing nothing at all. Exit codes
+    # lie (DEC-145): validate the content, not the status of the launch.
+    # Two ways to be fine: the driver is alive, or it legitimately finished
+    # inside the sleep -- which happens when every phase was already marked done.
+    if ! "$0" --alive >/dev/null 2>&1 \
+       && ! tail -n +"$((_status_before + 1))" "$STATUS" 2>/dev/null \
+            | grep -q "v3 run complete"; then
+        echo
+        echo "LAUNCH FAILED -- nothing is running. Last lines of the driver log:"
+        tail -20 "$LOGS/driver.log" 2>/dev/null | sed 's/^/    /'
+        exit 1
+    fi
     echo
     echo "Detached. Safe to disconnect."
     echo "  progress : $0 --status"
@@ -155,13 +218,21 @@ fi
 # a failed smoke run -- so a stopped run never reports as alive. This must not be
 # set in the launcher: that process exits a second after detaching and would
 # delete the file it had just written.
-printf '%s\n' "$$" > "$PROJECT/driver.pid"
-trap 'rm -f "$PROJECT/driver.pid"' EXIT
+# In --gates-only we are a foreground helper, not the driver, so we do not claim
+# the pid file -- otherwise --alive would answer for the gates rather than the run.
+if [ "$GATES_ONLY" -eq 0 ]; then
+    printf '%s\n' "$$" > "$PROJECT/driver.pid"
+    trap 'rm -f "$PROJECT/driver.pid"' EXIT
+fi
 
 ARMS=("${POSITIONAL[@]}")
 [ ${#ARMS[@]} -eq 0 ] && ARMS=(v3p)
 
-say "=== v3 run starting: arms = ${ARMS[*]} ==="
+if [ "$GATES_ONLY" -eq 1 ]; then
+    say "=== v3 GATES ONLY (foreground): pre-flight + smoke for ${ARMS[*]} ==="
+else
+    say "=== v3 run starting: arms = ${ARMS[*]} ==="
+fi
 
 # ---- phase 1: pre-flight -------------------------------------------------------
 # Every check corresponds to something that has already gone wrong here: a wrong
@@ -205,6 +276,20 @@ elif [ "$DO_SMOKE" -eq 0 ]; then
     say "[smoke] skipped (--no-smoke)"
 else
     say "[smoke] already done, skipping"
+fi
+
+# ---- --gates-only stops HERE ---------------------------------------------------
+# Everything above is free or costs minutes; everything below commits GPU-hours.
+# Both phases dropped their markers, so the real run skips them and goes straight
+# to the baseline.
+if [ "$GATES_ONLY" -eq 1 ]; then
+    say "[gates] pre-flight and the smoke run both passed"
+    echo
+    echo "Gates passed. Nothing has been spent and nothing is detached."
+    echo "Launch the real run with:"
+    echo "    $0 --no-setup ${ARMS[*]}"
+    echo "It skips pre-flight and the smoke run via their markers."
+    exit 0
 fi
 
 # ---- phase 3: v2 re-baseline ---------------------------------------------------

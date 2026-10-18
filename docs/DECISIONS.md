@@ -7371,3 +7371,205 @@ Pre-flight verifies every staged arm (DEC-144 addendum) and hard-failed on any
 `run_v3.sh v3l` would have refused to start. The cache check is now scoped to the arms
 being **trained** (`--train`); a cache under an arm nobody is training today is
 reported as INFO and left alone.
+
+---
+
+## DEC-148: A Gate Must Not Be Stricter Than What It Guards — Pre-flight Thresholds Aligned to Ultralytics 8.4.118
+
+**Date:** 2026-10-19
+**Status:** Accepted
+**Amends:** DEC-144, DEC-147
+
+### What happened
+
+Pre-flight failed the run and spent nothing:
+
+```
+FAIL  v3p: 6 x coord outside [0,1]
+      (first: .../roboflow_cv_project_hovyc__door_10c3818...txt:2
+       [0.502099, 0.692196, 1.003062, 0.595978])
+```
+
+The data is fine. `verify_image_label` in the pinned 8.4.118 asserts a **±0.01
+tolerance**, not a hard unit box:
+
+```python
+assert points.max() <= 1.01   # coords
+assert lb.min()     >= -0.01  # coords AND class
+```
+
+The largest overshoot in any arm is **0.0097** — inside it. Which is why DEC-147's
+replica test, running the real loader over all 43,170 labels, reported **0 corrupt**.
+Pre-flight rejected a dataset the trainer reads without comment.
+
+### Provenance: pre-existing, and v1/v2 trained with more of them
+
+| tree | out-of-unit-box boxes |
+|---|---:|
+| v2b (nc=14) | **18** |
+| v3s / v3p / v3l | **6** each |
+
+They are Roboflow rounding artifacts — a box drawn flush to the image edge, normalized
+to 1.000x. **Recovery introduced none.** The 12-box difference is Pole boxes that left
+with the class. So v1 and v2 both trained with three times as many as v3 has.
+
+### Decision
+
+Pre-flight's numeric thresholds are now copied from the trainer, with the source
+assertion quoted beside them. Overshoots **inside** the tolerance are reported as
+INFO with a count and an example, never as a failure.
+
+The trailing-newline check was downgraded the same way: ultralytics reads labels with
+`splitlines()` and is indifferent, so a missing final newline was a hard failure over
+nothing. It was the identical mistake waiting to fire on the next re-stage.
+
+Full audit of every check against what 8.4.118 enforces:
+
+| check | ultralytics | pre-flight now |
+|---|---|---|
+| 5 columns per row | assert | FAIL — match |
+| coords max | `<= 1.01` | `<= 1.01` — match |
+| coords/class min | `>= -0.01` | `>= -0.01` — match |
+| class id `< nc` | assert | FAIL — match |
+| duplicate rows | dedupes + warns | not checked |
+| trailing newline | indifferent | INFO — match |
+| zero/negative w,h | not asserted | FAIL — **deliberately stricter** |
+
+The last row is the one intentional divergence: a zero-area box is a genuine defect
+that produces a degenerate training target, and ultralytics would silently keep it.
+Zero are present in any arm.
+
+Re-verified after the change: **v3s 162,997 / v3p 167,311 / v3l 189,833 boxes, 6
+edge-rounding INFO each, zero hard issues in all three.**
+
+### The pattern worth naming
+
+This is the third gate in two days that was wrong while the data was right — the
+bundle-image count against a mis-transcribed total (DEC-145), the labels.cache check
+that would have blocked the second arm (DEC-147), and now the coordinate bound. All
+three share one cause: **the gate was written from first principles instead of from
+the thing it guards.** The rule going forward is to read the consumer's own
+validation, quote it next to the check, and treat any divergence as something to
+justify in a comment rather than assume.
+
+---
+
+## DEC-149: The v3 Wizard Audited Rather Than Discarded — Three Stage-8 Defects Fixed, and the Smoke Gate Moved Back in Front of the Human
+
+**Date:** 2026-10-19
+**Status:** Accepted
+**Amends:** DEC-144, DEC-148
+**Related:** DEC-137 (why retrieve-before-terminate is a gate and not a warning), DEC-145 (exit codes lie — validate content), DEC-147 (the arm layout this re-verified)
+
+### Why the wizard was kept
+
+`HANDOFF_v3_wizard_failures.md` recommended abandoning `runpod_v3_wizard.sh` on the
+grounds that it had never completed a run. That is true but misattributes the cause.
+Mapping each of the eight blocking failures to the file it actually lived in:
+
+| failure | lived in |
+|---|---|
+| `data.yaml` not valid YAML | `stage_v3_arms.py` |
+| `rsync -a` on MooseFS | transfer layer |
+| `tar` ownership | `setup_pod_v3.sh` |
+| trusted directory existence | `setup_pod_v3.sh` |
+| bundle gate counted the wrong thing | **the wizard** |
+| `labels.cache` gate | `preflight_v3.py` |
+| coordinate bound | `preflight_v3.py` |
+| assorted shell bugs | **the wizard** |
+
+**Six of eight were in the things the wizard calls, not the wizard.** It was
+correctly refusing to advance while something downstream was broken. Discarding it
+would have prevented none of those six, and would have given up the
+retrieve-before-terminate gate — the one thing the proven `runpod_wizard.sh` lacks,
+and the one DEC-137 argues for: a lapsed balance destroyed the pod and cut off the
+EU-RO-1 volume, so only the copy on the Mac is durable.
+
+### What the audit verified, against the real consumer
+
+Every ultralytics claim in the comments was checked against the installed 8.4.118 —
+the exact pin — rather than taken on trust. All four match:
+
+| claim | source | verdict |
+|---|---|---|
+| coords `<= 1.01`, min `>= -0.01` | `data/utils.py:295-296` | exact |
+| `get_hash` over sizes+paths, never contents | `data/utils.py:139` | exact |
+| cache at `Path(label_files[0]).parent.with_suffix(".cache")` | `data/dataset.py:282` | exact |
+| extensions matched via `.lower()` | `data/base.py:177` | exact |
+
+A replica arm was built and run through the real loader: the flat symlink+txt layout
+loads, uppercase `.JPG` survives, `check_det_dataset` resolves from `/tmp` with no
+`path` key (DEC-066's mechanism), and the cache lands where both `setup_pod_v3.sh`
+and pre-flight glob for it.
+
+The data figures were re-derived from the staged tarballs, independent of any script
+in the repo: **train 118,279 / 140,801 / 113,965** (matching pre-flight's
+`EXPECT_BOXES`), all-split totals **167,311 / 189,833 / 162,997** (matching DEC-148),
+val and test label contents **byte-identical across all three arms**, train contents
+**distinct per arm**, 0 boxes outside ultralytics' tolerance, 6 edge-rounding INFO
+per arm, 0 missing label files. Check #7 — the yardstick the whole experiment rests
+on — holds.
+
+### The three defects, all in stage 8
+
+Stage 8 (launch-detached-then-poll) was the only mechanism in the wizard with no
+proven ancestor. The proven `runpod_wizard.sh` ends at its smoke gate and hands
+training to a human in `tmux`.
+
+1. **`set -e` killed the wizard before the branch that explains the failure.**
+   `_wait_for_arm; _wait_rc=$?` — under `set -e` a function returning non-zero as a
+   standalone command exits the script, so `_wait_rc` was never read and the
+   `START_AT=9` recovery instructions never printed. Reproduced; now
+   `_wait_for_arm || _wait_rc=$?`. It was the only unprotected standalone call in
+   the file — every other `podssh`/`podsync` is inside `gate` or guarded.
+
+2. **The liveness poll was a `pgrep -f` self-match.** The pattern was sent to the pod
+   inside an SSH command string, and sshd runs that string via `bash -c '<string>'` —
+   so the enclosing shell's own command line contained the pattern and pgrep, which
+   matches full command lines, matched itself. The poll would report ALIVE on every
+   tick including long after the driver died, so the dead-driver branch could never
+   fire and a failed run would wait out the full 14-hour cap.
+   `run_v3.sh --status` had **already rejected pattern matching for this exact
+   reason** and solved it with `driver.pid`. `run_v3.sh` now exposes that same check
+   as `--alive` (exit 0 alive / 1 not) and the wizard calls it. A status code, not
+   scraped text: parsing `--status` would be a contract across a process boundary.
+
+3. **The smoke gate had moved behind the detach.** Pre-flight and the smoke run — the
+   two checks that decide whether three GPU-hours are worth spending — ran *inside*
+   the detached driver, so their failure landed in a log nobody was reading and
+   surfaced only as a poll that stopped advancing. `run_v3.sh` gains `--gates-only`:
+   setup, pre-flight and smoke in the **foreground**, stopping before the first real
+   GPU-hour. Wizard stage 7 gates on it; stage 8 launches `--no-setup`, and both
+   phases are skipped via their existing markers. This also removes a double setup —
+   it previously ran at stage 7 *and* again as `run_v3.sh`'s phase 0.
+
+### One defect found while testing the fix
+
+`setsid` is absent on macOS, which made the launcher print **`Detached. Safe to
+disconnect.`** while nothing was running. On the pod `setsid` exists, so this would
+not have fired there — but "safe to disconnect" over a pod doing nothing is the worst
+sentence this script could emit, and the class of bug is DEC-145's: *exit codes lie;
+validate the content, not the status.* The launcher now proves the child came up
+(`--alive`, or a completion line written by **this** launch — line-counted beforehand
+so a previous run's completion cannot mask a fresh failure) and prints `LAUNCH
+FAILED` with the driver log tail otherwise. The wizard stops on it rather than
+spending 15 minutes rediscovering the same fact by polling.
+
+### Deliberately not changed
+
+Found, verified harmless, left alone: `.split()` where the parallel code uses
+`.splitlines()` in pre-flight check #8 and `baseline_eval.py` (no path in any of the
+43,170 listings contains whitespace — checked); pre-flight reimplementing
+`img2label_paths` with `Path.with_suffix` (0 disagreements over all 43,170 paths);
+check #8 re-reading every train label the 6-7 scan already read; `podenv.sh`'s
+zsh-only expansion, which prints a spurious `bad substitution` in bash but whose
+fallback works.
+
+### The pattern, continued from DEC-148
+
+DEC-148 named it: *a gate must not be stricter than what it guards.* Defects 2 and 3
+are the same mistake with the polarity flipped — **a check must not be weaker, or
+later, than what it guards either.** Both were cases where the correct implementation
+already existed in this repo and was re-derived instead of called. The rule stands,
+with an addition: before writing a check, grep the repo for one that already answers
+the question, and call it.
