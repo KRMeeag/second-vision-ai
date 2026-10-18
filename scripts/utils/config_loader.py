@@ -60,7 +60,7 @@ CLASSES_YAML: Path = REPO_ROOT / "config" / "classes.yaml"
 DATASETS_YAML: Path = REPO_ROOT / "config" / "datasets.yaml"
 
 # Authoritative class count — must match nc in classes.yaml
-EXPECTED_NC: int = 14
+EXPECTED_NC: int = 13
 
 # Canonical class names in YOLO id order (0-indexed).
 # Must stay in sync with AGENTS.md and config/classes.yaml.
@@ -77,11 +77,25 @@ EXPECTED_NC: int = 14
 # verified two ways before this constant moved: every surviving class's box count
 # matched exactly across the remap, and no id holds its predecessor's count.
 # See dataset/reports/v2b_renumber_map.json.
+#
+# Pole REMOVED 2026-10-18 (DEC-143) for the v3 arms. Same hazard as DEC-126 and
+# the same mitigation: dropping id 3 SHIFTED ten classes down by one --
+# Animals 4->3, Doors 5->4, Chairs 6->5, Tables 7->6, Tricycle 8->7,
+# Potholes 9->8, Trash Bins 10->9, Bicycle 11->10, Stairs 12->11, Bench 13->12.
+# Every one lands on its neighbour's former id, so a half-applied remap is
+# silent: a Doors box reading as Chairs looks like an ordinary mistake, not a
+# schema fault. That is DEC-107's signature and why the v3 labels were verified
+# per class before this constant moved -- see notebooks/fiftyone_v3_schema_check.ipynb
+# and dataset/reports/v3_renumber_map.json.
+#
+# Pole was dropped on capability grounds, not annotation quality: 12.9% of its
+# boxes are under 8 px (YOLOv8's P3 stride) and 51.7% span three feature cells
+# or fewer, and the device's SC-DepthV3 depth channel already surfaces poles
+# haptically -- they simply stop being announced by name.
 CANONICAL_NAMES: list[str] = [
     "Person",
     "Vehicle",
     "Motorcycle",
-    "Pole",
     "Animals",
     "Doors",
     "Chairs",
@@ -123,7 +137,7 @@ def load_classes() -> dict[str, Any]:
 
     Validation checks:
       - File exists and parses as a YAML mapping.
-      - 'nc' field matches EXPECTED_NC (14).
+      - 'nc' field matches EXPECTED_NC (13 since DEC-143).
       - 'names' field has exactly nc entries.
       - Each canonical name matches the hardcoded CANONICAL_NAMES list.
 

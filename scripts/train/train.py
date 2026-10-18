@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 from datetime import datetime
@@ -76,7 +77,6 @@ def enable_loggers(comet: bool, tensorboard: bool) -> dict[str, bool]:
     if comet:
         settings.update({"comet": True})
         try:
-            import os
             import socket
 
             import comet_ml
@@ -199,6 +199,15 @@ def main() -> None:
             subprocess.check_output([sys.executable, "-m", "pip", "freeze"], text=True), encoding="utf-8")
     except Exception as exc:
         print(f"  (pip freeze failed: {exc})")
+
+    # A caller that orchestrates several runs needs the run dir EXACTLY, and
+    # ultralytics may append a numeric suffix when the name is already taken --
+    # so the path cannot be predicted from --name. Scraping it out of stdout
+    # would be a parsing contract across a process boundary; an opt-in file is
+    # not. Unset means this does nothing, which is every interactive run.
+    out_ptr = os.environ.get("TRAIN_RUNDIR_OUT")
+    if out_ptr:
+        Path(out_ptr).write_text(str(run_dir) + "\n", encoding="utf-8")
 
     print(f"\nrun dir: {run_dir}")
     print("Next: python3 scripts/train/evaluate.py --weights "

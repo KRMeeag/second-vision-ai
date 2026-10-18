@@ -6785,3 +6785,256 @@ Verified through ultralytics' own loader (`check_det_dataset` + `YOLODataset`, t
 Every count matches the build scripts, names resolve correctly, no out-of-range class ids,
 and val/test are byte-identical across all three so the evaluation yardstick cannot move
 between arms.
+
+---
+
+## DEC-143: Canonical Schema Drops Pole — nc=14 → nc=13, Ten Classes Shifted, Verified Box-by-Box Before the Constant Moved
+
+**Date:** 2026-10-18
+**Status:** Applied. v3 arms now pass `train.py`'s schema gate.
+**Artefacts:** `config/classes.yaml`, `scripts/utils/config_loader.py`,
+`notebooks/fiftyone_v3_schema_check.ipynb`, `dataset/reports/v3_renumber_map.json`
+
+### Why
+
+DEC-140 built the v3 trees at nc=13 (Pole dropped) but the repo's canonical schema
+still said nc=14. `scripts/train/train.py:152` compares `data.yaml` against
+`config/classes.yaml` and **raises SystemExit** on disagreement — so every v3 arm was
+unrunnable through the project's own trainer. That check exists because of DEC-107,
+where a stale schema rendered every Pothole as a Tricycle.
+
+Leaving the split in place was the worse option: a half-updated schema is the exact
+condition DEC-107 documents.
+
+### The hazard
+
+Removing id 3 shifted **ten** classes down by one — Animals 4→3, Doors 5→4, Chairs
+6→5, Tables 7→6, Tricycle 8→7, Potholes 9→8, Trash Bins 10→9, Bicycle 11→10,
+Stairs 12→11, Bench 13→12. Every one lands on its **neighbour's former id**, so a
+partially-applied remap produces plausible-looking wrong labels rather than an error.
+Same signature as DEC-126's Shelf removal.
+
+### Verified before the constant moved
+
+1. **Per-class counts.** The five classes with no recovery path (no COCO class maps to
+   them) are **byte-identical across v2b and all three arms** — Doors 2,323 ·
+   Tricycle 3,159 · Potholes 6,122 · Trash Bins 2,737 · Stairs 3,563. Those are the
+   first numbers a bad remap would move, since nothing else can change them.
+2. **Box-by-box.** For 2,100 sampled images, the nc=14 labels minus Pole were required
+   to equal the arms' original boxes exactly — same class **name**, same geometry,
+   same order. **6,783 boxes compared, 0 mismatches**, 404 Pole boxes dropped.
+   Counts alone cannot catch a shifted id; this can.
+3. **Visual.** `notebooks/fiftyone_v3_schema_check.ipynb` renders samples per class.
+   Animals is the one to inspect hardest — it inherited Pole's neighbouring id, so
+   surviving Pole boxes would surface there as street lights under an "Animals" title.
+
+Pole contributed **8,820 boxes** to v2b, all dropped.
+
+### Changes
+
+* `config_loader.EXPECTED_NC` 14 → 13; `CANONICAL_NAMES` loses "Pole".
+* `classes.yaml`: `nc` 13, `names` renumbered, `hailo_runtime_names` renumbered
+  (Background still at 0, so Bench is 13 not 14), and every per-class `id:` updated.
+  Neither `hailo_runtime_names` nor the per-class `id:` fields have a Python consumer
+  — they are reference only — but a stale value there is precisely the half-updated
+  schema this decision exists to avoid.
+* The `pole:` block is **retained with `id: null, status: dropped`**, keeping the
+  acquisition provenance for v1/v2 while making the schema unambiguous. Reinstating
+  Pole means appending at id 13, never reclaiming 3, so nothing shifts twice.
+
+### Why Pole, on capability grounds
+
+Not annotation quality: 12.9% of Pole boxes are under 8 px — YOLOv8's P3 stride — and
+51.7% span three feature cells or fewer. The device's SC-DepthV3 depth channel already
+surfaces poles haptically; they stop being announced by name, not detected.
+
+### Consequence
+
+The v2 nc=14 trees and weights now **fail** this same gate. That is correct — they are
+historical — but it means the v3 baseline phase evaluates v2 against its own schema and
+reports a reference point, **not** a number subtractable from an arm's mAP.
+
+### Addendum, 2026-10-18 — verified PER SOURCE DATASET, not just dataset-wide
+
+The three checks above are dataset-wide, and that is the wrong resolution for the
+failure this project has actually seen. An index shift applied to **one source's**
+conversion and not the others moves an entire source dataset onto a neighbouring
+class while the global total barely moves — the boxes are all still there and all
+still counted, just under a different name. "The 664-image pothole set reading as
+Person" is invisible in a 156,506-box total.
+
+So a fourth check was added, per source, recovered from merge.py's
+`<source>__<original>` filename prefix (the same recovery
+`fiftyone_final_dataset.ipynb` uses). Across all **12 sources**:
+
+* **Monotonicity.** Recovery is purely additive, so every `(source, class)` count must
+  be non-decreasing from v2b. **0 violations.** This is the decisive test: a shift
+  cannot hide from it, because moving a class's boxes onto a neighbour drops the
+  original class to zero.
+* **Anchor classes frozen.** Doors, Tricycle, Potholes, Trash Bins and Stairs have no
+  COCO counterpart, so yolov8x could never propose them and their per-source counts
+  must be **byte-identical**, not merely non-decreasing. All identical in every source
+  and every arm — `dataset_ninja_pothole_detection` still 1,727 Potholes,
+  `roboflow_pothole_voxrl` still 1,739, `roboflow_door_detection_zqt59` still 688
+  Doors, `roboflow_roitrikee` still 752 Tricycle, `roboflow_trashcan_detection_pihfn`
+  still 768 Trash Bins.
+* **Pole → 0 in every source** that had any (open_images 8,411; revised_pedestrian
+  314; cv_project_hovyc 43; pothole_voxrl 20; roitrikee 12; road_damage 16;
+  dlsu_d_vehicle 2; door_detection 2).
+* **Vanished-count search.** For every source and arm, every class that lost boxes was
+  checked against every class that gained boxes for an exact match — the signature of
+  a wholesale handoff. **No pair found.**
+* **Composition similarity.** Per-source class-proportion cosine vs v2b: 0.9899–1.0000
+  across all 12 sources and all three arms, lowest in loose as expected since it adds
+  the most boxes.
+* **Same-geometry name agreement.** On sampled images, boxes with identical geometry
+  in v2b and in an arm carry the same class name: **0 disagreements.**
+
+The only new `(source, class)` entries are Bench appearing in sources that had none,
+which is legitimate recovery output. Bench sits at the **last** id in both schemas
+(13 → 12), the most shift-sensitive position there is, and it behaves.
+
+Notebook: `notebooks/fiftyone_v3_source_check.ipynb`, generated by
+`scripts/build/make_v3_source_check_notebook.py`. Checks 1–4 are arithmetic with a
+definite PASS/FAIL; check 5 loads both label layers onto the same images with
+`source` and `split` as sidebar-filterable fields, stratified so all 12 sources are
+represented rather than ~62% open_images.
+
+---
+
+## DEC-144: v3 Driver Rebuilt Around `train.py` — Three Latent Bugs Found, Including Three Unloadable `data.yaml` Files
+
+**Date:** 2026-10-18
+**Status:** Accepted
+**Supersedes:** the bespoke trainer inside `scripts/train/train_one_arm.py` (DEC-141 era)
+
+### Decision
+
+The v3 headless driver now calls the same two scripts both previous runs used —
+`scripts/train/train.py` and `scripts/train/evaluate.py` — instead of carrying its own
+training loop and its own hand-transcribed copy of v2's hyperparameters. Pod setup is
+`scripts/train/setup_pod_v3.sh`, which is stage 12 of `runpod_wizard.sh` lifted out so
+it can run unattended, and a **smoke run** now gates every real arm.
+
+### Why
+
+The previous `train_one_arm.py` held a `CFG = dict(...)` transcribed from v2's
+`args.yaml`. That is a second source of truth for how this project trains: it drifts
+the moment `config/training.yaml` changes and reports nothing when it does. It also
+skipped everything `train.py` contributes — the nc-vs-`classes.yaml` schema gate,
+`provenance.json`, `pip_freeze.txt`, and `ARMED / NOT ARMED` logger reporting.
+
+Parity with v2 is now **checked rather than re-typed**: `check_args_parity.py` diffs
+each run's `args.yaml` against `scripts/train/v2_args_reference.yaml` (v2's own file,
+committed verbatim) and records the verdict in `<arm>_result.json`. This matters more
+than it looks. Most of the resolved set — `workers`, `deterministic`, `close_mosaic`,
+`lr0`, `mosaic`, `erasing` — is specified **nowhere in this repo**; it is ultralytics
+8.4.118's defaults, so a version bump changes the experiment with no diff to review.
+The check also catches the inverse trap: `config/training.yaml` says `batch: 16` and
+`patience: 20`, and **neither reaches the run** (`train.py` defaults to `--batch 32`
+and `--patience 0` → 100000). Read the config alone and you would conclude v2 trained
+at batch 16.
+
+Confirmed in passing: **v1 and v2 differ only in `data`, `name` and `save_dir`.** Every
+other one of the 116 resolved arguments is identical, so the v3 arms inherit a
+two-run-stable configuration.
+
+### Three bugs this work found
+
+1. **All three staged `data.yaml` files were not valid YAML.** `stage_v3_arms.py` built
+   them by slicing the source file's lines and emitted `name_lines[1:]` — dropping the
+   `names:` key itself, leaving `nc: 13` followed by a bare indented block.
+   `yaml.safe_load` raises `ScannerError` on all three. Every arm was unloadable and
+   nothing could have trained on them. Fixed by parsing and re-emitting through
+   `yaml.safe_dump`, then **re-parsing the emitted text and re-opening the finished
+   tarball** to check it against `CANONICAL_NAMES` before it ships. The lesson is
+   narrow and worth stating: never emit YAML by string surgery without parsing it back.
+
+2. **`evaluate.py --self-test` raised `StopIteration` at nc=13.** It built its
+   confusion-matrix fixture at `matrix[3, nc]` with the comment "class 3 (Pole)". Pole
+   was dropped in DEC-143 and id 3 is now Animals, so the test broke on exactly the
+   index shift it should have been guarding — the DEC-107 failure mode inside the test
+   suite. The fixture now resolves its target **by name** out of the schema, and two
+   new checks assert the schema is self-consistent and that every `PER_CLASS_FLOORS`
+   and `EXPECTED_WEAK` name still exists. `EXPECTED_WEAK` loses "Pole" (recorded in a
+   comment, since DEC-122 pre-registered it) because a retired class printed an
+   `ABSENT` row that reads as a missing detection.
+
+3. **`baseline_eval.py` passed a 13-class `data.yaml` to the 14-class v2 model**, noting
+   the mismatch in a caveat string and proceeding anyway. That misaligns every class
+   above Pole — every Pothole scored against v2's Tricycle output. It now builds a
+   shadow dataset: the arms' test labels remapped **up** into v2's own schema, **by
+   name, never by arithmetic**. The remap is lossless in this direction because the new
+   labels contain no Pole boxes. A canonical name missing from v2's head aborts rather
+   than guesses. Residual bias is stated in the output: v2's head still carries a Pole
+   output with no ground truth, so its Pole predictions become background false
+   positives and the mAP is averaged over 14 classes of which one cannot score —
+   **biased downward, not subtractable.**
+
+### The check that matters most
+
+Pre-flight now hashes the **val and test label CONTENTS** per arm and requires them
+identical, and requires the three train digests to be distinct. The experiment is
+"same yardstick, different training labels"; the previous check hashed only the split
+*listings*, which would not notice the boxes changing inside identically named files.
+
+Related, and a correctness bug rather than a stale file: ultralytics keys `labels.cache`
+on the image+label **path list**, not on contents. Re-staging an arm rewrites label
+contents under identical filenames, so a surviving cache still looks valid and would
+serve the previous arm's boxes for a whole run. Setup **renames** any it finds
+(`.cache.stale-<timestamp>`, never deletes — the file is the only record of what a
+prior run actually loaded) and pre-flight **fails** if one is present.
+
+### Verified
+
+* All three re-staged archives: `data.yaml` parses at nc=13 with matching names,
+  43,170 labels, every split line absolute, 0 missing and 0 orphan labels.
+* Train boxes **113,965 / 118,279 / 140,801** (strict / permissive / loose), matching
+  the recorded figures; val **24,561** and test **24,471** boxes with identical
+  digests across all three arms; every class id in 0–12.
+* `check_args_parity.py` returns PARITY OK for v2 against itself, PARITY OK for v1
+  (identity keys aside), and correctly fails a perturbed fixture on `batch`,
+  `close_mosaic` and `deterministic`.
+* `evaluate.py --self-test`: 17/17.
+
+### New and changed files
+
+`scripts/train/setup_pod_v3.sh`, `scripts/train/check_args_parity.py`,
+`scripts/train/v2_args_reference.yaml` (new); `run_v3.sh`, `preflight_v3.py`,
+`train_one_arm.py`, `baseline_eval.py`, `compare_v3.py`, `stage_v3_arms.py`,
+`evaluate.py`, `train.py` (opt-in `TRAIN_RUNDIR_OUT` so a caller can locate a run dir
+ultralytics may have suffixed), `config_loader.py` (docstring), and
+`docs/RUNBOOK_v3_training.md`.
+
+### Addendum, 2026-10-18 — the default run is PERMISSIVE ALONE
+
+Timeline pressure; the remaining two arms may not fit. The driver's default is now one
+arm (`v3p`, ~3.2 h end to end) rather than two, and loose and strict are added later
+with `run_v3.sh v3l` / `run_v3.sh v3s` at exactly their own ~3 h each.
+
+**Nothing is sacrificed by splitting the run**, and the reason is structural rather
+than lucky: all three arms were staged from one build and share **byte-identical val
+and test labels**. An arm trained next month is therefore scored on the same yardstick
+as one trained today. To keep that true rather than assumed, pre-flight now verifies
+**every arm staged on the volume** regardless of what is being trained — `--train`
+names today's arms for reporting only. Check #7 (val/test contents identical *across*
+arms) is meaningless with one arm in hand, and it is precisely what licenses the later
+comparison; scanning the other two costs about a minute. When only one arm is present
+the check downgrades to a WARN that says so explicitly, rather than passing vacuously.
+
+The corresponding hazard is now documented: `preflight.done` makes pre-flight skip on
+a later invocation, so **re-staging an arm after pre-flight has passed requires
+deleting that marker**. Otherwise the rebuilt arm goes in unverified and a
+`labels.cache` written under the old labels survives.
+
+Permissive is the right single arm. It is the agreement-boundary question the recovery
+work was about — tier D/E boxes that v2 corroborated, included — with strict and loose
+bracketing it on either side. With one arm the comparison is against the v2 baseline
+rather than against another arm, which is a complete, reportable result: did 4,314
+agreement-boundary boxes plus the Pole drop move the model? The other arms explain
+*why*; they are not needed to make the first number mean something.
+
+If exactly one more arm fits, it should be **loose**. Permissive-vs-loose carries the
+real unknown — 22,522 boxes with no second opinion at all — whereas
+strict-vs-permissive concerns 4,314 boxes that permissive already includes, so a
+permissive result above the baseline substantially answers that half.

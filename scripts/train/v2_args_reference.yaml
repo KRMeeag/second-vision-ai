@@ -1,0 +1,133 @@
+# REFERENCE ONLY -- ultralytics' own args.yaml from the v2 run, verbatim.
+#
+# This is the resolved hyperparameter set behind the published v2 result
+# (cap4500_yolov8s_v2-2, mAP50 0.7118, 100 epochs in 3.02 h on an RTX 4090).
+# scripts/train/check_args_parity.py diffs a new run's args.yaml against this
+# file, so a drift in config/training.yaml, in train.py's flag defaults, or in
+# ultralytics' own defaults across a version bump shows up as a named key --
+# not as an unexplained mAP difference attributed to the labels.
+#
+# The only keys that are SUPPOSED to differ are data, name, project and save_dir
+# (and epochs/fraction for a smoke run). Everything else differing means the arms
+# are not measuring what the experiment claims.
+#
+# Copied from models/current/deployment_kit_v2_cap4500/args.yaml, which is
+# gitignored with the rest of the deployment kit. Tracked here because the diff
+# target has to survive without the kit or the network volume.
+# DO NOT EDIT. It is a record, not a config.
+task: detect
+mode: train
+model: yolov8s.pt
+data: /workspace/final_cap4500_v2/data.yaml
+epochs: 100
+time: null
+patience: 100000
+batch: 32
+imgsz: 640
+save: true
+save_period: 10
+cache: false
+device: '0'
+workers: 8
+project: null
+name: cap4500_yolov8s_v2-2
+exist_ok: false
+pretrained: true
+cls_remap: true
+optimizer: auto
+verbose: true
+seed: 42
+deterministic: true
+single_cls: false
+rect: false
+cos_lr: false
+close_mosaic: 10
+resume: false
+amp: true
+fraction: 1.0
+profile: false
+freeze: null
+multi_scale: 0.0
+compile: false
+channels_last: false
+overlap_mask: true
+mask_ratio: 4
+dropout: 0.0
+val: true
+split: val
+save_json: false
+conf: null
+iou: 0.7
+max_det: 300
+quantize: null
+dnn: false
+plots: true
+end2end: null
+source: null
+vid_stride: 1
+stream_buffer: false
+visualize: false
+augment: false
+agnostic_nms: false
+classes: null
+retina_masks: false
+embed: null
+show: false
+save_frames: false
+save_txt: false
+save_conf: false
+save_crop: false
+show_labels: true
+show_conf: true
+show_boxes: true
+line_width: null
+format: torchscript
+keras: false
+optimize: false
+dynamic: false
+simplify: true
+opset: null
+workspace: null
+nms: false
+lr0: 0.01
+lrf: 0.01
+momentum: 0.937
+weight_decay: 0.0005
+warmup_epochs: 3.0
+warmup_momentum: 0.8
+warmup_bias_lr: 0.1
+distill_model: null
+dis: 6.0
+box: 7.5
+cls: 0.5
+cls_pw: 0.0
+dfl: 1.5
+pose: 12.0
+kobj: 1.0
+rle: 1.0
+angle: 1.0
+dlog: 1.0
+dgrad: 0.5
+dlam: 1.0
+nbs: 64
+hsv_h: 0.015
+hsv_s: 0.7
+hsv_v: 0.4
+degrees: 0.0
+translate: 0.1
+scale: 0.5
+shear: 0.0
+perspective: 0.0
+flipud: 0.0
+fliplr: 0.5
+bgr: 0.0
+mosaic: 1.0
+mixup: 0.0
+cutmix: 0.0
+copy_paste: 0.0
+copy_paste_mode: flip
+auto_augment: randaugment
+erasing: 0.4
+cfg: null
+tracker: tracktrack.yaml
+save_dir: /workspace/second-vision-ai/runs/detect/cap4500_yolov8s_v2-2

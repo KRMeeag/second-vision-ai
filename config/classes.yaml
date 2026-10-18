@@ -24,13 +24,36 @@ annotation_policy:
     Hidden object extent must not be estimated. See DEC-012.
 
 # --- Number of classes ---
-nc: 14
+#
+# 14 -> 13 on 2026-10-18 (DEC-143): Pole dropped. This SHIFTED every id above 3
+# down by one. Ten classes moved, each onto its neighbour's former id, which is
+# the DEC-107 failure signature -- a half-applied remap reads as ordinary
+# mislabelling, not as a schema fault. The v3 label trees were verified per class
+# before this file changed (notebooks/fiftyone_v3_schema_check.ipynb).
+nc: 13
 # --- Class names (0-indexed for YOLO training) ---
 names:
   0: "Person"
   1: "Vehicle"
   2: "Motorcycle"
-  3: "Pole"
+  3: "Animals"      # was 4
+  4: "Doors"        # was 5
+  5: "Chairs"       # was 6
+  6: "Tables"       # was 7
+  7: "Tricycle"     # was 8
+  8: "Potholes"     # was 9
+  9: "Trash Bins"   # was 10
+  10: "Bicycle"     # was 11
+  11: "Stairs"      # was 12
+  12: "Bench"       # was 13
+
+# --- Hailo runtime mapping (after background class injection) ---
+# Reference only — used when generating custom label JSON
+hailo_runtime_names:
+  0: "Background"
+  1: "Person"
+  2: "Vehicle"
+  3: "Motorcycle"
   4: "Animals"
   5: "Doors"
   6: "Chairs"
@@ -41,25 +64,6 @@ names:
   11: "Bicycle"
   12: "Stairs"
   13: "Bench"
-
-# --- Hailo runtime mapping (after background class injection) ---
-# Reference only — used when generating custom label JSON
-hailo_runtime_names:
-  0: "Background"
-  1: "Person"
-  2: "Vehicle"
-  3: "Motorcycle"
-  4: "Pole"
-  5: "Animals"
-  6: "Doors"
-  7: "Chairs"
-  8: "Tables"
-  9: "Tricycle"
-  10: "Potholes"
-  11: "Trash Bins"
-  12: "Bicycle"
-  13: "Stairs"
-  14: "Bench"
 
 # --- Per-Class Source Configuration ---
 # Defines primary, secondary, and low-light augmentation providers
@@ -211,7 +215,7 @@ classes:
     cap: 4500
 
   bicycle:
-    id: 11
+    id: 10
     # New class per DEC-038 (2026-08-08), split out of "Two Wheeler."
     # No new acquisition work needed — both sources already label
     # Bicycle separately from Motorcycle/Motorbike.
@@ -225,7 +229,12 @@ classes:
     cap: 4500
 
   pole:
-    id: 3
+    # DROPPED 2026-10-18 (DEC-143) -- no id. The acquisition config below is kept
+    # as provenance for the v1/v2 runs that DID train Pole; it is not live.
+    # Reinstating the class means appending it at the END (id 13), never
+    # reclaiming id 3, so no existing class shifts again.
+    id: null
+    status: dropped
     primary:
       source: open_images
       native_class: "Street light"
@@ -242,7 +251,7 @@ classes:
     cap: 4500
 
   animals:
-    id: 4
+    id: 3
     primary:
       source: open_images
       native_class: ["Dog", "Cat"]
@@ -254,7 +263,7 @@ classes:
 
 
   doors:
-    id: 5
+    id: 4
     primary_providers:
       - source: roboflow
         project: "testspace-xwkgk/cv-project-hovyc"
@@ -265,7 +274,7 @@ classes:
     cap: 4500
 
   chairs:
-    id: 6
+    id: 5
     primary:
       source: open_images
       native_class: ["Chair", "Couch", "Stool", "Sofa bed"]
@@ -283,7 +292,7 @@ classes:
     cap: 4500
 
   tables:
-    id: 7
+    id: 6
     primary:
       source: open_images
       native_class: ["Table", "Coffee table", "Desk", "Kitchen & dining room table"]
@@ -298,7 +307,7 @@ classes:
     cap: 4500
 
   tricycle:
-    id: 8
+    id: 7
     status: possible
     primary_providers:
       - source: roboflow
@@ -320,7 +329,7 @@ classes:
     cap: 4500
 
   potholes:
-    id: 9
+    id: 8
     # Combined-source strategy per DEC-034: two co-primary "pure
     # pothole" sources, expected to stay under 3500 combined without
     # needing road-damage-detector's messier multi-class volume.
@@ -360,7 +369,7 @@ classes:
     cap: 4500
 
   trash_bins:
-    id: 10
+    id: 9
     primary:
       source: open_images
       native_class: "Waste container"
@@ -379,7 +388,7 @@ classes:
     cap: 4500
 
   stairs:
-    id: 12
+    id: 11
     primary:
       source: open_images
       native_class: "Stairs"
@@ -411,7 +420,7 @@ classes:
     cap: 10100
 
   bench:
-    id: 13
+    id: 12
     primary:
       source: open_images
       native_class: "Bench"

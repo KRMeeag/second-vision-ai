@@ -111,7 +111,12 @@ PER_CLASS_FLOORS = {
     "Person": 0.75, "Vehicle": 0.75,
     "Motorcycle": 0.65, "Tricycle": 0.65, "Bicycle": 0.65,
 }
-EXPECTED_WEAK = {"Pole", "Potholes"}   # pre-registered, deliberately no floor
+# Pre-registered as weak, deliberately given no floor. DEC-122 listed TWO classes
+# here, "Pole" and "Potholes". Pole was dropped from the schema in DEC-143 and is
+# recorded in this comment rather than in the set: left in the set it printed an
+# "ABSENT" row for a class that cannot exist, which reads as a missing detection
+# rather than a retired class.
+EXPECTED_WEAK = {"Potholes"}
 
 
 def git_sha() -> str:
@@ -172,9 +177,16 @@ def self_test() -> int:
     ]
     nt_per_class = np.array([0 if n in absent else 20 for n in canonical])
     nt_per_image = np.array([0 if n in absent else 10 for n in canonical])
+    # Pick the FP target BY NAME, from the schema itself. This block used to read
+    # `matrix[3, nc]` with the comment "class 3 (Pole)". Pole was dropped in
+    # DEC-143 and id 3 is now Animals, so the test raised StopIteration on the
+    # very schema change it should have been guarding -- the same index-shift
+    # failure mode as DEC-107, inside the test suite.
+    fp_name = next(n for n in canonical if n in EXPECTED_WEAK and n not in absent)
+    fp_id = canonical.index(fp_name)
     matrix = np.zeros((nc + 1, nc + 1))
-    matrix[3, nc] = 42        # 42 false positives for class 3 (Pole)
-    matrix[nc, 3] = 17        # 17 missed Poles
+    matrix[fp_id, nc] = 42        # 42 false positives for fp_name
+    matrix[nc, fp_id] = 17        # 17 missed fp_name
     fp_col, fn_row = matrix[:nc, nc], matrix[nc, :nc]
 
     rows = reindex_per_class(summary_rows, canonical, nt_per_class, nt_per_image,
@@ -205,12 +217,22 @@ def self_test() -> int:
     checks.append(("...and this script reports nothing instead",
                    stairs["mAP50"] == ""))
 
-    pole = next(r for r in rows if r["class"] == "Pole")
+    weak = next(r for r in rows if r["class"] == fp_name)
     checks.append(("FP read from the background COLUMN",
-                   pole["false_positives_vs_background"] == 42))
+                   weak["false_positives_vs_background"] == 42))
     checks.append(("misses read from the background ROW",
-                   pole["missed_detections"] == 17))
-    checks.append(("Pole carries the expected-weak flag", pole["expected_weak"] is True))
+                   weak["missed_detections"] == 17))
+    checks.append((f"{fp_name} carries the expected-weak flag",
+                   weak["expected_weak"] is True))
+    # The schema itself, asserted rather than assumed: this file reindexes against
+    # get_canonical_names(), so a classes.yaml/config_loader disagreement must fail
+    # here and not in a per-class CSV read six months later.
+    from scripts.utils.config_loader import CANONICAL_NAMES, EXPECTED_NC
+    checks.append((f"canonical schema is nc={EXPECTED_NC} and self-consistent",
+                   nc == EXPECTED_NC and canonical == CANONICAL_NAMES))
+    checks.append(("every floor and expected-weak name is in the schema",
+                   all(n in canonical for n in PER_CLASS_FLOORS)
+                   and all(n in canonical for n in EXPECTED_WEAK)))
     person = next(r for r in rows if r["class"] == "Person")
     checks.append(("Person carries its 0.75 floor", person["floor"] == 0.75))
     checks.append(("present class metrics pass through", person["mAP50"] == 0.71))
