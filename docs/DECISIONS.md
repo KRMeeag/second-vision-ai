@@ -5882,3 +5882,906 @@ which would gut the 15-class `final_v2a` measurement tree) and a further ~2,939 
 because converter-stage dedup sees the raw stream. The shipped tree is the old converter plus
 two validated post-passes (`dedupe_geometric.py`, `find_hierarchy_duplicates.py`). A warning
 block is at the top of the converter.
+
+---
+
+## DEC-134: The 0.6417 v1 Baseline Is Not Comparable to v2 — It Includes Shelf, Predates ~2,000 Label Changes, and Was Measured Locally
+
+**Date:** 2026-09-13
+**Status:** Open — must be re-measured before the v1-vs-v2 claim is written up
+
+DEC-127 established **0.6417** as "the honest v1 baseline and the number v2 must beat". Comparing
+v2's result against it directly would overstate v2 by roughly **+0.04**, for three independent
+reasons — none of which is about annotation quality.
+
+**1. It averages over 15 classes including Shelf; v2 is scored over 14 without it.**
+
+From `runs/detect/cap4500_yolov8s/phase1/eval_v1_on_v2a_test_per_class.csv`:
+
+| | mAP@0.5 |
+|---|---:|
+| Shelf | **0.1836** |
+| mean over all 15 classes | **0.6417** |
+| mean over the 14 classes v2 is scored on | **0.6744** |
+
+Dropping the worst class raises the mean by **+0.0327** on its own. v2 inherits that for free.
+DEC-126 removed Shelf *because* it was unusable (R@P>=0.5 = 0.057), so the gain is real for the
+product but must not be reported as an annotation-completeness effect.
+
+**2. The labels have moved since 2026-09-09.** That evaluation predates the trashcan promote
+(+253), the CrowdHuman promote (+335), DEC-130's id fix (56 boxes relabelled), DEC-129 ExDark Bus
+(+413), DEC-131's pothole removal (-1), DEC-132 (-1,381 in open_images) and DEC-133 (-824). The
+test split alone moved **25,185 -> 25,076** instances.
+
+**3. It was measured locally, v2 will be measured on the pod.** The summary records
+`weights: /Users/luna/...`. DEC-124 measured the local-vs-pod gap at **0.6629 vs 0.6695** — a
+different image resampling path, not noise. Mixing the two adds ~0.007 of confound in v2's favour.
+
+### Required before any v1-vs-v2 claim
+
+Re-measure v1 **on the pod**, against the **current** `final_v2a`, then average over the **14
+non-Shelf classes**. Same weights, same images, same ultralytics pin, same NMS settings as v2 —
+only the labels differ, which is the whole point of the experiment.
+
+`dataset/v2a_labels.tar.gz` is built and ready (43,174 members, 0 AppleDouble, 166,024 boxes,
+nc=15, sha256 `45db10ce44fd077fbe60b736b0fd1dcda74cb321a66be1108851f70c15bc206c`).
+
+### What to report
+
+Three numbers, each labelled with its class set:
+
+| | classes | meaning |
+|---|---|---|
+| 0.6695 | 15 | published v1, on v1 labels — inflated by missing annotations |
+| *re-measured* | 14 (no Shelf) | **the honest baseline v2 must beat** |
+| *v2 result* | 14 (no Shelf) | the headline |
+
+Report the Shelf-drop contribution **separately** from the annotation-completeness contribution.
+Folding them together would credit v2 with a gain it did not earn.
+
+---
+
+## DEC-135: The v2 Deployment Kit Is Built — and the Calibration Split Is Symlinks, Which Would Have Silently Calibrated INT8 on Zero Images
+
+**Date:** 2026-10-06
+**Status:** Closed — kit built and verified; `docs/HANDOFF_v2_hailo_compile_runpod.md` corrected
+
+Phase 0 of the Hailo compile handoff is done. `models/current/deployment_kit_v2_cap4500/` exists,
+built by `scripts/train/build_deployment_kit_v2.py` in **24 s**:
+
+| | |
+|---|---|
+| size / files | **703 MiB** of files (741 MB on disk), 13,299 files (6,644 images + 6,644 labels + 11 metadata) |
+| CHECKSUM | `6490abf10110e411bded8a1169932d1cc479298102ac28c77baec5cce9993a5f` over 13,297 |
+| weights | `best.pt`, sha256 `ab3678b6995b2b02…`, epoch 78 of 100 by fitness |
+| schema | **nc=14**, identical across `data.yaml`, `config/classes.yaml`, `provenance.json` |
+| upload archive | `v2_kit.tar.gz`, **700 MiB**, rooted at `v2_kit/`, 0 symlinks, 0 AppleDouble |
+
+The file count matches the v1 kit's 13,297 exactly, so the two kits' `CHECKSUM` snippets and
+layouts remain interchangeable.
+
+### The defect worth recording: the val split is symlinks, not files
+
+`dataset/final_v2b/val/images/` holds **6,644 absolute symlinks** into
+`dataset/final/val/images/`, not image files. The handoff document said "upload it as one tar" and
+warned only about macOS AppleDouble. `tar czf` archives the *links*, so on the pod every one of
+them resolves to `/Users/luna/Projects/Thesis/second-vision-ai/...`, which does not exist.
+
+**The failure is silent in the direction that matters.** `yolo export format=hailo` does not
+validate that its calibration set is non-empty — it calibrates INT8 quantization on whatever the
+loader returns. The output is a HEF that compiles, parses, loads on the Hailo-8 and produces
+plausible-looking detections, built on quantization parameters derived from nothing. There is no
+error message at any stage. This is the same shape as DEC-107: a mismatch that no layer checks.
+
+Two mitigations, both now in place:
+
+1. The builder reads every image through its **resolved** target and writes a real file; a
+   symlink that does not resolve aborts the build rather than shortening the kit.
+2. Phase 2 of the handoff now extracts on the pod and asserts `ls calibration/images | wc -l` is
+   **6644** plus a CHECKSUM match **before** any GPU time is spent.
+
+### The second defect: "≈600 MB" was a post-downscale number presented as the raw one
+
+The handoff quoted the v1 kit's `calibration/` size as if it described the source images. It does
+not. Measured:
+
+| | |
+|---|---:|
+| the 6,644 val images, raw | **1,678 MiB** |
+| the same images, 640-bounded | **681 MiB** |
+
+The v1 kit is small because its images are **640-bounded re-encodes**, a step the handoff never
+mentioned — so following it literally produced a 1.7 GB tar, ~1.0 GB of which the loader discards.
+
+The re-encode itself is correct and was already justified by **DEC-119 Decision 2**: verified
+against installed ultralytics 8.4.118, `data/base.py:257-261` resizes every image's long side to
+`imgsz` *before* returning it, and Hailo calibration goes through that same loader
+(`exporter.py:976,988`). The pod therefore never sees above 640 px and the bound is lossless *for
+this pipeline*. The builder replicates `prepare_runpod_bundle.py:173-191` rather than reimplementing
+it — downscale-only, BILINEAR, JPEG q95, PNG kept as PNG, ultralytics' own
+`min(ceil(w*r), IMGSZ)` arithmetic. Result: **4,392 downscaled, 2,252 already within 640 and copied
+byte-for-byte**.
+
+**The replication is exact, not approximate.** Of 300 randomly sampled kit images, **300 are
+byte-identical to the v1 kit's calibration images** — and across the whole kit both directories
+measure **703 MiB apparent / 741 MiB on disk over 13,299 files**, which checks the full population
+rather than a sample. A useful consequence: the v1 and v2 kits calibrate on *the same bytes*, so a
+v1-vs-v2 quantization-gap comparison is not confounded by calibration data — only labels, weights
+and schema differ.
+
+### Preflight gates, because this kit is the last place a schema error is catchable
+
+The builder writes nothing until all of these hold:
+
+- `names:` read from `dataset/final_v2b/data.yaml`, `config/classes.yaml` and the run's
+  `provenance.json` are **identical**, with provenance authoritative (the DEC-107 guard);
+- every label's class ids lie in **0–13** — a stray 14 means a pre-DEC-126 label leaked in;
+- every image symlink resolves, and every image has a matching label file;
+- the weights' sha256 equals the expected `ab3678b6995b2b02…`.
+
+### Two smaller facts confirmed in passing
+
+- **Labels must come from v2b, not the v1 kit.** Of 400 sampled label files, **291 differ** —
+  that is the DEC-127 rebuild. Copying the v1 kit's `calibration/labels` would have paired v2
+  weights with pre-rebuild labels.
+- **`dataset/final/val/images` holds 6,645 files; the v2b val split uses 6,644.**
+  `exdark__2015_05337.jpeg` is excluded. The v1 kit excluded the same file, so the splits agree;
+  iterating the v2b split (not the source directory) is what keeps it out.
+
+### Honest reporting carried into the kit
+
+`RESTORE.md` leads with `eval_fp32_test_summary.json`'s recorded `"verdict": "FAIL"`, not the
+headline: the primary target passed (**mAP@0.5 = 0.7118** ≥ 0.70) but the per-class floors did not
+— **Person reached 0.7414 against a 0.75 floor**. Pole and Potholes were expected weak. The floor
+miss is a result to report, not a reason to withhold the kit.
+
+### What is still not done
+
+**No v2 HEF exists, and no on-device measurement exists.** Every number reported for v2 so far is
+fp32 on an RTX 4090. The INT8 quantization gap — the evaluation HEF over the frozen test split
+versus **mAP@0.5 = 0.7118 / mAP@0.5:0.95 = 0.4812** — remains the largest open gap in the thesis.
+Phases 1–7 of the handoff are unchanged and unstarted.
+
+---
+
+## DEC-136: The v2 Compile Is Driven by a Wizard, and Teardown Pauses the Pod — an Explicit Override of DEC-089's Keep-It-Running Rule
+
+**Date:** 2026-10-06
+**Status:** Accepted — wizard built and preflight-tested; Phases 1–7 not yet run
+**Related:** DEC-135 (the kit it uploads), DEC-114/116 (the procedure and the gate), DEC-089 (the operating rule this overrides), DEC-120/122 (the two HEFs and the targets)
+
+`runpod_v2_hailo_compile_wizard.sh` drives Phases 1–7 of
+`docs/HANDOFF_v2_hailo_compile_runpod.md` in 11 stages. Both that file and the handoff document are
+gitignored as ephemeral local tooling, so this entry is the tracked record of what they do and why.
+
+It is **derived from `runpod_hailo_validate_wizard.sh`, which is deliberately left untouched** —
+that wizard is the record of DEC-114's validation as actually run, and it answers a different
+question (does HailoRT 4.23 accept a DFC 3.34 HEF?) using stock `yolov8n` against 8 `coco8` images.
+Reused verbatim: the wizard library and the pod/SSH/venv stages, DEC-116's driver-matched torch
+install included. Replaced for v2:
+
+- **Its TensorFlow GPU check is gone.** DEC-116 established that a real `tf.matmul` ran on an L4 at
+  compute capability 8.9 while the export was already doomed — the obvious check passes while
+  everything is broken. The gate is now `import torch` and `import hailo_sdk_client` succeeding **in
+  one process**, since `yolo export format=hailo` imports both, with the ~80 s purge-and-reinstall
+  recovery wired in behind a confirm.
+- **Its two compiles (v5 + v4 of yolov8n) become the two v2 HEFs** the product needs: evaluation at
+  `conf=0.001` for measuring the quantization gap, deployment at `conf=0.05 iou=0.7` (DEC-120 —
+  thresholds are baked into the on-chip NMS and cannot be changed at runtime). The v4 downgrade is
+  contingency only; DEC-114 compiled both and **v5 passed**.
+- **A new stage extracts and verifies the kit on the pod** — `calibration/images` must count 6,644
+  and the digest must equal DEC-135's `6490abf1…` over 13,297 files, **before** the environment
+  build spends time. A count of 0 there is the DEC-135 symlink trap arriving on the pod.
+- **The upload stage probes the `/workspace` quota with `dd` before sending anything.** Added
+  2026-10-06 after the pod had to be migrated and the existing EU-RO-1 network volume came back into
+  play. That volume's effective ceiling behaves like **~16 GB, not the 50 GB the console reports**:
+  on 2026-09-14 it returned `EDQUOT` on any write over ~1 MB while `du` showed 16 GB used. `df` is
+  useless on MooseFS — it reports the whole cluster (2.0 P), not the per-volume quota, and the `mfs*`
+  tools are absent — so the probe writes the bytes that are actually still missing and deletes them.
+  Without it, a quota refusal surfaces partway through a **~30-minute** upload (measured throughput
+  ~0.7 MB/s, DEC-119) rather than in the first seconds. On refusal the wizard names the reclaimable
+  duplication (`bundle.tar`, ~5.4 GB, pure duplication of `bundle/`) and notes that deletion frees
+  the quota 1:1 immediately, since a 320 MB delete was verified to restore at least 256 MB — an
+  ordinary size quota, not MooseFS trash retention.
+
+### The teardown decision: Stop, not Terminate
+
+**Decided by the student, against the prior advice, and recorded as an override rather than edited
+away.** The handoff document had said Terminate; DEC-089 went further and adopted *keep it Running*
+as an operating rule after measuring the failure.
+
+That measurement stands and is the reason this needs recording: **a Stopped pod's GPU got reclaimed
+overnight** on this project — Community Cloud does not guarantee a Stopped pod keeps its physical
+GPU, "Automatically migrate" found no instances because migrate is scoped to the pod's own storage
+cluster rather than the marketplace, and **recovery cost close to a full calendar day**.
+
+| | keeps | loses | risk |
+|---|---|---|---|
+| **Stop** (chosen) | `/workspace`: the wheel + kit, ~1.2 GB of upload | `/root`: the venv, ~180 s to rebuild | GPU reclaim; still bills volume disk |
+| Running | everything, GPU allocation included | nothing | ~$0.50/hr idle — what DEC-089 adopted |
+| Terminate | nothing | the 1.2 GB of uploads | none; cheapest |
+
+**What the choice forced in the design.** Stop only preserves anything if the uploads are on the
+volume disk, so the wheel and `v2_kit.tar.gz` go to **`/workspace`** while the venv and the
+extracted kit stay on **`/root`**. This reverses the handoff document's original "upload to `/root`,
+not `/workspace`" instruction, which would have made a Stop preserve nothing at all. The FUSE
+reasoning behind that instruction still holds for the things it was actually about: DEC-114 measured
+the venv install dropping to ~100 s on the local overlay, and calibration reads all 6,644 images —
+but two large sequential uploads are exactly the workload MooseFS handles acceptably.
+
+**Restart handling, since Stop makes it routine.** DEC-114 measured both: the exposed SSH port
+changes (12592 → 10512 in that session), and the host key changes — `StrictHostKeyChecking=accept-new`
+trusts a first-seen key but **refuses a changed one**. The connect stage therefore re-prompts for the
+SSH command and runs `ssh-keygen -R` against the stale host:port before retrying, up to three
+attempts, and only persists a command that actually connected.
+
+### Field note, 2026-10-06: a migration succeeded where DEC-089's did not
+
+Before the first wizard run the pod became unavailable and had to be **migrated**. It migrated
+successfully and stayed in **EU-RO-1**, so the network volume and its data were preserved. Worth
+recording because DEC-089's incident is the opposite outcome — there, "Automatically migrate"
+reported no instances available because migrate is scoped to the pod's own storage cluster. Migrate
+is therefore not *reliably* useless, only constrained; one success and one failure is too small a
+sample to draw a rule from, so the DEC-089 caution stands unchanged.
+
+The operational consequence is the quota probe above: a migrated pod in EU-RO-1 brings the existing
+network volume back into play, and that volume is near its effective ceiling.
+
+### Still not done
+
+Phases 1–7 have not been run. No v2 HEF exists, and the INT8 quantization gap against fp32
+**mAP@0.5 = 0.7118 / mAP@0.5:0.95 = 0.4812** remains unmeasured — DEC-122's pre-registered INT8
+secondary target is mAP@0.5 ≥ 0.65.
+
+---
+
+## DEC-137: A Lapsed Balance Took the Pod and Cut Off the EU-RO-1 Network Volume — Nothing of Consequence Lost, a ~48 h Recovery Window Exists, and the Compile Got Simpler
+
+**Date:** 2026-10-07
+**Status:** Closed — loss accounted for; compile re-planned with no network volume
+**Related:** DEC-136 (whose Stop-not-Terminate reasoning this undercuts), DEC-089 (pod-loss risk, of which this is a worse variant), DEC-135 (the kit, unaffected), DEC-119 (the bundle, safe on the Mac)
+
+The RunPod balance lapsed mid-session, while the compile was paused at the `/workspace`
+quota prompt. The pod died and the EU-RO-1 network volume became inaccessible. No upload
+had started, so no transfer was lost.
+
+> **Amended same day — the volume may be recoverable.** A network volume is independent of
+> any Pod and is designed to survive Pod termination. Per RunPod's own documentation, disk
+> data is retained for **at least 48 hours after the balance is completely drained**, after
+> which automatic termination is **not recoverable**. So the correct reading is *cut off*,
+> not *destroyed* — the original wording here overstated the loss on first report.
+>
+> **Action, time-critical:** fund the account and check Storage in the console. This costs
+> nothing extra, because funding is required to rent a compile pod anyway.
+>
+> Recovery is **not on the critical path**: nothing on the volume is needed to compile. Its
+> only value is avoiding a future ~2.2 h re-upload of `bundle/` for a v3 training run. And
+> even if it returns, **do not attach it to the compile pod** — the datacenter pinning and
+> the ~16 GB quota both still apply.
+
+### Loss accounting, checked item by item against the Mac
+
+| was on the volume | status |
+|---|---|
+| `bundle/` — 54,514 images, 109,034 files | **safe** — `dataset/bundle/`, 5.3 GB |
+| `bundle.tar`, 5.1 GB | **safe** — sha256 `f71d355e…` verified against `dataset/bundle.tar.sha256` |
+| `model_backups/` — three runs | **safe** — `cap4500_yolov8s_v2{,-2}_20260913T164555Z.tar.gz` at the repo root |
+| `second-vision-ai/runs/detect/cap4500_yolov8s_v2` | **safe** — inside the v2 tarball with `best.pt` + `epoch0.pt`; note `runs/detect/` on the Mac does *not* carry this run unpacked |
+| `final_cap4500_v2` / `_v2a` / `final_cap4500` | **safe** — `dataset/final_v2b`, `final_v2a`, `final` (10 GB master) |
+| `v2a_labels.tar.gz`, `v2b_labels.tar.gz` | **safe** — both in `dataset/` |
+| `RESULTS.md`, 58,638 bytes | **safe** — `runs/detect/RESULTS.md`, byte count matches |
+| `v2_train.log` (8.2 MB), `post.log` (3.6 MB) | **lost** — raw stdout only; `RESULTS.md` holds the same console output, and `results.csv` + `events.out.tfevents` + `eval_fp32_test_*` hold the structured data |
+| three `*_baseline_smoke-*` runs | lost, no value |
+
+**Net loss: two stdout logs whose content survives elsewhere.** The volume was a copy,
+never a master.
+
+### The lesson that matters
+
+**A lapsed balance destroys Stopped pods and network volumes too.** DEC-136 chose Stop
+over Terminate to protect a ~30-minute upload, reasoning about *pod* loss. That reasoning
+does not extend to *account* loss, which takes the storage with it. RunPod storage is
+therefore not a backup of anything, and the Mac is this project's only durable store —
+which it has now demonstrated.
+
+**Revised operating rule:** finish a session, pull the artefacts down, Terminate. Do not
+park unique state on RunPod. This supersedes DEC-136's teardown choice.
+
+### What it changes for the compile — less, not more
+
+The quota fight is over, and the configuration now matches what DEC-114 recommended all
+along: **no network volume** (attaching one pins you to a single datacenter and costs you
+the cheapest-GPU choice). Without one, `/workspace` is the pod's *own* volume disk — no
+quota, survives Stop, destroyed on Terminate — so the wizard's default `UPLOAD_DIR` works
+unmodified and the `UPLOAD_DIR=/root` escape hatch added for the quota is no longer needed
+(kept, since it costs nothing).
+
+Deploy with **container disk ≥ 50 GB** — the dead pod had only 30 GB, which would have
+been tight once the DFC's TensorFlow/JAX/CUDA install landed alongside 1.2 GB of uploads —
+and a ~5 GB volume disk.
+
+`bundle/` does **not** need re-uploading. It is required only for a future v3 training run
+(~2.2 h at the measured ~0.7 MB/s), not for compiling: the compile needs the DFC wheel and
+the kit, both on the Mac.
+
+### Field note on the volume's quota, now moot but recorded
+
+Before it died, the volume refused a 1,199 MB write at 15 GB used with `Disk quota
+exceeded`, bisected to between 300 MB (OK) and 600 MB (FAIL). That is the **~16 GB
+effective ceiling against a console-reported 50 GB**, reproduced three weeks after the
+2026-09-14 observation. Also confirmed: the mount was `mfs#euro-3.runpod.net:9421` over
+FUSE, and `df` reported the whole cluster (2.2 P total, 523 T free) rather than the quota,
+so `df` can never answer this question — `du -sh` plus a `dd` probe is the only honest test.
+
+One useful thing was learned in that inventory: **everything the kit needs except the DFC
+wheel had been sitting on the volume** — `best.pt` at the exact expected sha256
+`ab3678b6995b2b02…` in two locations, all 6,644 calibration images present in
+`bundle/images/` and byte-identical to the kit's (both products of DEC-119's resize), all
+6,644 v2 val labels, and the run's full metadata. Had the volume survived, the upload could
+have been 524 MB instead of 1,199 MB. Worth remembering if a volume is ever rebuilt.
+
+---
+
+## DEC-138: The Kit Is Assembled On The Pod From The Surviving Volume — 501 MiB Uploaded Instead of 1,200, Proven Identical By Content Digest, and the HEFs Are Backed Up Before Download
+
+**Date:** 2026-10-08
+**Status:** Accepted — scripts written and tested both ways; Phases 1–7 still not run
+**Related:** DEC-137 (the volume survived), DEC-135 (the kit and its digest), DEC-136 (the wizard), DEC-119 (why the images on the volume are byte-identical), DEC-107/DEC-127 (the silent-substitution risks this guards)
+
+The EU-RO-1 network volume survived the balance lapse. Compiling is now happening over
+**mobile data**, which turns upload volume from a 20-minute annoyance into the dominant
+cost. So the kit is no longer uploaded whole.
+
+### What moves, and what is read from the volume
+
+The volume already holds, verified by inspection before it was cut off:
+
+- **all 6,644 calibration images** in `/workspace/bundle/images`, byte-identical to the
+  kit's — both are products of the same DEC-119 640-bounded resize, confirmed on a
+  sample (127,475 bytes on each side for the same file);
+- **`best.pt` at the exact expected sha256** `ab3678b6995b2b02…`, in two locations.
+
+Those are 680.8 MiB + 21.5 MiB of the kit's 703.1 MiB. Everything else — 6,644 labels,
+`data.yaml`, `classes.yaml.frozen`, provenance/pip_freeze/args, the eval CSV/JSON,
+`results.csv`, `RESTORE.md` — is **0.79 MiB** as a tar.
+
+| | upload |
+|---|---:|
+| wheel (not on the volume — checked) | 500.1 MiB |
+| skeleton tar | 0.8 MiB |
+| **total** | **500.9 MiB** |
+| previously, full kit | 1,199.9 MiB |
+
+**~12 minutes instead of ~30** at the measured ~0.7 MB/s.
+
+### Labels are deliberately NOT taken from the volume
+
+`/workspace/final_cap4500_v2/val/labels` has the right count (6,644), but proving it is
+the *same* label set would mean trusting a path name, and a v2a/v2b mix-up is exactly the
+silent error class DEC-127 and DEC-135 exist to document. At 0.85 MiB, shipping them from
+the verified kit costs nothing and removes the question. **Only two things come off the
+volume, and both are checked by digest rather than by trust.**
+
+### Three fatal checks, and why the third is the one that matters
+
+`scripts/train/assemble_kit_on_pod.py` aborts unless all three hold:
+
+1. `best.pt` sha256 equals `ab3678b6995b2b02…` — it searches candidate paths and selects
+   **by checksum, not by path**, so a wrong `best.pt` cannot be picked up;
+2. the assembled tree's **path+size** digest equals DEC-135's `6490abf1…` over 13,297 files;
+3. the assembled tree's **content** digest equals `8a41a50ca4a3f634…`.
+
+Check 2 alone is not enough: a path+size digest passes on a same-length-different-bytes
+file. Check 3 closes that, and together they prove the pod's kit is bit-for-bit what was
+verified on the Mac — so reading the images off the volume cannot have substituted
+anything.
+
+**Tested both directions, locally, before any pod existed.** The v1 kit's
+`calibration/images` is byte-identical to the v2 kit's (300/300 sampled, DEC-135), which
+makes it a faithful stand-in for `/workspace/bundle/images`:
+
+| input | result |
+|---|---|
+| correct images + correct weights | all three digests match, exit 0 |
+| raw originals instead of 640-bounded | **4,392 wrong-size images** caught, exit 1 |
+| v1 `best.pt` (nc=15, sha256 `6aa34094…`) | rejected on checksum, exit 1 |
+
+That middle row is the DEC-119 resize being enforced mechanically; the last is the DEC-107
+v1/v2 confusion caught by machine rather than by care.
+
+### HEFs are backed up to the volume before any download
+
+Over an unreliable mobile connection, a dropped transfer after a successful compile should
+not mean recompiling. Stage 10 therefore copies both output directories to
+`/workspace/hef_backup_v2/` **first**, then asks whether to download now or later. A
+network volume survives pod Terminate, so the backup outlives the session either way. At
+~12–16 MB per HEF for yolov8s (11,141,018 params; the 4.2 MB figure in `hailo_out/` is
+DEC-114's stock *yolov8n* validation artefact, not this model) the pair is ~30 MB and fits
+the volume's remaining headroom without deleting anything.
+
+If "later" is chosen the wizard prints the exact `rsync` to retrieve them, and warns
+plainly: **the volume backup is convenience, not a backup.** A balance lapse takes it
+offline and destroys it after ~48 h unfunded (DEC-137).
+
+### The fallback is kept
+
+`KIT_SOURCE=upload` ships the whole 699.8 MiB kit and needs no volume — for when EU-RO-1
+has no GPU available, since attaching the volume pins the pod to that datacenter and
+DEC-089's migrate is scoped to the volume's own cluster. The wizard checks the volume is
+attached and populated in stage 3 and says so if not.
+
+### Still not done
+
+Phases 1–7 remain unrun. No v2 HEF exists, and the INT8 gap against fp32
+**mAP@0.5 = 0.7118 / mAP@0.5:0.95 = 0.4812** is unmeasured. DEC-122's pre-registered INT8
+target is mAP@0.5 ≥ 0.65.
+
+---
+
+## DEC-139: Both v2 HEFs Compiled and Verified — nc=14 Reached the Chip, Thresholds Baked as Intended, and the Volume-Sourced Path Was Blocked by DEC-123's Repaired JPEGs
+
+**Date:** 2026-10-08
+**Status:** Closed — HEFs compiled, downloaded, byte-verified in three locations, pod terminated
+**Related:** DEC-138 (the volume path this abandoned), DEC-135 (the kit), DEC-123 (the repaired JPEGs that blocked it), DEC-114/116 (the validated toolchain and the torch ordering), DEC-120/122 (the two HEFs and the targets), DEC-107/126 (the schema that had to survive)
+
+**Both HEFs exist.** Compiled on an **NVIDIA L4** (23,034 MiB, driver 595.91.07) from kit digest
+`6490abf1…`, and downloaded to `models/current/hef_v2/`.
+
+| | `nms_scores_th` | `nms_iou_th` | `classes` | sha256 | bytes | wall-clock |
+|---|---|---|---|---|---|---|
+| `hef_eval/best.hef` | **0.001** | 0.7 | **14** | `2ee394c8…` | 9,681,816 | 3,044 s |
+| `hef_deploy/best.hef` | **0.05** | 0.7 | **14** | `c6e4ec98…` | 9,681,398 | 3,071 s |
+
+### The three things worth having checked
+
+**1. `classes = 14` in both `nms_config.json` files.** The nc=14 schema reached the chip. This is
+the DEC-107 failure mode closed at the output rather than assumed: a v1 HEF would have said 15.
+
+**2. The two HEFs genuinely differ.** `0.001` versus `0.05` confirms the second compile was not a
+duplicate — worth verifying explicitly, because conf is frozen into the on-chip NMS (DEC-120) and
+two identical HEFs would have cost 51 minutes and produced nothing. `iou=0.7` in both, as intended.
+
+**3. Byte-identical in three places**, by sha256: the Mac, the pod's `/root`, and
+`/workspace/hef_backup_v2/` on the network volume. Checked *before* terminating, since a corrupt
+download discovered later would have meant recompiling.
+
+### ~51 minutes per compile, not 298 s
+
+DEC-114's 298 s was measured calibrating on **8 coco8 images**. This calibrated on all **6,644**,
+so **3,044 s / 3,071 s** is the honest figure for a real calibration set — about 10x. Budget an
+hour and a half of pod time for a recompile, not ten minutes.
+
+### DEC-116's fix was exercised, in the exact scenario that caused it
+
+The driver reported a CUDA 13 ceiling, so the ladder selected `cu130` and installed
+**`torch 2.14.1+cu130`** — and the gate reported `cuda True`. DEC-116's failure was `cu130` on a
+driver capped at **12.8**; here the same index on a CUDA-13-capable driver is the correct pairing.
+The ladder is what made that distinction, and nothing about the run suggests it would have been
+caught otherwise.
+
+Verified working state: `torch 2.14.1+cu130` (cuda True), `tensorflow 2.18.0`, `hailo_sdk 3.34.0`,
+`ultralytics 8.4.118`, Python 3.12.3, on Ubuntu 24.04 against a DFC that states 20.04 as required —
+which it tolerated. The DFC's own check also flagged `CUDA 12.5 recommended` and
+`GPU-Driver 560 recommended, 595 found`; both were warnings, neither blocked.
+
+### Why the volume-sourced path (DEC-138) could not be used
+
+It aborted on **3 of 6,644 calibration images** whose sizes disagreed with the kit — and the three
+were exactly `exdark__2015_01610.jpg`, `_03579.jpg`, `_05388.jpg`: **the val-split files DEC-123
+recorded ultralytics repairing in place during training.**
+
+Diagnosed rather than assumed: those three files on the Mac end in `d900` / `0000` / `0000`
+instead of the JPEG EOI marker `ffd9`, while controls end correctly in `ffd9`. That missing marker
+is what ultralytics' image check looks for, and it re-saves at `quality=100` — hence the volume's
+copies being ~4x larger (105,756 vs 23,759 bytes, and so on).
+
+**The fallback was taken deliberately rather than loosening the check.** A verification with a
+carve-out for "the files we already know differ" is how DEC-107-class errors get through, and
+catching substituted calibration data was the content digest's entire purpose. `KIT_SOURCE=upload`
+shipped the Mac's kit whole; the already-uploaded wheel was skipped by the byte check, so the extra
+cost was ~700 MiB.
+
+**It also changed nothing about the output.** ultralytics repairs those three files again during
+the export's own dataset scan, before calibration reads a pixel — so calibration saw repaired
+images either way. The divergence was cosmetic to the HEF and fatal only to the digest.
+
+> **Follow-up, not done:** `dataset/final` still holds **6 defective JPEGs** — the 3 val files
+> above plus `exdark__2015_03095`, `_03651`, `_04507` in train. They are silently repaired at every
+> training and export run. Repairing them once locally would fix the master, unblock the
+> volume-sourced path, and remove a recurring surprise — but it changes the kit digests and
+> DEC-135's recorded CHECKSUM, so it is a deliberate task, not a mid-session fix.
+
+### What was rescued from the pod before terminating
+
+The compile venv's `pip freeze` (**202 packages**) is the authoritative environment record per
+DEC-120, and is **distinct from the kit's `pip_freeze.txt`**, which records the *training* venv.
+Also pulled: the venv build log (76 KB) and the DFC's five own compiler logs (`hailo_sdk.core.log`
+and `.core.1.log` at ~625 KB each, plus `client`, `acceleras`, `allocator`). All in
+`models/current/hef_v2/compile_record/`, with a `CHECKSUM` carrying per-file sha256 and an
+aggregate content digest `9d89591f…` over 15 files.
+
+No `.har` survived — the exporter cleans up its intermediates, so a v4 HEF downgrade would need
+full re-quantization (~51 min), not a cheap re-emit. Worth knowing before treating v4 as a quick
+contingency.
+
+### Still the largest open gap
+
+**No on-device measurement exists.** `hailortcli parse-hef` on the Pi is unrun, and the INT8
+quantization gap against fp32 **mAP@0.5 = 0.7118 / mAP@0.5:0.95 = 0.4812** is unmeasured. Every v2
+number reported so far is fp32 on an RTX 4090. DEC-122's pre-registered INT8 target is
+mAP@0.5 ≥ 0.65.
+
+### Correction, 2026-10-09 — the class-index claim in this entry was wrong
+
+This entry originally argued that `nms_config.json`'s `background_removal = False` / `classes = 14`
+proved the runtime emits indices **0–13**, and therefore that `config/classes.yaml`'s
+`hailo_runtime_names` (Background at 0, real classes at 1–14) was stale and should be corrected.
+**That was an unfounded inference and the proposed correction would have been harmful.**
+
+`nms_config.json` describes what the **compiler** does to the output tensor. `hailo_runtime_names`
+describes the index space the **host-side label lookup** expects. An offset applied by the host
+postprocess is invisible in the HEF, so the first says nothing about the second. The two do not
+contradict each other.
+
+The Background-at-0 convention is also not a stale note: it traces to **DEC-002** (*"Hailo runtime
+will see these as classes 1–15, background injected as class 0"*) and has been deliberately carried
+through DEC-100, DEC-101, DEC-107, DEC-115 and DEC-126 as one of DEC-107's five tracked schema
+copies.
+
+**The public documentation does not settle it either** — checked on 2026-10-09: hailo-apps'
+`running_applications.md` documents `--labels-json` but specifies neither schema nor indexing; one
+community thread shows a custom 3-class model mapped 0-based with no placeholder; hailo-apps-infra's
+barcode example reportedly leads with `"unlabeled"`; a thread that looked directly on-point resolved
+to an unrelated `use_frame` bug.
+
+**It is settled by two file reads on the Pi, not by inference and not by running the model.** If the
+stock COCO HEF declares N classes and Hailo's default labels file has N+1 entries with a placeholder
+at 0, the postprocess applies a +1 offset and `hailo_runtime_names` is correct; if it has N, it is
+0-based. The procedure is in `docs/HANDOFF_hailo_pi_verification.md`.
+
+**Extra risk worth recording:** the existing Pi runtime code drives the **stock COCO HEF with
+Hailo's default labels** — exactly the path where an `unlabeled`-at-0 convention lives. Code that is
+correct for COCO can still mis-map a custom 14-class model, and if it does, Person reads as
+Background and Vehicle reads as Person. DEC-107 at the final step, silent.
+
+Nothing here affects the HEFs. They are correct either way; this is purely host-side label lookup,
+so no recompile is at stake.
+
+---
+
+## DEC-140: v3 Recovers 13,383 Boxes Into a New Tree — Tiers A and C Only, cap4500 Not cap9000, and the Test Set Changed
+
+**Date:** 2026-10-17
+**Status:** Tree built and verified. Not yet trained.
+**Artefacts:** `dataset/final_cap4500_nc13_v3/`, `dataset/proposals/accepted_v3_AC.json`,
+`notebooks/fiftyone_v3_proposed_dataset.ipynb`, `scripts/build/build_cap4500_v3_tree.py`
+
+### What was done
+
+Two independent detectors were run over the full pool to find objects present in the images but
+missing from the labels: **yolov8x** (COCO-pretrained, independent of our training data, so it sees
+what our own model is blind to) proposes, and **cap4500_yolov8s_v2-2** confirms. 81,446 raw
+proposals; **13,383 promoted**.
+
+### Why cap4500 and not cap9000
+
+cap9000 adds 11,344 train images over cap4500 (val/test are byte-identical across all three pools).
+Measured, those extras contain:
+
+```
+Person 18,824 · Vehicle 7,052 · Animals 3,477 · Tables 1,479 · Chairs 1,415 · Motorcycle 1,790
+Bicycle 3 · Doors 0 · Tricycle 0 · Potholes 0 · Trash Bins 0 · Stairs 0 · Bench 0
+```
+
+**Eight of fifteen classes get exactly zero**, including every rare class. 76% of the added boxes
+are Person and Vehicle, which sit at 71k and 27k and are long past saturation. Going to cap9000
+would push the five rare classes from 8.9% to 7.2% of the pool while adding nothing to them — and
+mAP is a per-class average. The recovery yield per image was also statistically identical (1.21 vs
+1.23), so the extras' lower density (3.00 vs 3.85 boxes/img) is **genuine content sparsity, not a
+labelling artefact recovery can repair**. The cap9000 trees are kept, not deleted.
+
+### Why tiers A and C only
+
+Tier = yolov8x confidence band × whether v2 independently confirms. A/C are the confirmed tiers.
+B and D (v2 silent) and E (conf 0.25–0.50) were rejected on **visual** evidence, not on the metric:
+
+* **B and D split in half** on whether v2 saw anything at all — 48% and 41% have `v2_conf = 0.00`.
+  Rendering that half showed confident garbage: a **bollard** as Chairs (0.78), a **stone wall slot**
+  as Bench (0.71), a **blurred smear** as Vehicle (0.90), a **sofa with a dog on it** as Bicycle
+  (0.56), and **stair treads** as Bench/Chairs/Person.
+* High yolov8x confidence does **not** rescue a v2-silent box. B sits at conf ≥ 0.70 and looks worse
+  than D's corroborated half at 0.50–0.70. **Cross-model agreement predicts correctness better than
+  either model's own confidence** — which inverts the A→E ordering the tiers were designed around.
+* E is ~half unusable: a box on a **black empty region** as Person, a **lawn** as Tables, a person's
+  **head in a crowd** as Chairs, an **exercise bike** as Tables.
+
+### Duplicate suppression, and the two filters that were missing
+
+The original emit rule ("no same-class label at IoU ≥ 0.5") plus the `nested` flag (IoMin ≥ 0.9)
+left a gap: a duplicate drawn at a different extent lands at IoU ≈ 0.35 and escapes both. Measured
+and closed:
+
+```
+ 8,893  same-class fully nested  IoMin >= 0.90
+ 3,273  nested inside a Tricycle box        <- DEC-109/111 alias resurfacing
+ 1,587  same-class re-box        IoU  >= 0.30   <- ESCAPED the original filters
+ 2,879  same-class partial nest  IoMin >= 0.50  <- ESCAPED the original filters
+ 3,101  proposal vs proposal     IoU  >= 0.30   <- yolov8x NMS runs at 0.7, so it
+                                                   emits its own duplicates
+ 1,339  lands on a rare-class box IoMin >= 0.30
+```
+
+The Tricycle count is DEC-109/111 behaving exactly as that decision predicts: a tricycle *is* a
+motorcycle plus a cab, so yolov8x re-proposes its motorcycle half as a separate object.
+
+**The rare-class filter is a safety decision, not a cleanliness one.** 655 proposals landed on an
+existing **Stairs** box, 284 on Tricycle, 218 on Trash Bins. Those five classes receive **zero**
+recovery — no COCO class maps to them — so a proposal landing on one can only contradict it. A stair
+tread also carrying a Bench box degrades the class whose failure mode is a user walking into a
+staircase.
+
+### Result
+
+| | original | added | total |
+|---|---:|---:|---:|
+| Chairs | 15,186 | +2,563 (**+16.9%**) | 17,749 |
+| Person | 52,139 | +6,624 (+12.7%) | 58,763 |
+| Vehicle | 19,685 | +2,258 (+11.5%) | 21,943 |
+| Bench | 6,208 | +532 (+8.6%) | 6,740 |
+| Bicycle | 7,457 | +522 (+7.0%) | 7,979 |
+| Doors / Tricycle / Potholes / Trash Bins / Stairs | 17,904 | **0** | 17,904 |
+| **pool** | **147,686** | **+13,383 (+9.1%)** | **161,069** |
+
+87.1% of recovered boxes come from `open_images`, consistent with the earlier finding that it is
+the most under-annotated source.
+
+### Nothing existing was modified
+
+`dataset/processed/` was opened **read-only** and remains the authoritative 15-class store. Images
+in the new tree are **hardlinks** into `dataset/bundle/images/` (DEC-135: symlinks do not survive
+`tar` and would calibrate INT8 on zero images). The tree adds ~160 MB — label text only.
+`dataset/reports/pre_v3_integrity.json` captures file counts, byte totals and newest mtime for all
+seven pre-existing trees; re-checked after the build, **all seven unchanged**. 400 randomly sampled
+enriched label files were verified line-by-line against `dataset/processed` + the accepted-proposal
+JSON: zero mismatches.
+
+### OPEN: the test set changed, so 0.7118 is no longer the comparison point
+
+Recovered boxes went into **all three splits** (train 8,978 · val 2,187 · test 2,218), following the
+v2 precedent — v2 enriched everything and then re-scored v1 on the new labels, which is where 0.6825
+came from. The consequence is that **v2's 0.7118 must be re-measured on the v3 test labels before
+any v3 result is compared to it** (~117 s locally). A train-only variant is one flag away:
+`build_cap4500_v3_tree.py --apply --splits train`.
+
+Also unresolved: ~5% of promoted boxes still overlap an existing box of a *different* class at
+IoU ≥ 0.50 (Bench↔Tables 581, Bench↔Chairs 261, Motorcycle↔Bicycle 204). Some are legitimate
+(Person on Motorcycle, 279), some are one object under two names. Not filtered, because the
+legitimate and illegitimate cases are not geometrically separable.
+
+**Addendum (2026-10-18) — rejected proposals are now retained, not just counted.**
+Reviewing the tree surfaced a gap: a visibly unlabelled object looks identical whether a
+filter dropped a proposal on it or neither detector ever proposed one, yet those have
+opposite fixes (loosen a filter vs. label by hand). `classify_proposals()` in the build
+script now records a disposition for **every** proposal and
+`scripts/curate/write_proposal_dispositions.py` writes all 65,172 to
+`dataset/proposals/dispositions.jsonl` (13,383 accepted + 51,789 rejected, verified to
+reproduce the built tree exactly). `notebooks/fiftyone_v3_proposed_dataset.ipynb` v2 draws
+three independently toggleable layers — `ground_truth`, `proposed_kept`, `proposed_rejected`
+— so the three cases are distinguishable on the image, and each rejected box names the
+filter that dropped it.
+
+---
+
+## DEC-141: Strict and Permissive v3 Variants Built Side by Side — Three Filter Corrections, and Agreement Recovered From Tiers D and E
+
+**Date:** 2026-10-18
+**Status:** Both trees built and verified. Neither trained.
+**Artefacts:** `dataset/final_cap4500_nc13_v3s/`, `dataset/final_cap4500_nc13_v3p/`,
+`scripts/build/build_cap4500_v3_variants.py`, `scripts/curate/write_variant_dispositions.py`,
+`notebooks/fiftyone_v3_proposed_dataset.ipynb` v4,
+snapshot `dataset/backups/v3_snapshot_20261018T011502Z/`
+
+### Three corrections, applied to BOTH variants
+
+These were rule errors, not a tightness preference:
+
+* **`rej_6` was wrong.** It dropped any proposal overlapping a rare-class box at
+  IoMin ≥ 0.30, justified as "a proposal there can only contradict it." That is false for
+  a person standing on a staircase. Measured: **80.9% of what it dropped were legitimate**
+  distinct objects — Person near Stairs 401, Bench near Stairs 130, Person near Doors 38 —
+  and only 6.9% were same-extent relabels. Now fires only at **IoU ≥ 0.70**. Rejections
+  there: 1,339 → 94.
+* **`rej_3` (same-class re-box, IoU ≥ 0.30) removed.** Worth only **7 boxes** on its own;
+  almost everything it caught is caught by partial-nest or self-overlap anyway.
+* **`rej_4` (same-class partial nest, IoMin ≥ 0.50) removed.** Adjacent objects — chairs in
+  a row, people in a crowd — routinely half-overlap. Worth 1,414 boxes.
+
+### The permissive variable
+
+* **Tier D with PARTIAL agreement (v2_conf ≥ 0.25)** — 3,693 candidates. Note **tier D with
+  strict agreement is empty by construction**: `tier()` is `'C' if agree else 'D'`, so an
+  agreeing box at that confidence is already C. Partial agreement means v2 fired on the same
+  class nearby but under the IoU 0.5 matching bar — corroboration of existence, disagreement
+  on extent.
+* **Tier E with STRICT agreement (v2_conf ≥ 0.25).** `tier()` discarded agreement below 0.50
+  confidence (`return 'E'` regardless), collapsing **12,260 agreeing and 27,624 silent**
+  proposals into one bucket. A/B and C/D get the split; E did not. That was an oversight.
+
+Still rejected in both: same-class nesting ≥ 0.90, the Tricycle alias (DEC-109/111),
+proposal-vs-proposal self-overlap, tier B, and tier E without agreement.
+
+### Result
+
+| tree | train | val | test | total | vs original |
+|---|---:|---:|---:|---:|---:|
+| `v3s` STRICT | +10,102 | +2,450 | +2,502 | 162,740 | +10.2% |
+| `v3p` PERMISSIVE | +13,992 | +2,450 | +2,502 | 166,630 | +12.8% |
+
+**Val and test are byte-identical between the two variants** and always use the strict rule.
+A false box in an evaluation split is an unmatchable false negative: it caps measured recall
+permanently and cannot be absorbed the way training noise can. Holding the eval splits fixed
+is also what makes a strict-vs-permissive comparison mean anything — only training labels
+differ, so the yardstick never moves. **This reverses the earlier recommendation in DEC-140
+to enrich all three splits equally.**
+
+Permissiveness buys **+3,890 training boxes**: Person +1,873, Chairs +643, Vehicle +623,
+Motorcycle +287, Bench +159, Tables +162, Bicycle +118, Animals +25.
+
+### The noise-vs-volume arithmetic that set the boundary
+
+Current labels carry an estimated **26.4% false-negative rate** — ~53,000 objects present but
+unlabelled. In YOLO every unlabelled region trains as background, so each is an active
+"this is not a Chair" signal, not a neutral absence. The trade is therefore not clean-vs-noisy
+but *which kind* of noise, at very different magnitudes:
+
+| option | added | correct | wrong | FN left | FP added | net |
+|---|---:|---:|---:|---:|---:|---:|
+| A+C core | 15,054 | 13,548 | 1,506 | 19.7% | 0.9% | +12,042 |
+| + E&agree v2 ≥ 0.25 | 18,242 | 15,851 | 2,391 | 18.5% | 1.4% | +13,460 |
+| + E&agree any v2_conf | 21,624 | 17,711 | 3,913 | 17.6% | 2.3% | +13,798 |
+| + B/D/E with **no** agreement | 45,358 | 28,391 | 16,967 | 12.3% | 8.8% | **+11,424** |
+
+**Net gain peaks at the agreement boundary and falls beyond it** — the unconfirmed tiers buy
+10,680 real labels at a cost of 13,054 wrong ones. Within the agreement tiers the v2_conf
+< 0.25 band is near break-even (+1,860 / −1,522), which is why the gate sits at 0.25.
+
+Precision figures are estimated from 36-image visual samples and are the weak link. An
+objective geometry check supports the ranking: tier A boxes are **0.99×** the median GT area
+for their class with 0.9% below the GT 5th percentile, while E-silent is 0.22× with 16.8%
+below — but E+agree has the **same aspect-ratio deviation as A and C (0.36 vs 0.33/0.36)**,
+so its boxes are plausibly shaped and merely small, which is what annotators miss.
+
+**Only training settles the weighting.** v2 ran 100 epochs in 10,876 s ≈ 3 GPU-hours, so a
+three-arm comparison (no recovery / strict / permissive, identical eval splits) is ~9
+GPU-hours.
+
+### Nothing was overwritten
+
+The as-built tree `final_cap4500_nc13_v3` is untouched and byte-identical to its snapshot;
+all seven pre-existing trees verified unchanged after the build. Both new trees use hardlinks
+into `dataset/bundle/images/` (DEC-135) and cost ~300 MB of label text combined.
+`dispositions.jsonl` predates the corrections, so per-variant disposition files are written
+instead and the notebook loads the one matching the tree it browses.
+
+**Addendum (2026-10-18) — `rej_unconfirmed` was mislabelling 6,365 boxes that v2 DID confirm.**
+Reviewing two near-identical tier-E Person boxes in the App exposed it: one kept
+(x_conf 0.303, v2_conf 0.283), one rejected (x_conf 0.302, v2_conf 0.101) — **both with
+`agree=True`**. They differ only by v2's own confidence crossing the 0.25 gate, yet the
+rejected one was tagged `rej_unconfirmed`, documented as "dropped for lack of a second
+opinion." It had a second opinion. Rejection reasons now name what v2 actually did, and the
+notebook carries **three** families instead of two:
+
+| family | n | meaning |
+|---|---:|---|
+| `rej_conflict` | 7,519 | clashes with an existing box, another proposal, or relabels a rare-class object |
+| `rej_below_gate` | 3,529 | **v2 backed it**; only its confidence fell under the gate |
+| `rej_unconfirmed` | 12,604 | v2 genuinely did not back it (no IoU ≥ 0.5 match, or saw nothing) |
+
+`rej_below_gate` is the set a looser gate would promote, and the closest call in the data.
+Acceptance logic is unchanged — STRICT still 15,054, PERMISSIVE still 20,777, both trees
+untouched. Only the description of rejections changed.
+
+**Addendum 2 (2026-10-18) — three arms, and the proposal-vs-proposal threshold was wrong.**
+A third variant `final_cap4500_nc13_v3l` (**LOOSE**) accepts every proposal surviving the
+conflict filters, with no v2 corroboration at any tier. The conflict chain is now **identical
+across all three arms**, so the only variable is the tier gate.
+
+The self-overlap check was dropping boxes at IoU ≥ 0.30. That was wrong: all proposals for an
+image come from one yolov8x call, so ultralytics NMS has **already** deduplicated them at
+IoU 0.7. A 0.30 threshold second-guesses NMS and deletes boxes it deliberately kept —
+**3,859 pairs sit in 0.30–0.70, of which 1,374 are Person** (people standing close in crowds).
+
+The ≥ 0.70 tail is real and still rejected: **402 pairs, 304 Vehicle, 73 Chairs, 24 Animals,
+1 Person**. Those are precisely the classes where `C2O` maps several COCO ids onto one of ours
+(car/bus/truck → Vehicle, chair/couch → Chairs). Ultralytics NMS is **class-aware**, so it
+never compares a `car` box against a `truck` box on the same vehicle; both survive, then both
+collapse onto Vehicle as a near-identical pair. Same failure as DEC-133's hierarchy collapse,
+one layer earlier. Threshold moved 0.30 → 0.70.
+
+**`same-class nested >= 0.90` is retained unchanged in all three arms** (8,893 rejections). It
+was examined — only 12.9% are same-size duplicates and the rest are small boxes inside big
+same-class boxes, a mix of occluded distinct objects and sub-part false positives (a truck's
+windshield boxed as Vehicle, a bench slat boxed as Bench) — and left in place.
+
+| tree | train | total | rule |
+|---|---:|---:|---|
+| `v3s` STRICT | 113,965 | 162,997 | tiers A, C |
+| `v3p` PERMISSIVE | 118,279 | 167,311 | + D partial, + E agreed (v2_conf ≥ 0.25) |
+| `v3l` LOOSE | 140,801 | 189,833 | all tiers, no corroboration required |
+
+Conflict rejections: 12,544 in every arm. val/test byte-identical across all three. The
+pre-correction trees were moved aside as `*.superseded_20261018T042100Z`, not deleted.
+
+---
+
+## DEC-142: RunPod's MooseFS Quota Counts Directory Entries, Not Inodes — Hardlinks Are Not Free, and 12 GiB of the 50 GB Volume Holds Zero Unique Data
+
+**Date:** 2026-10-18
+**Status:** Verified on a CPU pod. Nothing deleted.
+
+### The finding
+
+`du` reported 15 GB on a 50 GB volume that was demonstrably almost full. `du` dedupes
+hardlinked inodes; **RunPod's MooseFS quota does not**. Tested directly:
+
+```
+headroom before:          256 MiB
+created 2,179 hardlinks (201 MiB of entry-counted size)
+headroom after:             0 MiB
+headroom once removed:    256 MiB
+```
+
+Counting every directory entry gives **26.63 GiB** against 14.64 GiB of unique inodes
+(368,637 files, 195,955 inodes). Trash retention was ruled out separately — a delete frees
+quota immediately.
+
+**Consequence: hardlinking images into a tree costs full quota.** The three trees on the
+volume each carry 4.01 GiB of image entries for images stored exactly once in `bundle/`:
+
+```
+final_cap4500      4.01 GiB
+final_cap4500_v2   4.01 GiB   = 12.03 GiB of quota, zero unique data
+final_cap4500_v2a  4.01 GiB
+```
+
+This also invalidates an earlier estimate in this conversation that three new trees would
+cost ~165 MB because images are hardlinked. They would cost ~12 GiB.
+
+### Reproducibility verified before proposing any removal
+
+Content hashes (sorted filename list + concatenated label bytes), identical script both
+sides:
+
+| tree | train | val | test |
+|---|---|---|---|
+| `final_cap4500` | identical | identical once the stray is dropped | identical |
+| `final_cap4500_v2` | identical | identical | identical |
+| `final_cap4500_v2a` | identical | identical | identical |
+
+`dataset/final/val` locally holds **one image the cap4500 manifest never contained**
+(`exdark__2015_05337`). The volume tree is the manifest-faithful one; restricting the local
+labels to the manifest reproduces the volume val hash `f2691146ec33ca16` exactly, zero files
+missing. `bundle.tar` on the volume is sha256-identical to the local copy.
+
+### Cheaper tree layout for the three v3 arms
+
+Since entries cost quota, the arms should not materialise 43,170 image entries each. YOLO
+`data.yaml` accepts text files listing image paths, so each arm needs one symlink to
+`bundle/images`, a real `labels/` directory, and three path lists — **~160 MB per arm instead
+of 4 GiB**. DEC-135's symlink prohibition was specific to `tar` archiving them; these are
+created and consumed in place on one filesystem.
+
+### The arms are training-ready
+
+Verified through ultralytics' own loader (`check_det_dataset` + `YOLODataset`, the code path
+`model.train()` uses), not by re-parsing the files:
+
+| tree | nc | train | val | test | total |
+|---|---|---:|---:|---:|---:|
+| `v3s` | 13 | 113,965 | 24,561 | 24,471 | 162,997 |
+| `v3p` | 13 | 118,279 | 24,561 | 24,471 | 167,311 |
+| `v3l` | 13 | 140,801 | 24,561 | 24,471 | 189,833 |
+
+Every count matches the build scripts, names resolve correctly, no out-of-range class ids,
+and val/test are byte-identical across all three so the evaluation yardstick cannot move
+between arms.
