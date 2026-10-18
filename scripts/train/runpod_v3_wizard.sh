@@ -278,6 +278,10 @@ SSH_OPTS=(
   -o ConnectionAttempts=3
   -o ServerAliveInterval=5
   -o ServerAliveCountMax=3
+  # The payloads are already-compressed bytes (.tar.gz up, .pt down), so SSH
+  # compression spends CPU to shrink nothing. upload_bundle.sh sets this for
+  # the same reason on the same link.
+  -o Compression=no
 )
 SSH_TRIES="${SSH_TRIES:-5}"
 
@@ -324,15 +328,71 @@ podssh() {
 # a prefix of the source and SKIPS any file whose destination size already
 # matches -- which would silently decline to re-pull a result file that changed
 # without changing length.
+# SYNC_TRIES is deliberately higher than SSH_TRIES: a transfer holds the link
+# open for far longer than a one-shot command, so it is proportionally likelier
+# to be cut, and -- unlike a command -- every attempt makes forward progress
+# because the partial survives. Measured on the 2026-10-18 link, a 12 MB upload
+# took more than 3 attempts, so 5 was not enough and 12 is not excessive. The
+# backoff is capped at 30 s so a long retry run does not drift into hours.
+SYNC_TRIES="${SYNC_TRIES:-12}"
+
+# Pick GNU rsync explicitly. THIS KNOWLEDGE IS NOT NEW -- it is lifted from
+# scripts/train/upload_bundle.sh, which already probes these three paths and
+# documents why: macOS /usr/bin/rsync is openrsync, which reports "rsync version
+# 2.6.9 compatible" but REJECTS --append-verify and --info=progress2. Calling a
+# bare `rsync` worked only because PATH happened to find Homebrew's GNU build; on
+# a machine without it, podsync would have failed on flags rather than on the link.
+RSYNC_BIN=""
+_openrsync_fallback=""
+for _cand in /opt/homebrew/bin/rsync /usr/local/bin/rsync /usr/bin/rsync; do
+  [ -x "$_cand" ] || continue
+  if "$_cand" --version 2>&1 | head -1 | grep -qi openrsync; then
+    [ -n "$_openrsync_fallback" ] || _openrsync_fallback="$_cand"
+  else
+    RSYNC_BIN="$_cand"; break
+  fi
+done
+[ -n "$RSYNC_BIN" ] || RSYNC_BIN="$_openrsync_fallback"
+[ -n "$RSYNC_BIN" ] || RSYNC_BIN="rsync"
+unset _cand _openrsync_fallback
+
+# NOT -a. `-a` implies -o and -g (preserve owner and group), and setting those
+# fails on this MooseFS volume: "chown ... Operation not permitted", rsync exit
+# 23. Exit 23 means "the DATA moved, some attributes did not" -- so every attempt
+# transferred the whole tarball and then reported failure, and the loop re-sent a
+# file that had already landed, with nothing in the message to distinguish it
+# from packet loss. Observed 2026-10-18; the sha256 gate confirmed all three arms
+# were in fact intact on the pod.
+#
+# No -z either. Every payload here is already compressed -- .tar.gz going up,
+# .pt coming down -- so compressing it again spends CPU to save nothing. Same
+# reason upload_bundle.sh sets ssh Compression=no, which SSH_OPTS now does too.
+#
+# -rlt keeps recursion, symlinks and mtimes, and requests no ownership at all.
+RSYNC_OPTS=(-rlt --partial --partial-dir=.rsync-partial --timeout=60)
+
+# Exit codes that will NEVER succeed on retry -- usage, protocol mismatch, bad
+# file selection, unsupported action. Retrying these only buries the one line
+# that says what is actually wrong.
+_rsync_fatal() { case "$1" in 1|2|3|4|6) return 0 ;; *) return 1 ;; esac; }
+
 podsync() {
-  local n=1
+  local n=1 delay rc
   while :; do
-    rsync -az --partial --partial-dir=.rsync-partial --timeout=60 \
+    "$RSYNC_BIN" "${RSYNC_OPTS[@]}" \
           -e "ssh -p $GPU_POD_PORT -i $SSH_KEY ${SSH_OPTS[*]}" "$@" && return 0
-    [[ $n -ge $SSH_TRIES ]] && return 1
-    printf '  %stransfer interrupted (%s/%s) — resuming in %ss%s\n' \
-      "$DIM" "$n" "$SSH_TRIES" "$((n * 5))" "$RESET" >&2
-    sleep "$((n * 5))"
+    rc=$?
+    if _rsync_fatal "$rc"; then
+      warn "rsync exit $rc — not a transient failure, not retrying"
+      return "$rc"
+    fi
+    [[ $n -ge $SYNC_TRIES ]] && return "$rc"
+    delay=$(( n * 5 )); [[ $delay -gt 30 ]] && delay=30
+    # The exit code goes IN the message. Without it a permissions fault reads
+    # exactly like a dropped connection.
+    printf '  %stransfer interrupted (rsync exit %s, %s/%s) — resuming in %ss%s\n' \
+      "$DIM" "$rc" "$n" "$SYNC_TRIES" "$delay" "$RESET" >&2
+    sleep "$delay"
     n=$((n + 1))
   done
 }
@@ -495,8 +555,8 @@ fi
 # ── 3 ─────────────────────────────────────────────────────────────────────
 stage "Deploy the RTX 4090 — same datacenter, EXISTING volume"
 if _at; then
-say "No upload stage this time. The 109,034 images are already on the volume from"
-say "the v2 run; the arms are 16 MB of labels that point at them."
+say "No upload stage this time. The 54,514 bundle images are already on the volume"
+say "from the v2 run; the arms are 16 MB of labels that point at 43,170 of them."
 printf '\n'
 if [[ -n "${RUNPOD_DATACENTER:-}" ]]; then
   note "From your v2 run, the volume lives in: ${RUNPOD_DATACENTER}"
@@ -526,7 +586,7 @@ write_env GPU_POD_PORT "$GPU_POD_PORT"
 fi
 
 # ── 4 ─────────────────────────────────────────────────────────────────────
-stage "GATE — SSH, the volume, and the images the arms point at"
+stage "GATE — SSH, the volume, and the bundle the arms point at"
 if _at; then
 say "Failing here costs seconds. Failing after setup starts costs a pod session."
 gate "SSH to the GPU pod works" podssh true
@@ -540,16 +600,47 @@ note "If that shows an 'overlay' filesystem, the volume is NOT attached — stop
 note "re-deploy the pod with the network volume mounted."
 
 printf '\n'
+# The repo has to be here BEFORE the bundle check, because the bundle check is a
+# script in the repo. Same order as scripts/train/runpod_wizard.sh: clone at its
+# stage 7, verify at its stage 8.
+say "The bundle check is a repo script, so the repo comes first..."
+gate "repo present on the pod and up to date" podssh \
+  "{ [ -d $REPO_ON_POD/.git ] && git -C $REPO_ON_POD pull --ff-only; } || git clone $REPO_URL $REPO_ON_POD"
+
+printf '\n'
 say "The arms are label files plus text lists of ABSOLUTE image paths, every one"
-say "resolving under /workspace/bundle/images. That directory is the one thing the"
-say "arms cannot carry with them."
-gate "/workspace/bundle/images is present and populated" \
-  podssh "test -d /workspace/bundle/images && [ \"\$(ls /workspace/bundle/images | head -200 | wc -l)\" -ge 200 ]"
-podssh "echo \"    bundle/images: \$(ls /workspace/bundle/images | wc -l) files\"" \
-  || warn "could not count bundle/images (display only)"
-note "Expected ~109,034. If this directory is gone, the volume was wiped and the"
-note "5.1 GB bundle must be re-uploaded first — scripts/train/runpod_wizard.sh"
-note "stages 4-8 do that, and it is a ~2.2 h job."
+say "resolving under /workspace/bundle/images. That bundle is the one thing the"
+say "arms cannot carry with them, and it is shared by every condition."
+printf '\n'
+# USE THE EXISTING VERIFIER. scripts/train/verify_bundle.py is what the v1/v2
+# wizard gated on at its stage 8, and it is strictly better than counting files:
+# it recomputes the name+size digest through the SAME expression that wrote
+# CHECKSUM, reads the expected image count from bundle_meta.json (so nothing is
+# hard-coded), resolves ALL THREE manifests, and separately reports AppleDouble
+# junk -- which ultralytics would otherwise try to load as images.
+#
+# An earlier version of this stage counted `ls bundle/images | wc -l` against
+# "~109,034" and passed on ">= 200 files". Both were wrong. 109,033 is the FILE
+# count the v1/v2 wizard extracts (54,514 images + 54,514 labels + 3 manifests);
+# the image count is 54,514, which bundle_meta.json records as superset_images.
+# The ">= 200" threshold would have passed a half-wiped volume.
+#
+# WHY 54,514 AND NOT 43,170: bundle/ is the SHARED superset uploaded once, and
+# the caps are selections from it (DEC-119) -- cap1500 27,249 entries, cap4500
+# 43,170, cap9000 54,514. The v3 arms are cap4500, so they reference 43,170 of
+# these images. Their own split counts are checked by preflight_v3.py, which
+# requires exactly 30,123 / 6,644 / 6,403. This gate checks the BUNDLE.
+#
+# NOTE ON SCHEMA: verify_bundle.py prints bundle_meta.json's nc (15, the v1
+# schema at build time) and deliberately does not gate on it. It must not. The
+# arms ship their OWN labels/ and read only bundle/images -- bundle/labels is
+# never used by a v3 arm, so its schema is irrelevant here. The nc=13 gate that
+# does matter runs in preflight_v3.py and train.py, against the arm's data.yaml.
+gate "bundle intact: digest matches, counts match, all three manifests resolve" \
+  podssh "cd $REPO_ON_POD && python3 scripts/train/verify_bundle.py --bundle /workspace/bundle"
+note "If that FAILS, the volume lost or corrupted images and the 5.1 GB bundle must"
+note "be re-uploaded — scripts/train/runpod_wizard.sh stages 4-8 do that, and it is"
+note "a ~2.2 h job. Do not train on a bundle that failed this."
 pause "Press Enter to continue"
 fi
 
@@ -602,6 +693,31 @@ chmod +x "$WIZ_TMP/check_upload.sh"
 gate "all three archives match their local sha256 on the pod" \
   "$WIZ_TMP/check_upload.sh" "$STAGING" "$REMOTE_STAGING" "$SSH_KEY" \
   "$GPU_POD_HOST" "$GPU_POD_PORT" "${ARMS[@]}"
+
+# A retried transfer leaves rsync's own temp files behind: `.<name>.XXXXXX` from
+# interrupted in-place writes and `.rsync-partial/` from the resume basis. They
+# are inert -- setup_pod_v3.sh extracts `<arm>.tar.gz` by exact name and never
+# globs -- but on THIS volume they are not free: the MooseFS quota counts
+# directory entries and charges for the bytes behind them (DEC-142), so a few
+# failed 5 MB attempts can sit there costing tens of MB of a 50 GB quota.
+#
+# Listed and removed only on your say-so. They are provably rsync scratch and
+# not data, but nothing on this volume gets deleted silently.
+printf '\n'
+LEFTOVER=$(podssh "ls -A $REMOTE_STAGING 2>/dev/null | grep -E '^\\.' || true" 2>/dev/null || true)
+if [[ -n "${LEFTOVER//[[:space:]]/}" ]]; then
+  say "Leftover rsync scratch in $REMOTE_STAGING from retried transfers:"
+  podssh "du -sh $REMOTE_STAGING/.[!.]* 2>/dev/null | sed 's|^|    |'" || true
+  if confirm "Remove it? (the three verified .tar.gz files are not touched)"; then
+    podssh "rm -rf $REMOTE_STAGING/.rsync-partial $REMOTE_STAGING/.*.tar.gz.* 2>/dev/null; \
+            echo '    remaining:'; ls -A $REMOTE_STAGING | sed 's|^|      |'" \
+      && say "cleaned" || warn "cleanup failed — harmless, it only costs quota"
+  else
+    note "left in place; it costs quota but breaks nothing"
+  fi
+else
+  say "no rsync scratch left behind"
+fi
 fi
 
 # ── 6 ─────────────────────────────────────────────────────────────────────
@@ -651,7 +767,11 @@ note "A surviving labels.cache is a correctness bug, not a stale file: ultralyti
 note "keys it on the image+label PATH LIST, not contents, so re-staged labels under"
 note "identical filenames look valid and it would serve the previous arm's boxes."
 printf '\n'
-say "First, make sure the pod has the code..."
+# Pulled again on purpose, not a leftover from stage 4. Idempotent, and it is
+# what makes START_AT=7 work on a fresh pod -- and what picks up a fix you pushed
+# between the bundle check and here. runpod_wizard.sh pulls inside its stage 12
+# for the same reason.
+say "Make sure the pod has the current code..."
 gate "repo present on the pod and up to date" podssh \
   "{ [ -d $REPO_ON_POD/.git ] && git -C $REPO_ON_POD pull --ff-only; } || git clone $REPO_URL $REPO_ON_POD"
 printf '\n'
@@ -678,14 +798,18 @@ pause "Press Enter to launch"
 podssh "cd $REPO_ON_POD && COMET_API_KEY='${COMET_API_KEY:-}' COMET_PROJECT_NAME='${COMET_PROJECT_NAME:-}' \
         bash scripts/train/run_v3.sh $ARM" || warn "launch returned non-zero — read the output above"
 printf '\n'
-say "Watch it from any terminal:"
+say "Watch it from any terminal — source podenv.sh first, so the commands retry"
+say "instead of hanging when the link drops a packet:"
 printf '\n'
-printf '    ssh -p %s -i %s root@%s "%s/scripts/train/run_v3.sh --status"\n' \
-  "$GPU_POD_PORT" "$SSH_KEY" "$GPU_POD_HOST" "$REPO_ON_POD"
-printf '    ssh -p %s -i %s root@%s "tail -f /workspace/runs_v3/logs/driver.log"\n' \
-  "$GPU_POD_PORT" "$SSH_KEY" "$GPU_POD_HOST"
+printf '    source scripts/train/podenv.sh\n'
+printf '    podssh "%s/scripts/train/run_v3.sh --status"\n' "$REPO_ON_POD"
+printf '    podssh "tail -200 %s/logs/driver.log"\n' "$REMOTE_PROJECT"
 printf '\n'
-note "Or source scripts/train/podenv.sh and use:  podssh \"...\""
+# tail -f is deliberately NOT offered: a long-lived stream is the one thing a
+# lossy path cannot keep alive, and a dropped follow looks like a dead run.
+# Repeated tail -200 tells you the same thing and cannot mislead.
+note "Avoid 'tail -f' over this link — a dropped stream reads as a dead run."
+note "Bare ssh works too, but add:  -o ServerAliveInterval=5 -o ConnectionAttempts=3"
 printf '\n'
 say "The next two stages retrieve the results and terminate the pod."
 printf '\n'
@@ -804,7 +928,7 @@ if [[ "$RETRIEVED_OK" -ne 1 ]]; then
 fi
 warn "TERMINATE, do not Stop. A stopped pod keeps billing for its container disk."
 say "Terminating destroys the container disk. These all survive on the volume:"
-note "  /workspace/bundle            the 109,034 images"
+note "  /workspace/bundle            54,514 images + labels (the shared superset)"
 note "  /workspace/v3p /v3l /v3s     all three arms, still laid out"
 note "  /workspace/runs_v3           markers, logs, result JSONs"
 note "  /workspace/second-vision-ai  the repo, including runs/detect"

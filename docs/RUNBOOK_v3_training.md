@@ -41,9 +41,36 @@ terminating a pod; only a gate can stop you.
 ## 0. Before you start a pod — upload the arms
 
 The three arms are tiny (5.1–5.6 MB each): a flat `labels/` directory plus three text
-files of image paths. The 109,034 images they point at are already on the volume and
-are shared through a single symlink, because the MooseFS quota counts **directory
+files of image paths. The images they point at are already on the volume and are
+shared through a single symlink, because the MooseFS quota counts **directory
 entries**, so materialising images per-arm would cost ~4 GiB each (DEC-142).
+
+### What lives in `bundle/`, and why it is 54,514 and not 43,170
+
+`dataset/bundle/` is the **shared superset**, uploaded once in the v1/v2 run. The caps
+are *selections* from it, nested (DEC-119):
+
+| condition | train | val | test | total entries |
+|---|---:|---:|---:|---:|
+| cap1500 | 14,202 | 6,644 | 6,403 | 27,249 |
+| **cap4500** | **30,123** | **6,644** | **6,403** | **43,170** |
+| cap9000 | 41,467 | 6,644 | 6,403 | 54,514 |
+
+`bundle/images` holds the union — **54,514 images** (`bundle_meta.json`'s
+`superset_images`) — plus 54,514 labels and 3 manifests, so **109,033 files** in total.
+The v3 arms are cap4500 and so reference 43,170 of those images; the other 11,344 are
+cap9000's extras, sitting unused. Both numbers are correct; they count different things.
+
+That distinction caused a false alarm once: the wizard's bundle gate reported
+`bundle/images: 54514 files` against an expected "~109,034" and read as a half-wiped
+volume. It is now gated by `scripts/train/verify_bundle.py` instead, which takes the
+expected count from `bundle_meta.json` and resolves every manifest, so there is
+nothing to mis-transcribe.
+
+`bundle/labels` is the **v1 nc=15** label set and is never read by a v3 arm — each arm
+ships its own `labels/`. `verify_bundle.py` prints `bundle_meta.json`'s `nc: 15` and
+deliberately does not gate on it. The nc=13 check that matters runs in
+`preflight_v3.py` and `train.py`, against the arm's own `data.yaml`.
 
 ```bash
 # on your Mac

@@ -83,11 +83,15 @@ for cand in /opt/homebrew/bin/rsync /usr/local/bin/rsync /usr/bin/rsync; do
   fi
 done
 if [ -n "$RSYNC" ]; then
-  FLAGS=(-a --partial --progress --append-verify)
+  # --no-owner/--no-group: `-a` implies -o/-g, and setting owner on a MooseFS
+  # volume can fail with "chown ... Operation not permitted" (rsync exit 23),
+  # which reports as a failed transfer even though the data arrived. Seen on
+  # euro-3 on 2026-10-18. Everything else -a gives is kept.
+  FLAGS=(-a --no-owner --no-group --partial --progress --append-verify)
   RMODE="GNU rsync ($("$RSYNC" --version 2>&1 | head -1 | awk '{print $3}')) — append-verify resume"
 else
   RSYNC="$OPEN_FALLBACK"
-  FLAGS=(-a --partial --progress)
+  FLAGS=(-a --no-owner --no-group --partial --progress)
   RMODE="openrsync — delta resume (install GNU rsync with 'brew install rsync' for cheaper retries)"
 fi
 [ -n "$RSYNC" ] || { echo "ERROR: no rsync found." >&2; exit 2; }

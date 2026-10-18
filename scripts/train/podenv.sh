@@ -32,6 +32,10 @@ SSH_OPTS=(
   -o ConnectionAttempts=3
   -o ServerAliveInterval=5
   -o ServerAliveCountMax=3
+  # The payloads are already-compressed bytes (.tar.gz up, .pt down), so SSH
+  # compression spends CPU to shrink nothing. upload_bundle.sh sets this for
+  # the same reason on the same link.
+  -o Compression=no
 )
 SSH_TRIES="${SSH_TRIES:-5}"
 
@@ -65,15 +69,67 @@ cpussh() {
 # podsync SRC... DEST — resumable transfer either direction. Use instead of scp:
 # scp restarts from byte zero on a drop, which on this link can lose more than
 # it moves. --partial-dir keeps the partial as a delta basis for the next try.
+# Higher than SSH_TRIES on purpose: a transfer holds the link open much longer
+# than a one-shot command, and every attempt makes forward progress because the
+# partial survives. A 12 MB upload took more than 3 attempts on 2026-10-18.
+SYNC_TRIES="${SYNC_TRIES:-12}"
+
+# Pick GNU rsync explicitly. THIS KNOWLEDGE IS NOT NEW -- it is lifted from
+# scripts/train/upload_bundle.sh, which already probes these three paths and
+# documents why: macOS /usr/bin/rsync is openrsync, which reports "rsync version
+# 2.6.9 compatible" but REJECTS --append-verify and --info=progress2. Calling a
+# bare `rsync` worked only because PATH happened to find Homebrew's GNU build; on
+# a machine without it, podsync would have failed on flags rather than on the link.
+RSYNC_BIN=""
+_openrsync_fallback=""
+for _cand in /opt/homebrew/bin/rsync /usr/local/bin/rsync /usr/bin/rsync; do
+  [ -x "$_cand" ] || continue
+  if "$_cand" --version 2>&1 | head -1 | grep -qi openrsync; then
+    [ -n "$_openrsync_fallback" ] || _openrsync_fallback="$_cand"
+  else
+    RSYNC_BIN="$_cand"; break
+  fi
+done
+[ -n "$RSYNC_BIN" ] || RSYNC_BIN="$_openrsync_fallback"
+[ -n "$RSYNC_BIN" ] || RSYNC_BIN="rsync"
+unset _cand _openrsync_fallback
+
+# NOT -a. `-a` implies -o and -g (preserve owner and group), and setting those
+# fails on this MooseFS volume: "chown ... Operation not permitted", rsync exit
+# 23. Exit 23 means "the DATA moved, some attributes did not" -- so every attempt
+# transferred the whole tarball and then reported failure, and the loop re-sent a
+# file that had already landed, with nothing in the message to distinguish it
+# from packet loss. Observed 2026-10-18; the sha256 gate confirmed all three arms
+# were in fact intact on the pod.
+#
+# No -z either. Every payload here is already compressed -- .tar.gz going up,
+# .pt coming down -- so compressing it again spends CPU to save nothing. Same
+# reason upload_bundle.sh sets ssh Compression=no, which SSH_OPTS now does too.
+#
+# -rlt keeps recursion, symlinks and mtimes, and requests no ownership at all.
+RSYNC_OPTS=(-rlt --partial --partial-dir=.rsync-partial --timeout=60)
+
+# Exit codes that will NEVER succeed on retry -- usage, protocol mismatch, bad
+# file selection. Retrying these just hides the message that says what is wrong.
+_rsync_fatal() { case "$1" in 1|2|3|4|6) return 0 ;; *) return 1 ;; esac; }
+
 podsync() {
-  local n=1
+  local n=1 delay rc
   while :; do
-    rsync -az --partial --partial-dir=.rsync-partial --timeout=60 \
+    "$RSYNC_BIN" "${RSYNC_OPTS[@]}" \
           -e "ssh -p $GPU_POD_PORT -i $SSH_KEY ${SSH_OPTS[*]}" "$@" && return 0
-    [ "$n" -ge "$SSH_TRIES" ] && return 1
-    printf 'transfer interrupted (%s/%s) — resuming in %ss\n' \
-      "$n" "$SSH_TRIES" "$((n * 5))" >&2
-    sleep "$((n * 5))"
+    rc=$?
+    if _rsync_fatal "$rc"; then
+      printf 'rsync exit %s — not a transient failure, not retrying\n' "$rc" >&2
+      return "$rc"
+    fi
+    [ "$n" -ge "$SYNC_TRIES" ] && return "$rc"
+    delay=$(( n * 5 )); [ "$delay" -gt 30 ] && delay=30
+    # The exit code goes in the message. Without it a non-network fault looks
+    # exactly like packet loss and you watch it fail identically twelve times.
+    printf 'transfer interrupted (rsync exit %s, %s/%s) — resuming in %ss\n' \
+      "$rc" "$n" "$SYNC_TRIES" "$delay" >&2
+    sleep "$delay"
     n=$((n + 1))
   done
 }

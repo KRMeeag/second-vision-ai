@@ -7038,3 +7038,103 @@ If exactly one more arm fits, it should be **loose**. Permissive-vs-loose carrie
 real unknown — 22,522 boxes with no second opinion at all — whereas
 strict-vs-permissive concerns 4,314 boxes that permissive already includes, so a
 permissive result above the baseline substantially answers that half.
+
+---
+
+## DEC-145: Transfer Layer Fixed — `rsync -a` Broke on MooseFS, and the Bundle Gate Was Counting the Wrong Thing
+
+**Date:** 2026-10-18
+**Status:** Accepted
+
+### Decision
+
+`podsync` (in both `scripts/train/podenv.sh` and `scripts/train/runpod_v3_wizard.sh`)
+drops `-a` for `-rlt`, picks the GNU rsync binary explicitly, and disables SSH
+compression. The wizard's bundle gate is now `scripts/train/verify_bundle.py` instead
+of a hand-written file count.
+
+### Bug 1 — `rsync -a` cannot write to this volume, and the retry loop hid it
+
+`-a` implies `-o` and `-g`. Setting owner/group on the euro-3 MooseFS mount fails:
+
+```
+rsync: [receiver] chown "/workspace/staging_v3/.v3p.tar.gz.Mvrhtn" failed: Operation not permitted (1)
+rsync error: some files/attrs were not transferred (code 23)
+```
+
+**Exit 23 means the DATA moved and some attributes did not.** Every attempt delivered
+the whole tarball and then reported failure, so the retry loop re-sent a file that had
+already arrived — five times per arm, three arms. The sha256 gate then passed all
+three, which is what proved the transfers were fine all along.
+
+The retry message said only `transfer interrupted (1/5)`, with no exit code, so a
+permissions fault was indistinguishable from the packet loss that is genuinely present
+on this link (36.7%, measured). Two changes beyond the flag fix:
+
+* the **rsync exit code is printed** in the retry message
+* exit codes **1, 2, 3, 4, 6** (usage, protocol, file-selection, unsupported) stop
+  immediately instead of being retried, since they can never succeed
+
+`scripts/train/upload_bundle.sh` carried the same latent exposure in both of its flag
+sets and now passes `--no-owner --no-group`. It had not failed, because the v1/v2
+upload targeted a mount where `chown` succeeded — the exposure was real but unhit.
+
+### Bug 2 — two lessons already solved in `upload_bundle.sh` had not been reused
+
+That script probes `/opt/homebrew`, `/usr/local`, `/usr/bin` to find **GNU** rsync,
+because macOS `/usr/bin/rsync` is **openrsync** (confirmed: `protocol version 29`),
+which reports "2.6.9 compatible" but rejects `--append-verify` and `--info=progress2`.
+`podsync` called a bare `rsync` and worked only because PATH found Homebrew's 3.5.0.
+It now uses the same probe.
+
+It also sets ssh `Compression=no` because the payload is already-compressed bytes.
+`podsync` was passing `-z` **on top of `.tar.gz`**, spending CPU to shrink nothing.
+Both files now set `Compression=no` and omit `-z`.
+
+### Bug 3 — the bundle gate counted files and compared against the wrong number
+
+The wizard's stage 4 reported `bundle/images: 54514 files` against an expected
+"~109,034" and read as a half-wiped volume. Both halves were wrong:
+
+* **109,033 is the FILE count** the v1/v2 wizard extracts — 54,514 images + 54,514
+  labels + 3 manifests. The **image** count is 54,514, recorded in
+  `bundle_meta.json` as `superset_images`.
+* the threshold was `>= 200 files`, which a genuinely half-wiped volume would pass.
+
+**Why 54,514 and not cap4500's 43,170:** `bundle/` is the shared superset uploaded
+once, and the caps are nested selections from it (DEC-119) — cap1500 27,249 entries,
+cap4500 43,170, cap9000 54,514. The v3 arms are cap4500 and reference 43,170 of those
+images; the remaining 11,344 are cap9000's extras, present and unused. Verified
+locally: **0 of cap4500's 43,170 manifest entries are missing** from `bundle/images`.
+
+The gate is now `verify_bundle.py --bundle /workspace/bundle`, which is what
+`runpod_wizard.sh` gated on at its own stage 8. It is strictly better than a count: it
+recomputes the name+size digest through the same expression that wrote `CHECKSUM`,
+takes the expected count from `bundle_meta.json` so nothing is transcribed, resolves
+**all three manifests**, checks train/eval overlap, and separately reports AppleDouble
+junk — which ultralytics would otherwise load as images. The repo clone therefore moves
+ahead of this gate, matching the v1/v2 order (clone at stage 7, verify at stage 8).
+
+`verify_bundle.py` prints `bundle_meta.json`'s `nc: 15` and deliberately does not gate
+on it. It must not: a v3 arm ships its **own** `labels/` and reads only
+`bundle/images`, so `bundle/labels` being the v1 15-class set is irrelevant. The nc=13
+check that matters runs in `preflight_v3.py` and `train.py` against the arm's
+`data.yaml`.
+
+### Also
+
+* Retried transfers leave `.rsync-partial/` and `.<name>.XXXXXX` scratch in
+  `staging_v3`. Inert — `setup_pod_v3.sh` extracts `<arm>.tar.gz` by exact name — but
+  not free, since the MooseFS quota charges per directory entry (DEC-142). Stage 5 now
+  lists it and removes it **only on confirmation**.
+* The unexplained commits (`1dbb5db "commit"`, `d0f8a2e "hello"`) flagged in
+  `docs/HANDOFF_ssh_resilience_changes.md` are authored by the repo owner with
+  hand-typed messages, and there are no active git hooks. Nothing is auto-committing;
+  that concern is closed.
+
+### Verified
+
+`podsync`'s real code path transferred `v3p.tar.gz` at `rc=0` with a matching sha256,
+picking `/opt/homebrew/bin/rsync`; `_rsync_fatal` classifies 1/2/3/4/6 as fatal and
+10/23/30/255 as retryable. All Python compiles; every shell script parses, `podenv.sh`
+under both bash and zsh.
