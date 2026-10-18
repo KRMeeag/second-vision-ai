@@ -7138,3 +7138,90 @@ check that matters runs in `preflight_v3.py` and `train.py` against the arm's
 picking `/opt/homebrew/bin/rsync`; `_rsync_fatal` classifies 1/2/3/4/6 as fatal and
 10/23/30/255 as retryable. All Python compiles; every shell script parses, `podenv.sh`
 under both bash and zsh.
+
+---
+
+## DEC-146: `setup_pod_v3.sh` Trusted Directory Existence — Arms Now Carry a Provenance Stamp
+
+**Date:** 2026-10-18
+**Status:** Accepted
+**Amends:** DEC-144
+
+### What happened
+
+Pre-flight stopped the run before any GPU time with all three arms failing:
+
+```
+--- 5. each arm resolves (from /tmp, per DEC-066) ---
+  FAIL  v3p: data.yaml is not valid YAML: mapping values are not allowed here
+      0: Person
+```
+
+That is the dropped-`names:` bug from DEC-144, which was fixed in
+`stage_v3_arms.py` and verified in the re-staged archives. The archives on the pod
+were correct — their sha256 matched local at the wizard's stage 5. **The arms laid out
+on the volume were not**, because `/workspace/v3{p,l,s}` already existed from a session
+predating the fix and `setup_pod_v3.sh` only tested existence:
+
+```bash
+if [ ! -d "$ROOT/$arm" ]; then ...extract... else ok "$arm: already laid out"; fi
+```
+
+So setup reported **OK on every check** while serving pre-fix labels, and the three
+freshly uploaded, checksum-verified tarballs sat unused in `staging_v3`.
+
+**"The directory exists" says nothing about what is in it.** That is the whole lesson.
+
+### Decision
+
+Each arm now carries `.staged_from_sha256`, the sha256 of the archive it was extracted
+from. Re-extraction is triggered when any of these holds:
+
+1. the directory is absent
+2. **the stamp is missing** — an arm of unknown provenance is not trusted
+3. the stamp differs from the archive currently on disk
+4. the laid-out `data.yaml` fails the repo schema check
+
+Condition 3 is what makes re-staging an arm automatically take effect, which is the
+property that was missing. Condition 2 covers exactly this incident: arms laid down
+before stamps existed are re-extracted once, then stamped.
+
+After extraction the label count is checked against 43,170 — a re-extract overwrites
+by name, so a wrong total means leftovers from a different build.
+
+### The schema check has THREE outcomes, not two
+
+A first version swallowed all output with `2>&1` and treated every failure as
+"mismatch". Fail-safe in direction, but it would re-extract on a transient problem
+and never say why. Now:
+
+* **exit 0** — schema agrees; trust the stamp
+* **exit 1** — schema really differs; re-extract. **A `data.yaml` that does not parse
+  is exit 1**, not exit 2: an unparseable file is a broken arm, and the first draft
+  had `yaml.safe_load` inside the import's `try`, which classified the dropped-`names:`
+  bug as "could not evaluate" and would have **left the bad arm in place** — the very
+  failure this check exists to catch.
+* **exit 2** — the check could not run (import failure, missing repo root). Reported as
+  a WARN, falls back to the stamp, and pre-flight re-checks regardless.
+
+### Verified
+
+The shipped decision block was extracted and exercised directly, all six branches:
+
+| case | result |
+|---|---|
+| arm absent | `need=1` not present on the volume |
+| extracted, no stamp | `need=1` no provenance stamp |
+| wrong stamp | `need=1` staged from a different archive (`deadbeef != 70ac81e4095b`) |
+| correct stamp, good `data.yaml` | `need=0` |
+| correct stamp, `names:` dropped | `need=1` does not parse: ScannerError |
+| correct stamp, `nc: 14`, parseable | `need=1` nc=14 names=[...] |
+| correct stamp, stray `path:` key | `need=1` carries a 'path' key (DEC-066) |
+| good file, import broken | `need=0` + WARN, falls back to the stamp |
+
+### What this says about the gate chain
+
+Pre-flight caught what setup missed, and nothing was spent — defence in depth working
+as designed. But setup reporting OK on a broken arm is a failure of its own, because
+its PASS is what the wizard gates on before launching. Both layers now check content;
+only pre-flight did before.

@@ -110,16 +110,107 @@ else bad "CUDA missing or ultralytics is not $PIN -- the arms would not be compa
 head_ "6. Lay out the three arms on the volume"
 # Each arm is a symlink+txt dataset root (DEC-142: MooseFS counts directory
 # entries, so materialising 43,170 images per arm would cost ~4 GiB each).
+# "The directory exists" is NOT "the directory is correct". An earlier version of
+# this script extracted only when $ROOT/$arm was absent, and reported
+# "already laid out" otherwise. On 2026-10-18 that left three arms staged before
+# a data.yaml bug was fixed -- the freshly uploaded, verified tarballs sat unused
+# in staging_v3 while setup reported OK on every check, and pre-flight was what
+# finally caught it. Existence is the one thing that says nothing about content.
+#
+# So each arm now carries a PROVENANCE STAMP: the sha256 of the archive it was
+# extracted from. Re-extract when the stamp is missing, differs from the archive
+# on disk, or the laid-out data.yaml does not match the repo schema. That makes
+# re-staging an arm automatically take effect, which is the behaviour the stamp
+# exists to guarantee.
 for arm in "${ARMS[@]}"; do
+    tgz="$STAGING/$arm.tar.gz"
+    stamp="$ROOT/$arm/.staged_from_sha256"
+    want=""; have=""
+    [ -f "$tgz" ] && want=$(sha256sum "$tgz" 2>/dev/null | cut -d' ' -f1)
+    [ -f "$stamp" ] && have=$(cat "$stamp" 2>/dev/null | tr -d '[:space:]')
+
+    need=0; why=""
     if [ ! -d "$ROOT/$arm" ]; then
-        if [ -f "$STAGING/$arm.tar.gz" ]; then
-            tar xzf "$STAGING/$arm.tar.gz" -C "$ROOT" && ok "$arm: extracted from $STAGING/$arm.tar.gz"
+        need=1; why="not present on the volume"
+    elif [ -z "$have" ]; then
+        need=1; why="no provenance stamp -- cannot tell which archive built it"
+    elif [ "$have" != "$want" ]; then
+        need=1; why="staged from a different archive (${have:0:12} != ${want:0:12})"
+    else
+        # Three outcomes, not two. Swallowing every error and treating it as
+        # "mismatch" would re-extract on a transient problem and never say why.
+        #   0 = schema agrees          -> trust the stamp
+        #   1 = schema really differs  -> re-extract
+        #   2 = check could not run    -> report it, fall back to the stamp
+        schema_err=$(YOLO_CONFIG_DIR="$ROOT/.ultralytics" \
+            python3 - "$ROOT/$arm/data.yaml" "$REPO" 2>&1 <<'PY'
+import sys, yaml
+from pathlib import Path
+# The split matters. An IMPORT failure says nothing about the arm -- it is a
+# broken environment, exit 2. A failure to PARSE the arm's own data.yaml is the
+# arm being broken, exit 1: that is precisely the dropped-`names:` bug, and
+# classifying it as "could not evaluate" would leave the bad arm in place.
+try:
+    sys.path.insert(0, sys.argv[2])
+    from scripts.utils.config_loader import CANONICAL_NAMES, EXPECTED_NC
+except Exception as e:
+    print(f"environment: {type(e).__name__}: {e}")
+    sys.exit(2)
+try:
+    d = yaml.safe_load(Path(sys.argv[1]).read_text(encoding="utf-8"))
+except Exception as e:
+    print(f"data.yaml does not parse: {type(e).__name__}: {str(e).splitlines()[0]}")
+    sys.exit(1)
+if not isinstance(d, dict):
+    print(f"data.yaml is not a mapping (got {type(d).__name__})")
+    sys.exit(1)
+try:
+    names = [d["names"][i] for i in sorted(d["names"])]
+except Exception as e:
+    print(f"data.yaml has no usable 'names': {type(e).__name__}: {e}")
+    sys.exit(1)          # this IS a bad arm -- the dropped-names bug looks like this
+if names != CANONICAL_NAMES or d.get("nc") != EXPECTED_NC:
+    print(f"nc={d.get('nc')} names={names}")
+    sys.exit(1)
+if "path" in d:
+    print("carries a 'path' key (DEC-066 forbids it)")
+    sys.exit(1)
+sys.exit(0)
+PY
+)
+        schema_rc=$?
+        if [ "$schema_rc" -eq 1 ]; then
+            need=1; why="laid-out data.yaml does not match the repo schema: $schema_err"
+        elif [ "$schema_rc" -eq 2 ]; then
+            warn "$arm: could not evaluate the laid-out schema ($schema_err)"
+            warn "$arm: trusting the provenance stamp instead; pre-flight will re-check"
+        fi
+    fi
+
+    if [ "$need" -eq 1 ]; then
+        if [ ! -f "$tgz" ]; then
+            bad "$arm: needs (re)staging -- $why -- but $tgz is not here. Upload it."
+            continue
+        fi
+        warn "$arm: re-extracting -- $why"
+        if tar xzf "$tgz" -C "$ROOT"; then
+            printf '%s\n' "$want" > "$stamp"
+            ok "$arm: extracted from $tgz (stamp ${want:0:12})"
         else
-            bad "$arm: neither $ROOT/$arm nor $STAGING/$arm.tar.gz exists -- upload the tarball"
+            bad "$arm: tar failed on $tgz"
             continue
         fi
     else
-        ok "$arm: already laid out"
+        ok "$arm: already laid out from this archive (stamp ${have:0:12})"
+    fi
+
+    # Count after extraction, not before. A re-extract over an older tree
+    # overwrites by name; a wrong total means leftovers from a different build.
+    n_lab=$(ls "$ROOT/$arm/labels" 2>/dev/null | wc -l | tr -d ' ')
+    if [ "$n_lab" = "43170" ]; then
+        ok "$arm: 43,170 label files"
+    else
+        bad "$arm: $n_lab label files, expected 43,170 -- leftovers from another build?"
     fi
 
     # The symlink is created HERE and never archived. DEC-135 forbade symlinks
