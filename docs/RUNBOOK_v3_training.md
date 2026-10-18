@@ -13,8 +13,28 @@ the agreement boundary, where tier D/E boxes that v2 corroborated get included. 
 and loose bracket it on either side. If only one run happens, this is the one worth
 having.
 
-The whole procedure is **two commands on the pod**. Everything else here is reference
-for when something goes wrong.
+---
+
+## Run the wizard
+
+```bash
+scripts/train/runpod_v3_wizard.sh
+```
+
+Ten stages, each one screen, with gates that refuse to advance until the check
+passes. It opens every RunPod and Comet URL, captures the pod IP and your Comet key
+into `.env.runpod`, uploads and checksum-verifies all three arms, runs
+`setup_pod_v3.sh` and launches the run — then, after training, pulls the results down
+and **refuses to let you terminate the pod until they are verified on this laptop**.
+
+```bash
+START_AT=9 scripts/train/runpod_v3_wizard.sh    # come back for retrieve + terminate
+ARM=v3l START_AT=3 scripts/train/runpod_v3_wizard.sh   # add an arm on a new pod
+```
+
+The rest of this document is the same procedure by hand, and the reference for when a
+gate fails. **Prefer the wizard** — a runbook can tell you to pull results before
+terminating a pod; only a gate can stop you.
 
 ---
 
