@@ -182,7 +182,9 @@ def main():
 
     if APPLY:
         print(f"\n  On the pod, for each arm:")
-        print(f"    tar xzf <arm>.tar.gz -C {REMOTE_ROOT}")
+        # --no-same-owner: extracting as root, tar tries to restore THIS machine's
+        # uid/gid and MooseFS refuses the chown (see post_training_v2.sh:70).
+        print(f"    tar xzf <arm>.tar.gz --no-same-owner -C {REMOTE_ROOT}")
         print(f"    ln -s {REMOTE_IMAGES} {REMOTE_ROOT}/<arm>/images")
         print(f"  The symlink is created THERE, never archived (DEC-135).")
     else:

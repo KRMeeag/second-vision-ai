@@ -382,15 +382,27 @@ sec("9. no stale labels.cache")
 # Ultralytics hashes the image+label PATH LIST, not the contents. Re-staging an arm
 # rewrites label CONTENTS under identical filenames, so a surviving cache looks valid
 # and would serve the PREVIOUS arm's boxes for the whole run.
-found = []
+# Scoped to the arms being TRAINED. A cache under an arm nobody is training today
+# is harmless, and hard-failing on it would block the second arm entirely: after
+# v3p trains it legitimately leaves /workspace/v3p/labels.cache, and since this
+# script verifies EVERY staged arm, `run_v3.sh v3l` would then refuse to start.
+hot = TRAIN or ARMS
+hot_found, cold_found = [], []
 for arm in ARMS:
-    found += [str(p) for p in (ROOT / arm).glob("*.cache") if p.is_file()]
-if found:
-    bad("labels.cache present -- ultralytics would reuse boxes cached before the "
-        "labels were rewritten. setup_pod_v3.sh renames these aside:\n        "
-        + "\n        ".join(found))
+    for c in (ROOT / arm).glob("*.cache"):
+        if c.is_file():
+            (hot_found if arm in hot else cold_found).append(str(c))
+if hot_found:
+    bad("labels.cache present for an arm being trained -- ultralytics keys that "
+        "cache on the image+label PATH LIST and on total size, never on contents "
+        "(utils.py get_hash), so labels rewritten under identical filenames look "
+        "valid to it. setup_pod_v3.sh renames these aside:\n        "
+        + "\n        ".join(hot_found))
 else:
-    ok("no .cache files under any arm")
+    ok(f"no .cache under the arm(s) being trained ({' '.join(hot)})")
+if cold_found:
+    print(f"  INFO  {len(cold_found)} .cache file(s) under arms not being trained "
+          f"today -- harmless, left alone", flush=True)
 
 # ── 10. writable headroom ───────────────────────────────────────────────────────
 sec("10. volume headroom")

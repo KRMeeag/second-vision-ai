@@ -387,7 +387,7 @@ warn "network volume; a repo anywhere else takes runs/ down with the pod."
 say "Extracting 109,033 files onto network storage — metadata-heavy, so this can"
 say "take several minutes. That is normal, not a hang."
 podssh "$CPU_POD_HOST" "$CPU_POD_PORT" \
-  "cd /workspace && tar -xf bundle.tar && echo extracted"
+  "cd /workspace && tar -xf bundle.tar --no-same-owner && echo extracted"
 say "Cloning the repo..."
 podssh "$CPU_POD_HOST" "$CPU_POD_PORT" \
   "cd /workspace && { [ -d second-vision-ai ] && git -C second-vision-ai pull --ff-only || git clone ${REPO_URL}; }"

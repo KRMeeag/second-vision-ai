@@ -193,13 +193,46 @@ PY
             continue
         fi
         warn "$arm: re-extracting -- $why"
-        if tar xzf "$tgz" -C "$ROOT"; then
-            printf '%s\n' "$want" > "$stamp"
-            ok "$arm: extracted from $tgz (stamp ${want:0:12})"
-        else
-            bad "$arm: tar failed on $tgz"
+        # --no-same-owner is REQUIRED here, not defensive. Extracting as root,
+        # GNU tar restores the archived uid/gid -- 501/50, this Mac's ids, baked
+        # in when stage_v3_arms.py built the archive -- and chown is refused on
+        # the MooseFS volume. Every byte still extracts; tar just exits non-zero
+        # after printing one warning per file, which this script then read as a
+        # failed extraction, skipped the stamp, and re-extracted-and-failed on
+        # every retry. scripts/train/post_training_v2.sh:70 already solved this
+        # with the same flag; it should have been copied the first time.
+        tar_err=$(tar xzf "$tgz" --no-same-owner -C "$ROOT" 2>&1); tar_rc=$?
+        if [ "$tar_rc" -ne 0 ]; then
+            # Non-zero is not proof of damage. The AUTHORITY IS THE CONTENT --
+            # same lesson as rsync exit 23 (DEC-145) -- so report it and let the
+            # validation below decide.
+            warn "$arm: tar exited $tar_rc; checking whether the content is intact anyway"
+            printf '%s\n' "$tar_err" | tail -3 | sed 's/^/          /'
+        fi
+
+        # Stamp ONLY after the content validates. A stamp on a bad extraction is
+        # worse than no stamp: it would make every later run skip the re-extract.
+        n_lab=$(ls "$ROOT/$arm/labels" 2>/dev/null | wc -l | tr -d ' ')
+        if [ "$n_lab" != "43170" ]; then
+            bad "$arm: $n_lab label files after extraction, expected 43,170 -- not stamping"
             continue
         fi
+        if ! YOLO_CONFIG_DIR="$ROOT/.ultralytics" python3 - \
+                "$ROOT/$arm/data.yaml" "$REPO" >/dev/null 2>&1 <<'PY'
+import sys, yaml
+from pathlib import Path
+sys.path.insert(0, sys.argv[2])
+from scripts.utils.config_loader import CANONICAL_NAMES, EXPECTED_NC
+d = yaml.safe_load(Path(sys.argv[1]).read_text(encoding="utf-8"))
+names = [d["names"][i] for i in sorted(d["names"])]
+sys.exit(0 if names == CANONICAL_NAMES and d["nc"] == EXPECTED_NC and "path" not in d else 1)
+PY
+        then
+            bad "$arm: data.yaml still does not match the repo schema after extraction -- not stamping"
+            continue
+        fi
+        printf '%s\n' "$want" > "$stamp"
+        ok "$arm: extracted and validated (43,170 labels, nc=13, stamp ${want:0:12})"
     else
         ok "$arm: already laid out from this archive (stamp ${have:0:12})"
     fi

@@ -66,11 +66,48 @@ if [ "${POSITIONAL[0]:-}" = "--status" ]; then
     echo; echo "=== results ==="
     python3 "$HERE/compare_v3.py" "$PROJECT" 2>/dev/null || echo "(none yet)"
     echo; echo "=== running? ==="
-    pgrep -af "train_one_arm.py|scripts/train/train.py" || echo "  no training process"
-    echo; echo "=== GPU ==="
-    command -v nvidia-smi >/dev/null && \
+    # A PID FILE, not a pgrep pattern. Two reasons pattern matching is wrong here:
+    #
+    #   1. SELF-MATCH. pgrep -f matches full command lines, and this process's own
+    #      command line is ".../run_v3.sh --status" -- so a pattern containing
+    #      run_v3.sh reports the status check itself as a live run. The same
+    #      mistake once killed an SSH session on this project via `pkill -f`.
+    #   2. PLATFORM. `pgrep -af` means "list the full command line" on Linux
+    #      procps and is not a valid option on macOS, so the behaviour of any
+    #      pattern here cannot be reasoned about from a laptop.
+    #
+    # The detaching parent records the driver's PID below. `kill -0` asks the
+    # kernel directly, and /proc confirms the PID was not recycled onto something
+    # unrelated. No patterns, no ambiguity.
+    if [ -f "$PROJECT/driver.pid" ]; then
+        dpid=$(cat "$PROJECT/driver.pid" 2>/dev/null | tr -d '[:space:]')
+        if [ -n "$dpid" ] && kill -0 "$dpid" 2>/dev/null; then
+            dcmd=$(tr '\0' ' ' < "/proc/$dpid/cmdline" 2>/dev/null || echo "?")
+            case "$dcmd" in
+                *run_v3*) echo "  driver ALIVE  pid=$dpid  $dcmd" ;;
+                *)        echo "  pid $dpid is alive but is NOT the driver (recycled): $dcmd"
+                          echo "  -> treat the run as stopped" ;;
+            esac
+        else
+            echo "  driver not running (pid file names ${dpid:-<empty>}, which is gone)"
+        fi
+    else
+        echo "  no driver.pid -- never launched, or launched before this was added"
+    fi
+    echo; echo "=== anything holding the GPU? ==="
+    # The authoritative check. utilization can read 0% between batches; a process
+    # holding VRAM cannot hide here.
+    if command -v nvidia-smi >/dev/null; then
+        nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv,noheader \
+            || true
+        nvidia-smi --query-compute-apps=pid --format=csv,noheader | grep -q . \
+            || echo "  no process holding GPU memory"
+        echo; echo "=== GPU ==="
         nvidia-smi --query-gpu=utilization.gpu,memory.used,memory.total,temperature.gpu \
-                   --format=csv,noheader || echo "  (no nvidia-smi)"
+                   --format=csv,noheader
+    else
+        echo "  (no nvidia-smi)"
+    fi
     exit 0
 fi
 
@@ -99,6 +136,11 @@ fi
 if [ "${V3_DETACHED:-}" != "1" ]; then
     export V3_DETACHED=1
     say "launching detached; follow with: tail -f $LOGS/driver.log"
+    # NOT `$!`. setsid FORKS when it is already a process-group leader -- which
+    # is exactly the case for a background job under job control -- so `$!` is the
+    # PID of a setsid wrapper that exits immediately, and `kill -0` on it reports
+    # the driver as dead one second after launch. The detached child records its
+    # own $$ instead (below), which is correct however setsid behaves.
     setsid nohup "$0" --no-setup "$@" >>"$LOGS/driver.log" 2>&1 </dev/null &
     sleep 1
     echo
@@ -107,6 +149,14 @@ if [ "${V3_DETACHED:-}" != "1" ]; then
     echo "  live log : tail -f $LOGS/driver.log"
     exit 0
 fi
+
+# From here on we ARE the detached driver, so it owns the pid file for its whole
+# life. One trap covers every exit path -- normal completion, a failed pre-flight,
+# a failed smoke run -- so a stopped run never reports as alive. This must not be
+# set in the launcher: that process exits a second after detaching and would
+# delete the file it had just written.
+printf '%s\n' "$$" > "$PROJECT/driver.pid"
+trap 'rm -f "$PROJECT/driver.pid"' EXIT
 
 ARMS=("${POSITIONAL[@]}")
 [ ${#ARMS[@]} -eq 0 ] && ARMS=(v3p)

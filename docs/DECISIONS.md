@@ -7225,3 +7225,149 @@ Pre-flight caught what setup missed, and nothing was spent — defence in depth 
 as designed. But setup reporting OK on a broken arm is a failure of its own, because
 its PASS is what the wizard gates on before launching. Both layers now check content;
 only pre-flight did before.
+
+### Addendum, 2026-10-18 — `tar` had the identical ownership problem, and a fix already existed
+
+The re-extract then failed on every label file:
+
+```
+tar: v3p/labels/dataset_ninja_pothole_detection__potholes348.txt:
+     Cannot change ownership to uid 501, gid 50: Operation not permitted
+```
+
+Same root cause as DEC-145's `rsync -a`: extracting **as root**, GNU tar restores the
+archived uid/gid — 501/50, the Mac's ids, baked in when `stage_v3_arms.py` built the
+archive — and MooseFS refuses the `chown`. Every byte extracts correctly; tar prints
+one warning per file and exits non-zero.
+
+That non-zero was then read as a failed extraction, so no stamp was written, so the
+next run re-extracted and failed again — a loop, on archives that were fine.
+
+**`scripts/train/post_training_v2.sh:70` already passed `--no-same-owner` for exactly
+this reason.** The fix existed in the repo and was not copied when new tar code was
+written. Every extraction site now carries it: `setup_pod_v3.sh`,
+`runpod_wizard.sh`'s `bundle.tar` extraction (same latent exposure, never hit because
+its call was not gated), and the hint `stage_v3_arms.py` prints.
+
+### The structural fix: the authority is the content, not the tool's exit code
+
+This is the second time a tool reported failure on an operation that had in fact
+succeeded (rsync exit 23, now tar). So extraction no longer branches on tar's status
+at all. It:
+
+1. runs `tar xzf --no-same-owner`, capturing rc and stderr
+2. if rc is non-zero, **reports it and continues** — "checking whether the content is
+   intact anyway"
+3. validates the **label count is exactly 43,170** and the extracted `data.yaml`
+   matches the repo schema
+4. writes the provenance stamp **only if both pass**
+
+Step 4 is the load-bearing one. A stamp on a bad extraction is worse than no stamp,
+because every later run would skip the re-extract and trust it.
+
+Verified by extracting the shipped block and running it: a clean archive gives
+`extracted and validated (43,170 labels, nc=13, stamp 70ac81e4095b)` with the stamp
+matching the archive's sha256; removing one label file gives
+`43169 label files after extraction, expected 43,170 -- not stamping` and **no stamp
+is written**.
+
+### Also
+
+`run_v3.sh --status` grepped only for `train_one_arm.py|scripts/train/train.py`, so it
+could not see the driver itself — and `run_v3.sh` is `setsid`-detached precisely so it
+survives an SSH drop. A driver stuck between phases would have reported "no training
+process". It now matches the driver and every phase script, and reports
+`nvidia-smi --query-compute-apps`, which is authoritative about anything holding VRAM
+(utilization can read 0% between batches; a process holding memory cannot hide).
+
+---
+
+## DEC-147: The v3 Arm Layout Verified Against Real Ultralytics 8.4.118 — Plus 2,439 Background Images Nobody Had Counted
+
+**Date:** 2026-10-18
+**Status:** Accepted
+
+### Why
+
+The v3 arms use a layout **no previous run has used**. v1 and v2 went through
+`materialize_condition.py`, which builds `<split>/{images,labels}/` with one link per
+file. The v3 arms are a single shared `images` symlink plus one flat `labels/`
+directory and three `.txt` path listings, because the MooseFS quota counts directory
+entries (DEC-142). "It should work" was the only evidence behind it, and this project
+has spent too much of this session on things that should have worked.
+
+So the pod layout was replicated locally — `tar xzf --no-same-owner`, the `images`
+symlink, the real `.txt` listings with only the root rewritten — and loaded with the
+**exact pinned ultralytics 8.4.118**, from `/tmp` (DEC-066).
+
+### Result: the layout is sound
+
+| split | images enumerated | label entries | boxes | corrupt |
+|---|---:|---:|---:|---:|
+| train | 30,123 | 30,123 | **118,279** | 0 |
+| val | 6,644 | 6,644 | **24,561** | 0 |
+| test | 6,403 | 6,403 | **24,471** | 0 |
+
+Box counts match the recorded figures exactly, which proves the *right* labels are
+read rather than merely that some file was found. 60 sampled images were then pushed
+through the full pipeline to `(3, 640, 640)` tensors — **0 failures** — and a second
+instantiation loaded `labels.cache` in 0.0 s, so the cache round-trips.
+
+### Four facts read out of the installed source, not assumed
+
+1. **Uppercase extensions are safe.** `bundle/images` holds 304 `.JPEG` and 180 `.JPG`
+   against a lowercase-only `IMG_FORMATS`. `base.py get_img_files` filters on
+   `x.rpartition(".")[-1].lower() in IMG_FORMATS` — it lowercases. Confirmed twice:
+   from source, and by decoding 20 uppercase files (84 exist in the test split alone).
+2. **A `.txt` listing of absolute paths passes through untouched.** Only entries
+   starting `./` are rewritten relative to the listing's parent.
+3. **`img2label_paths` replaces the LAST `/images/` with `/labels/`** and swaps the
+   extension for `.txt`. The arms contain exactly one `/images/`, so the flat
+   `labels/` directory resolves.
+4. **`get_hash` hashes total file SIZE and the concatenated PATHS — never contents**
+   (`utils.py`). This pins down the stale-cache hazard exactly: labels rewritten under
+   identical filenames with the same total size produce the same hash and a cache is
+   served as valid. It is why `setup_pod_v3.sh` moves caches aside and pre-flight
+   refuses to run past one.
+
+### One accepted consequence of the flat layout
+
+`cache_path = Path(label_files[0]).parent.with_suffix(".cache")` (`dataset.py:282`),
+so **all three splits resolve to the same `/workspace/<arm>/labels.cache`** — unlike
+the proven `<split>/labels.cache` layout, which `materialize_condition.py`'s docstring
+already recorded. It is **thrash, not corruption**: the hash covers each split's own
+path list, so a mismatch rescans rather than serving the wrong split. Cost is one
+extra scan of ~30k labels, once. The layout is NOT being changed for it — the flat
+directory is what keeps the arms at 5 MB instead of 4 GiB of quota each.
+
+### Finding: 2,439 background images, and the documented premise was false
+
+The loader reported "377 backgrounds" for test, while `evaluate.py` stated *"the
+dataset contains zero empty-label (background) images"*. Counted directly:
+
+| split | v2b nc=14 | v3 nc=13 |
+|---|---:|---:|
+| train | 888 | **1,716** |
+| val | 196 | **346** |
+| test | 216 | **377** |
+
+**v2b already carried 1,300.** The claim in `evaluate.py` was stale before v3 began.
+Dropping Pole added 1,247 more, and **all 1,247 held only Pole boxes — none lost a box
+of any other class**, so the mechanism is fully accounted for: an image whose sole
+annotation was a pole has nothing left.
+
+DEC-120's actual decision — do not ADD background images, use the background column
+instead — stands. The false claim has been removed from `evaluate.py` and replaced
+with these counts and the consequence: the 377 background test images contribute
+false-positive opportunities and zero ground truth, so they can only depress
+precision, never lift recall. Nothing is invalidated — val and test are byte-identical
+across all three arms — but the number's character must be stated correctly in the
+write-up.
+
+### Bug fixed: pre-flight would have blocked the second arm
+
+Pre-flight verifies every staged arm (DEC-144 addendum) and hard-failed on any
+`*.cache`. After v3p trains it legitimately leaves `/workspace/v3p/labels.cache`, so
+`run_v3.sh v3l` would have refused to start. The cache check is now scoped to the arms
+being **trained** (`--train`); a cache under an arm nobody is training today is
+reported as INFO and left alone.

@@ -66,9 +66,27 @@ All three were read out of the installed ultralytics 8.4.118, not inferred.
 
 WHY FALSE POSITIVES COME FROM THE CONFUSION MATRIX AT ALL
 ---------------------------------------------------------
-The dataset contains zero empty-label (background) images, and DEC-120 declined to
-add any rather than disturb the pool every nesting guarantee is built on. The agreed
-substitute is the background column. `utils/metrics.py` indexes `matrix[detected, truth]`:
+DEC-120 declined to ADD background images rather than disturb the pool every nesting
+guarantee is built on, and the agreed substitute is the background column.
+
+That decision is still in force, but the claim that once accompanied it here -- "the
+dataset contains zero empty-label (background) images" -- is NOT TRUE and should not
+be repeated in the write-up. Counted directly (2026-10-18):
+
+    split   v2b nc=14   v3 nc=13
+    train         888       1,716
+    val           196         346
+    test          216         377
+
+v2b already carried 1,300 such images. Dropping Pole (DEC-143) added 1,247 more, and
+every one of those held ONLY Pole boxes -- an image whose sole annotation was a pole
+has nothing left. None lost a box of any other class.
+
+This does not invalidate anything: val and test are byte-identical across all three
+arms, so the FP-per-instance figure stays comparable between them and against the v2
+baseline on the same images. But the 377 background images in test contribute false-
+positive opportunities and zero ground truth, so they can only depress precision,
+never lift recall -- state that when reporting the number. `utils/metrics.py` indexes `matrix[detected, truth]`:
 
     matrix[dc, nc] += 1   # FP -- predicted class dc, ground truth background
     matrix[nc, gc] += 1   # FN -- predicted background, ground truth class gc
